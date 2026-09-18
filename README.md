@@ -292,7 +292,7 @@ the server/AnkiConnect/Downloads proxying, sentence mining), run with Node's bui
 runner against a `vm` sandbox that stands in for the WebExtension APIs.
 
 ```
-node --test "addon/tests/**/*.test.js"
+node --test addon/tests/*.test.js
 ```
 
 ## Acknowledgements

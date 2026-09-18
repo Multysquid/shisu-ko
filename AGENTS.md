@@ -71,7 +71,7 @@ Automated tests (also run in CI via `.github/workflows/tests.yml`, no GPU/networ
 
 ```
 pip install -r server/requirements-test.txt && python -m pytest server/tests
-node --test "addon/tests/**/*.test.js"
+node --test addon/tests/*.test.js
 ```
 
 `server/tests/_serverlib.py` loads `server.py` the way this file already recommends above

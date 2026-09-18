@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: ["20", "22"]
+        node-version: ["22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,4 +40,4 @@ jobs:
         run: |
           for f in addon/*.js; do node --check "$f"; done
       - name: Run extension tests
-        run: node --test "addon/tests/**/*.test.js"
+        run: node --test addon/tests/*.test.js
