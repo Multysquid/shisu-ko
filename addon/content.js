@@ -636,6 +636,9 @@
   }
 
   function seekTo(video, t) {
+    // Setting currentTime to the position the media is already at fires no "seeked" event, so
+    // the wait below would only end at the fallback timeout. Nothing to do in that case.
+    if (Math.abs((Number(video.currentTime) || 0) - t) < 0.05) return Promise.resolve();
     return new Promise((resolve) => {
       let done = false;
       const finish = () => {
