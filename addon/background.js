@@ -9,25 +9,7 @@
  *     or save both to the Downloads folder.
  */
 
-const DEFAULT_SETTINGS = Object.freeze({
-  enabled: true,
-  serverUrl: "http://127.0.0.1:8790",
-  fontScale: 1.0,
-  pauseOnHover: true,
-  lingerSeconds: 3,
-  showTranscript: false,
-  hideNativeCaptions: false,
-  showStatus: true,
-  // sentence mining
-  mineTarget: "anki", // "anki" (newest card via AnkiConnect) or "download"
-  mineFallbackDownload: true,
-  ankiUrl: "http://127.0.0.1:8765",
-  ankiImageField: "Picture",
-  ankiAudioField: "SentenceAudio",
-  ankiSentenceField: "",
-  clipPaddingMs: 200,
-  clipFormat: "mp3",
-});
+const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
 
 const REQUEST_TIMEOUT_MS = 10000;
 

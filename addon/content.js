@@ -18,16 +18,7 @@
   if (window.__shisukoLoaded) return;
   window.__shisukoLoaded = true;
 
-  const DEFAULT_SETTINGS = {
-    enabled: true,
-    serverUrl: "http://127.0.0.1:8790",
-    fontScale: 1.0,
-    pauseOnHover: true,
-    lingerSeconds: 3,
-    showTranscript: false,
-    hideNativeCaptions: false,
-    showStatus: true,
-  };
+  const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
 
   const SYNC_INTERVAL_MS = 1000;
   const RENDER_INTERVAL_MS = 200;

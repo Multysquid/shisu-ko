@@ -24,6 +24,7 @@
   ],
   "background": {
     "scripts": [
+      "settings.js",
       "background.js"
     ]
   },
@@ -35,6 +36,7 @@
         "*://youtube.com/*"
       ],
       "js": [
+        "settings.js",
         "content.js"
       ],
       "css": [

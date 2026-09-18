@@ -1,23 +1,7 @@
 "use strict";
 
-const FIELDS = [
-  "enabled",
-  "pauseOnHover",
-  "showTranscript",
-  "hideNativeCaptions",
-  "showStatus",
-  "fontScale",
-  "lingerSeconds",
-  "mineTarget",
-  "mineFallbackDownload",
-  "ankiUrl",
-  "ankiImageField",
-  "ankiAudioField",
-  "ankiSentenceField",
-  "clipPaddingMs",
-  "clipFormat",
-  "serverUrl",
-];
+// Every setting has an input with the same id in popup.html (checked by addon/tests/settings.test.js).
+const FIELDS = Object.keys(SHISUKO_DEFAULT_SETTINGS);
 
 let saveTimer = null;
 

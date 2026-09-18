@@ -26,8 +26,9 @@ sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner
   script. youtube.com enforces Trusted Types; only `textContent`/`createElement` style DOM code works.
 - The extension uses the `browser.*` promise API (Firefox). No `chrome.*` callbacks.
 - All overlay classes and flags use the `shisuko-` / `__shisuko` prefix.
-- `DEFAULT_SETTINGS` is duplicated in `addon/background.js`, `addon/content.js` and the popup
-  field list. Keep them in sync when adding a setting.
+- Settings defaults live once in `addon/settings.js` (`SHISUKO_DEFAULT_SETTINGS`), loaded before
+  `background.js`, `content.js` and `popup.js`. To add a setting, add it there and add the popup
+  input with the same id; `addon/tests/settings.test.js` enforces both.
 - The server listens on `127.0.0.1:8790`. Port 8765 belongs to AnkiConnect; never use it.
 - The server never exposes anything beyond `/health`, `/sync`, `/clip`, `/sessions`; it binds to
   localhost and validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`.
