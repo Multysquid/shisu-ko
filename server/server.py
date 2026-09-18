@@ -177,6 +177,7 @@ class Session:
     last_sync: float = field(default_factory=time.time)
     busy: Optional[list] = None
     fetching: bool = False
+    error_at: float = 0.0  # time.time() of the last failed fetch; drives the automatic retry
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def cache_path(self) -> Path:
@@ -322,6 +323,7 @@ class Fetcher:
             with s.lock:
                 s.status = "error"
                 s.error = friendly_error(exc)
+                s.error_at = time.time()
         finally:
             with s.lock:
                 s.fetching = False
@@ -590,8 +592,11 @@ class App:
                 self.load_cache(s)
                 self.sessions[video_id] = s
         with s.lock:
-            need_fetch = s.status in ("pending", "evicted") and not s.fetching
+            retry_due = s.status == "error" and time.time() - s.error_at >= self.args.retry_after
+            need_fetch = (s.status in ("pending", "evicted") or retry_due) and not s.fetching
             if need_fetch:
+                if retry_due:
+                    log.info("[%s] retrying the audio fetch after an earlier failure", video_id)
                 s.fetching = True
         if need_fetch:
             threading.Thread(target=self.fetcher.fetch, args=(s,), daemon=True, name=f"fetch-{video_id}").start()
@@ -933,6 +938,7 @@ def parse_args(argv=None):
     p.add_argument("--max-cue-chars", type=int, default=42)
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
+    p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically")
     p.add_argument("--cpu-threads", type=int, default=0)
     p.add_argument("--cookies-from-browser", default="", help="e.g. firefox, for age-restricted or members-only videos")
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
