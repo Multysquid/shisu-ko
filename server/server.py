@@ -698,6 +698,24 @@ class App:
 
 # --------------------------------------------------------------------------- HTTP
 
+EXTENSION_ORIGIN_PREFIXES = ("moz-extension://", "chrome-extension://", "safari-web-extension://")
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def origin_allowed(origin: Optional[str]) -> bool:
+    """Browser origins that may use the server: the extension itself and pages served on this machine.
+
+    Requests without an Origin header (curl, the Docker health check, other local tools) are not
+    browser cross-origin requests and are handled separately by the caller.
+    """
+    if not origin or origin == "null":
+        return False
+    if origin.startswith(EXTENSION_ORIGIN_PREFIXES):
+        return True
+    parts = urlsplit(origin)
+    return parts.scheme in ("http", "https") and (parts.hostname or "") in LOOPBACK_HOSTS
+
+
 class Handler(BaseHTTPRequestHandler):
     app: App = None  # type: ignore[assignment]
     protocol_version = "HTTP/1.1"
@@ -706,11 +724,24 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter than the default
         log.debug("http: " + fmt, *args)
 
+    def _origin_ok(self) -> bool:
+        """True for non-browser clients (no Origin header) and for allowed browser origins."""
+        origin = self.headers.get("Origin")
+        return origin is None or origin_allowed(origin)
+
     def _cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if not origin or not origin_allowed(origin):
+            return  # no CORS headers: the browser refuses to hand the response to the page
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "86400")
+
+    def _reject_origin(self) -> None:
+        log.warning("rejected request from origin %s", self.headers.get("Origin"))
+        self._json(403, {"ok": False, "error": "origin not allowed"})
 
     def _json(self, code: int, payload) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -723,12 +754,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        if not self._origin_ok():
+            self._reject_origin()
+            return
         self.send_response(204)
         self._cors()
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._origin_ok():
+            self._reject_origin()
+            return
         path = self.path.split("?", 1)[0]
         if path == "/health":
             self._json(200, self.app.health())
@@ -774,6 +811,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._origin_ok():
+            self._reject_origin()
+            return
         path = self.path.split("?", 1)[0]
         try:
             length = int(self.headers.get("Content-Length") or 0)

@@ -30,7 +30,9 @@ sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner
   field list. Keep them in sync when adding a setting.
 - The server listens on `127.0.0.1:8790`. Port 8765 belongs to AnkiConnect; never use it.
 - The server never exposes anything beyond `/health`, `/sync`, `/clip`, `/sessions`; it binds to
-  localhost and validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`.
+  localhost, validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`, and answers browser requests
+  only from the extension's own origin or from pages on loopback hosts (`origin_allowed()`), so
+  arbitrary websites cannot drive downloads and transcription.
 - Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`.
   Cue caches are `cache/<video_id>.cues.json` and are only reused when model and language match.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
