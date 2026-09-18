@@ -759,13 +759,16 @@ class Handler(BaseHTTPRequestHandler):
         log.warning("rejected request from origin %s", self.headers.get("Origin"))
         self._json(403, {"ok": False, "error": "origin not allowed"})
 
-    def _json(self, code: int, payload) -> None:
+    def _json(self, code: int, payload, close: bool = False) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self._cors()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if close:
+            # Also sets self.close_connection, so the handler stops after this request.
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -834,7 +837,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
             if length > 65536:
-                self._json(413, {"ok": False, "error": "request too large"})
+                # The body is left unread, so the connection must not be reused: on a keep-alive
+                # connection the leftover bytes would be parsed as the next request.
+                self._json(413, {"ok": False, "error": "request too large"}, close=True)
                 return
             raw = self.rfile.read(length) if length else b""
             body = json.loads(raw.decode("utf-8") or "{}")
