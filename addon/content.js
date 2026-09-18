@@ -1285,7 +1285,7 @@
     if (!res) return;
     // Anki being closed or not having granted access is normal; it must not raise toasts.
     if (!res.ok) logAnkiPollError(res.error);
-    else if (res.newNoteId) autoMine(res.newNoteId);
+    else if (res.newNoteId) autoMine(res.newNoteId, res.note);
   }
 
   function logAnkiPollError(error) {
@@ -1295,11 +1295,27 @@
     console.debug("Shisu-ko: Anki watch:", error || "unknown error");
   }
 
-  function autoMine(noteId) {
-    const cue = currentCueForMining();
-    if (!cue) {
-      showToast("New card detected but no subtitle to attach", "warn");
-      return;
+  // A card is matched to the line it is about, not assumed to be about the line playing now: by
+  // the time Yomitan has written the note the video has moved on, and with pause-on-hover off it
+  // has moved on by several lines. Only a card with neither sentence nor word to go on falls back
+  // to the playhead. Sentences already prepared rank first, so two identical lines resolve to the
+  // one the viewer just read.
+  function autoMine(noteId, note) {
+    const written = note ? SHISUKO_MATCH.normalize(note.sentence) : "";
+    const word = note ? SHISUKO_MATCH.normalize(note.word) : "";
+    let cue;
+    if (written || word) {
+      cue = SHISUKO_MATCH.matchCue(state.cues, note, { rank: (c) => rankOfCue(state.premined, c), t: playhead() });
+      if (!cue) {
+        showToast("New card's sentence matches no subtitle; nothing attached", "warn");
+        return;
+      }
+    } else {
+      cue = currentCueForMining();
+      if (!cue) {
+        showToast("New card detected but no subtitle to attach", "warn");
+        return;
+      }
     }
     const seekForFrame = cue.id !== state.activeCueId && !!(state.video && state.video.paused);
     mineCue(cue, { seekForFrame, noteId, auto: true });

@@ -308,13 +308,10 @@ async function anki(url, action, params, timeoutMs) {
   }
 }
 
-// Strip markup and whitespace so two spellings of the same sentence compare equal: Yomitan wraps
-// the looked-up word in <b> and may use &nbsp;, and Whisper's spacing need not match.
+// Two spellings of the same sentence compare equal: Yomitan wraps the looked-up word in <b>, may
+// use entities and furigana brackets, and Whisper's spacing and punctuation need not match.
 function normalizeSentence(text) {
-  return String(text === undefined || text === null ? "" : text)
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/\s+/g, "");
+  return SHISUKO_MATCH.normalize(text); // from match.js
 }
 
 // The spoken sentence the mined cue belongs to, as the content script joined it. An older content
@@ -341,6 +338,27 @@ function extendSentenceField(existing, full) {
   const at = word ? text.indexOf(word) : -1;
   if (at < 0) return text;
   return text.slice(0, at) + "<b>" + word + "</b>" + text.slice(at + word.length);
+}
+
+// The two fields that say what a card is about. The word is whatever the viewer configured, else
+// the note's first field, which is where every Yomitan template puts the expression.
+function noteSummary(info, settings) {
+  const fields = (info && info.fields) || {};
+  const read = (name) => String((fields[name] && fields[name].value) || "").trim();
+  const sentenceName = String(settings.ankiSentenceField || "").trim() || "Sentence";
+  const wordName = String(settings.ankiWordField || "").trim();
+  let word = "";
+  if (wordName) {
+    word = read(wordName);
+  } else {
+    for (const value of Object.values(fields)) {
+      if (value && Number(value.order) === 0) {
+        word = String(value.value || "").trim();
+        break;
+      }
+    }
+  }
+  return { sentence: read(sentenceName), word };
 }
 
 async function ankiPermission(url) {
@@ -378,7 +396,17 @@ async function ankiPoll() {
     if (stale || maxId > baseline) ankiWatch.baseline = maxId;
     if (stale || maxId <= baseline) return { ok: true, newNoteId: null };
     const added = list.filter((id) => id > baseline);
-    return { ok: true, newNoteId: added.length === 1 ? maxId : null };
+    if (added.length !== 1) return { ok: true, newNoteId: null };
+    // What the card says is how the content script finds the line it came from. A note that
+    // cannot be read is still reported: the content script then falls back to the playhead.
+    let note = null;
+    try {
+      const infos = await anki(url, "notesInfo", { notes: [maxId] }, ANKI_POLL_TIMEOUT_MS);
+      note = noteSummary(infos && infos[0], settings);
+    } catch (err) {
+      note = null;
+    }
+    return { ok: true, newNoteId: maxId, note };
   } catch (err) {
     ankiWatch.lastOk = false;
     const network = err && err.name === "TypeError";
@@ -424,7 +452,11 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
       const guardName = String(settings.ankiSentenceField || "").trim() || "Sentence";
       const written = normalizeSentence((fields[guardName] && fields[guardName].value) || "");
       const spoken = normalizeSentence(sentence.text) || normalizeSentence(cue.text);
-      if (written && spoken && !written.includes(spoken) && !spoken.includes(written)) {
+      // The card and the subtitle rarely agree word for word: Yomitan's sentence can stop short of
+      // the cue, run past it, or carry furigana. The better of the two readings of what was said
+      // has to clear the same bar the content script used to pick this cue.
+      const best = Math.max(SHISUKO_MATCH.similarity(written, sentence.text), SHISUKO_MATCH.similarity(written, cue.text));
+      if (written && spoken && best < SHISUKO_MATCH.MIN_SIMILARITY) {
         return { ok: false, mismatch: true, error: "The new card's sentence does not match the subtitle; nothing attached" };
       }
     }

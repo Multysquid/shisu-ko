@@ -288,15 +288,70 @@ test("ankiPoll takes a baseline on the first poll and reports nothing", async ()
 
 test("ankiPoll reports a single note added after the baseline", async () => {
   let ids = [100, 101];
-  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids });
+  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => YOMITAN_NOTE });
   const { sandbox } = loadBackground({ fetch: anki.fetch });
   await sandbox.ankiPoll();
   ids = [100, 101, 102];
   allowNextPoll(sandbox);
-  assert.deepEqual(plain(await sandbox.ankiPoll()), { ok: true, newNoteId: 102 });
+  assert.deepEqual(plain(await sandbox.ankiPoll()), { ok: true, newNoteId: 102, note: { sentence: "これは<b>猫</b>です。", word: "猫" } });
   // The note is reported once; a poll that finds nothing newer stays quiet.
   allowNextPoll(sandbox);
   assert.deepEqual(plain(await sandbox.ankiPoll()), { ok: true, newNoteId: null });
+});
+
+// What the content script matches a card against: the two fields that say what it is about. The
+// word comes from the first field unless the viewer named one, because that is where every
+// Yomitan template puts the expression.
+const YOMITAN_NOTE = [
+  {
+    fields: {
+      Expression: { value: "猫", order: 0 },
+      Sentence: { value: "これは<b>猫</b>です。", order: 1 },
+      Reading: { value: "ねこ", order: 2 },
+    },
+  },
+];
+
+test("ankiPoll reads the new card's sentence and its first field", async () => {
+  let ids = [100];
+  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => YOMITAN_NOTE });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  await sandbox.ankiPoll();
+  ids = [100, 101];
+  allowNextPoll(sandbox);
+  const res = await sandbox.ankiPoll();
+  assert.deepEqual(plain(res.note), { sentence: "これは<b>猫</b>です。", word: "猫" });
+  const asked = anki.calls.find((c) => c.action === "notesInfo");
+  assert.deepEqual(plain(asked.params.notes), [101]);
+});
+
+test("ankiPoll takes the word from the field the viewer named", async () => {
+  const storage = makeMemoryStorage({ settings: { ankiWordField: "Reading", ankiSentenceField: "Sentence" } });
+  let ids = [100];
+  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => YOMITAN_NOTE });
+  const { sandbox } = loadBackground({ storage, fetch: anki.fetch });
+  await sandbox.ankiPoll();
+  ids = [100, 101];
+  allowNextPoll(sandbox);
+  assert.deepEqual(plain((await sandbox.ankiPoll()).note), { sentence: "これは<b>猫</b>です。", word: "ねこ" });
+});
+
+test("ankiPoll still reports the card when its fields cannot be read", async () => {
+  let ids = [100];
+  const anki = ankiFetch({
+    requestPermission: granted,
+    findNotes: () => ids,
+    notesInfo: () => {
+      throw new Error("Anki went away");
+    },
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  await sandbox.ankiPoll();
+  ids = [100, 101];
+  allowNextPoll(sandbox);
+  // The baseline has moved on all the same: this card is never offered twice.
+  assert.deepEqual(plain(await sandbox.ankiPoll()), { ok: true, newNoteId: 101, note: null });
+  assert.equal(sandbox.ankiWatch.baseline, 101);
 });
 
 test("ankiPoll ignores a batch of several new notes", async () => {
@@ -345,7 +400,7 @@ test("ankiPoll re-baselines after a failed poll instead of reporting a stale not
   assert.deepEqual(plain(await sandbox.ankiPoll()), { ok: true, newNoteId: null });
   ids = [100, 101, 102];
   allowNextPoll(sandbox);
-  assert.deepEqual(plain(await sandbox.ankiPoll()), { ok: true, newNoteId: 102 });
+  assert.equal((await sandbox.ankiPoll()).newNoteId, 102);
 });
 
 test("ankiPoll stays silent when autoMine is off", async () => {
@@ -356,9 +411,9 @@ test("ankiPoll stays silent when autoMine is off", async () => {
 
 // ------------------------------------------------------------------ normalizeSentence
 
-test("normalizeSentence strips tags and whitespace", () => {
+test("normalizeSentence strips tags, whitespace and punctuation", () => {
   const { sandbox } = loadBackground();
-  assert.equal(sandbox.normalizeSentence("これは <b>猫</b> です。"), "これは猫です。");
+  assert.equal(sandbox.normalizeSentence("これは <b>猫</b> です。"), "これは猫です");
   assert.equal(sandbox.normalizeSentence("a&nbsp;b\n c"), "abc");
   assert.equal(sandbox.normalizeSentence(null), "");
 });
@@ -409,6 +464,37 @@ test("addToAnki refuses a note whose sentence is about something else", async ()
   assert.equal(res.mismatch, true);
   assert.ok(!anki.actions().includes("updateNoteFields"), "nothing may be written to a mismatched note");
   assert.ok(!anki.actions().includes("storeMediaFile"), "no media may be uploaded for a mismatched note");
+});
+
+test("addToAnki accepts a card whose sentence carries furigana and a changed ending", async () => {
+  const anki = ankiFetch({
+    requestPermission: granted,
+    // What a Yomitan template with {sentence-furigana} writes into the note.
+    notesInfo: () => noteFields(" 私[わたし]は<b> 猫[ねこ]</b>が 好[す]きです。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const settings = await sandbox.getSettings();
+  const res = await sandbox.addToAnki(settings, { text: "私は猫が好きです" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.ok, true, JSON.stringify(res));
+});
+
+test("addToAnki refuses a card that only ends like the subtitle", async () => {
+  // Both sentences end in 字幕です and share nothing else. Scoring the shared bigrams against the
+  // shorter sentence alone put this at exactly the threshold and let it through; the Chrome smoke
+  // test caught it writing media into the wrong card.
+  const anki = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => noteFields("別の字幕です"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const settings = await sandbox.getSettings();
+  const res = await sandbox.addToAnki(settings, { text: "これはテスト字幕です" }, MEDIA.image, MEDIA.audio, 202);
+  assert.equal(res.mismatch, true, JSON.stringify(res));
+  assert.ok(!anki.actions().includes("storeMediaFile"), "no media may reach a mismatched note");
 });
 
 test("mineCue does not fall back to Downloads when mining automatically", async () => {
