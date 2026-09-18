@@ -653,9 +653,13 @@ class App:
         return make_clip(video_id, max(0.0, start), end, fmt, fallback)
 
     def pick_work(self):
+        now = time.time()
+        timeout = getattr(self.args, "client_timeout", 30.0)
         with self.lock:
             sessions = sorted(self.sessions.values(), key=lambda x: x.last_sync, reverse=True)
         for s in sessions:
+            if timeout > 0 and now - s.last_sync > timeout:
+                continue  # nobody has synced this video recently (tab closed): do not transcribe ahead for it
             with s.lock:
                 window = plan_window(s, self.args)
                 if window:
@@ -995,6 +999,7 @@ def parse_args(argv=None):
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
     p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically")
+    p.add_argument("--client-timeout", type=float, default=30.0, help="stop transcribing ahead for a video whose tab has not synced for this many seconds (0 = never stop)")
     p.add_argument("--cpu-threads", type=int, default=0)
     p.add_argument("--cookies-from-browser", default="", help="e.g. firefox, for age-restricted or members-only videos")
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
