@@ -667,6 +667,7 @@
         await seekTo(video, restore.t);
         if (!restore.paused) video.play().catch(() => {});
       }
+      resumeAfterMining(video);
       const result = await sendMessage({
         type: "mine",
         videoId: state.videoId,
@@ -680,6 +681,16 @@
     } finally {
       state.mining = false;
     }
+  }
+
+  function resumeAfterMining(video) {
+    // The frame is captured; keep watching while the server cuts the audio clip. Only a pause
+    // caused by hovering the subtitle is undone here; a pause the viewer chose stays.
+    if (!state.hoverPaused || !video || !video.paused) return;
+    state.hoverPaused = false;
+    state.awaitingPlayerMove = false;
+    clearResumeTimer();
+    video.play().catch(() => {});
   }
 
   function mineCurrent() {
