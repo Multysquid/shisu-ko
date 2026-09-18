@@ -1,5 +1,7 @@
 # Shisu-ko
 
+[![Tests](https://github.com/Multysquid/shisu-ko/actions/workflows/tests.yml/badge.svg)](https://github.com/Multysquid/shisu-ko/actions/workflows/tests.yml)
+
 Live Japanese subtitles for YouTube in Firefox, generated on your own machine by Whisper,
 readable by [Yomitan](https://yomitan.wiki/), and minable into Anki with one key.
 
@@ -270,6 +272,28 @@ AGENTS.md             architecture notes, invariants and gotchas for contributor
   test by importing `server.py` as a module (register it in `sys.modules` first because of the
   postponed annotations).
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`.
+
+## Tests
+
+Automated tests cover the pure logic on both sides — no GPU, network or Firefox required — and
+run in CI (see the badge at the top of this file) on every push and pull request via
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml).
+
+**Server** (`server/tests/`): window planning (`plan_window`), interval merging, cue splitting
+(`split_segment`), timestamp formatting, error message mapping, and the on-disk cue cache.
+
+```
+pip install -r server/requirements-test.txt
+python -m pytest server/tests
+```
+
+**Extension** (`addon/tests/`): the pure/mockable parts of `background.js` (settings storage,
+the server/AnkiConnect/Downloads proxying, sentence mining), run with Node's built-in test
+runner against a `vm` sandbox that stands in for the WebExtension APIs.
+
+```
+node --test "addon/tests/**/*.test.js"
+```
 
 ## Acknowledgements
 

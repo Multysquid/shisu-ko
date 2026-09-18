@@ -67,6 +67,21 @@ npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest
 
 Server check: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`.
 
+Automated tests (also run in CI via `.github/workflows/tests.yml`, no GPU/network/Firefox needed):
+
+```
+pip install -r server/requirements-test.txt && python -m pytest server/tests
+node --test "addon/tests/**/*.test.js"
+```
+
+`server/tests/_serverlib.py` loads `server.py` the way this file already recommends above
+(`sys.modules` registration before `exec_module`). `addon/tests/_loadBackground.js` runs
+`background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level
+`function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
+`REQUEST_TIMEOUT_MS`) need an extra script run in the same context to expose them, since they
+live in the global lexical environment rather than as globalThis properties. When adding a new
+setting or a new pure helper, add a matching test rather than only exercising it manually.
+
 Load the extension for manual testing via `about:debugging#/runtime/this-firefox` > Load Temporary
 Add-on > `addon/manifest.json`. The content script can also be exercised outside Firefox by
 concatenating a small `browser.*` shim with `content.css` and `content.js` and running it on a page

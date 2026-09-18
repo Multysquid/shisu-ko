@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  server:
+    name: Server (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Check server.py syntax
+        run: python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"
+      - name: Install test dependencies
+        run: pip install -r server/requirements-test.txt
+      - name: Run server tests
+        run: python -m pytest server/tests -v
+
+  addon:
+    name: Extension (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Check extension script syntax
+        run: |
+          for f in addon/*.js; do node --check "$f"; done
+      - name: Run extension tests
+        run: node --test "addon/tests/**/*.test.js"
