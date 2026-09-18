@@ -12,7 +12,7 @@ them as ordinary DOM text so dictionary tools such as Yomitan can scan them.
 
 Endpoints
   GET  /health -> {ok, version, model, device, compute_type, language}
-  POST /sync   -> {ok, status, error, duration, title, covered, cues, next, busy}
+  POST /sync   -> {ok, session, status, error, duration, title, covered, cues, next, busy}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import wave
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -166,6 +167,9 @@ def split_segment(seg, offset: float, max_chars: int, max_seconds: float) -> lis
 class Session:
     video_id: str
     url: str
+    # Identifies this in-memory session; changes when the server starts over for a video, so
+    # clients can tell that cue ids restarted from zero and drop what they had.
+    token: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     status: str = "pending"  # pending | downloading | decoding | ready | error | evicted
     error: Optional[str] = None
     title: str = ""
@@ -605,6 +609,7 @@ class App:
             since = max(0, min(int(since), len(s.cues)))
             resp = {
                 "ok": True,
+                "session": s.token,
                 "status": s.status,
                 "error": s.error,
                 "duration": s.duration,

@@ -58,6 +58,7 @@
     serverStatus: "idle",
     serverError: null,
     offline: false,
+    serverSession: null,
     activeCueKey: null,
     activeLineEl: null,
     transcriptDirty: true,
@@ -316,6 +317,7 @@
     state.serverStatus = id ? "connecting" : "idle";
     state.serverError = null;
     state.offline = false;
+    state.serverSession = null;
     state.transcriptDirty = true;
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
@@ -360,6 +362,21 @@
     }
     state.offline = false;
     const data = result.data || {};
+    if (typeof data.session === "string" && data.session !== state.serverSession) {
+      const restarted = state.serverSession !== null;
+      state.serverSession = data.session;
+      if (restarted) {
+        // The server started a fresh session for this video (restart, model change): its cue ids
+        // begin at 0 again, so drop what we have and fetch the new transcript from the start.
+        state.cues = [];
+        state.since = 0;
+        state.transcriptDirty = true;
+        setSubtitle(null);
+        renderTranscript();
+        updateStatus();
+        return;
+      }
+    }
     state.serverStatus = data.status || "unknown";
     state.serverError = data.error || null;
     if (typeof data.duration === "number") state.duration = data.duration;
