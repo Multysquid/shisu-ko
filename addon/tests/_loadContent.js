@@ -17,8 +17,8 @@ const SOURCE_PATH = path.join(__dirname, "..", "content.js");
 const OPEN = "(() => {";
 const CLOSE = "})();";
 const EXPORTS =
-  "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue," +
-  " getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown };\n";
+  "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
+  " premineAllowed, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);

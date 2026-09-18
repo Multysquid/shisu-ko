@@ -53,7 +53,7 @@ function notifyingStorage(storage, listeners) {
 function loadBackground(overrides = {}) {
   const source = fs.readFileSync(SOURCE_PATH, "utf8");
   const storage = overrides.storage || makeMemoryStorage();
-  const listeners = { onMessage: [], onCommand: [], onChanged: [] };
+  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [] };
 
   const sandbox = {
     console,
@@ -90,6 +90,7 @@ function loadBackground(overrides = {}) {
       tabs: {
         query: async () => [],
         sendMessage: async () => {},
+        onRemoved: { addListener: (fn) => listeners.onTabRemoved.push(fn) },
       },
     },
   };
@@ -108,11 +109,26 @@ function loadBackground(overrides = {}) {
   // copy them onto globalThis for the test harness to read.
   new vm.Script(
     "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
-      " globalThis.ankiWatch = ankiWatch;",
+      " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
 
-  return { sandbox, storage, listeners };
+  // Firefox hands every listener the sender as the second argument; the tab id in it is what
+  // tells the pre-mine store whose material this is.
+  function dispatch(msg, tabId) {
+    const sender = tabId === undefined ? {} : { tab: { id: tabId } };
+    for (const fn of listeners.onMessage) {
+      const result = fn(msg, sender);
+      if (result !== undefined) return result;
+    }
+    return undefined;
+  }
+
+  function closeTab(tabId) {
+    for (const fn of listeners.onTabRemoved.slice()) fn(tabId, {});
+  }
+
+  return { sandbox, storage, listeners, dispatch, closeTab };
 }
 
 module.exports = { loadBackground, makeMemoryStorage };

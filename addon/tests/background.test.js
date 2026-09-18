@@ -648,6 +648,192 @@ test("mineCue falls back to the cue's own range when no sentence is sent", async
   assert.match(urls[0], /start=9\.800&end=12\.200/);
 });
 
+// ------------------------------------------------------------------ pre-mined sentences
+
+const VIDEO = "abc123abc123";
+// The background answers a premine before its clip request has come back; a turn of the event
+// loop is what the content script gets for free on its next message.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+// One mock for both endpoints a mine touches: the Whisper server's /clip and AnkiConnect.
+function miningFetch(handlers) {
+  const clips = [];
+  const calls = [];
+  const fetch = async (url, init) => {
+    if (String(url).includes("/clip")) {
+      clips.push(String(url));
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "audio/mpeg" },
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      };
+    }
+    const req = JSON.parse(init.body);
+    calls.push({ action: req.action, params: req.params });
+    const handler = (handlers || {})[req.action];
+    if (handler === undefined) throw new Error("unexpected AnkiConnect action " + req.action);
+    const result = typeof handler === "function" ? handler(req.params) : handler;
+    return { json: async () => ({ result, error: null }) };
+  };
+  return { fetch, clips, calls };
+}
+
+const jpeg = (text) => "data:image/jpeg;base64," + Buffer.from(text).toString("base64");
+
+function premine(key, patch) {
+  return Object.assign(
+    {
+      type: "premine",
+      videoId: VIDEO,
+      key,
+      cueIds: [key],
+      sentence: { start: key * 10, end: key * 10 + 2, text: `文${key}` },
+    },
+    patch
+  );
+}
+
+test("premine keeps the frame and fetches the clip once, and reports what a tab holds", async () => {
+  const mock = miningFetch();
+  const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch });
+  const res = await dispatch(premine(0, { imageDataUrl: jpeg("frame") }), 1);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(plain(res.held), [{ key: 0, cueIds: [0], image: true, audio: false }]);
+  await settle();
+  assert.deepEqual(plain(sandbox.heldFor(1)), [{ key: 0, cueIds: [0], image: true, audio: true }]);
+  // The same sentence again must not ask the server for the clip a second time.
+  await dispatch(premine(0), 1);
+  await settle();
+  assert.equal(mock.clips.length, 1);
+});
+
+test("premine drops a screenshot too large to be one", async () => {
+  const mock = miningFetch();
+  const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch });
+  const huge = "data:image/jpeg;base64," + "A".repeat(5 * 1024 * 1024);
+  await dispatch(premine(0, { imageDataUrl: huge }), 1);
+  await settle();
+  // The oversize frame is thrown away; everything else about the sentence still proceeds.
+  assert.deepEqual(plain(sandbox.heldFor(1)), [{ key: 0, cueIds: [0], image: false, audio: true }]);
+});
+
+test("premine keeps five sentences per tab and drops the oldest", async () => {
+  const mock = miningFetch();
+  const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch });
+  for (let key = 0; key < 7; key++) await dispatch(premine(key, { imageDataUrl: jpeg("f") }), 1);
+  const keys = sandbox.heldFor(1).map((e) => e.key).sort((a, b) => a - b);
+  assert.deepEqual(plain(keys), [2, 3, 4, 5, 6]);
+});
+
+test("premine keeps the hovered sentence even when older ones are dropped", async () => {
+  const mock = miningFetch();
+  const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch });
+  await dispatch(premine(0, { imageDataUrl: jpeg("read"), hover: true }), 1);
+  for (let key = 1; key < 7; key++) await dispatch(premine(key, { imageDataUrl: jpeg("f") }), 1);
+  const keys = sandbox.heldFor(1).map((e) => e.key).sort((a, b) => a - b);
+  assert.equal(keys.length, 5);
+  assert.ok(keys.includes(0), "the sentence being looked up must survive: " + keys.join(","));
+});
+
+test("premine holds ten sentences across every tab", async () => {
+  const mock = miningFetch();
+  const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch });
+  for (let key = 0; key < 5; key++) await dispatch(premine(key), 1);
+  for (let key = 0; key < 5; key++) await dispatch(premine(key), 2);
+  assert.equal(sandbox.premined.size, 10);
+  await dispatch(premine(0), 3);
+  assert.equal(sandbox.premined.size, 10);
+  assert.equal(sandbox.heldFor(1).length, 4, "the oldest tab gives up the oldest sentence");
+  assert.equal(sandbox.heldFor(2).length, 5);
+  assert.equal(sandbox.heldFor(3).length, 1);
+});
+
+test("a tab that navigates away or closes leaves nothing behind", async () => {
+  const mock = miningFetch();
+  const { sandbox, dispatch, closeTab } = loadBackground({ fetch: mock.fetch });
+  await dispatch(premine(0), 1);
+  await dispatch(premine(1), 2);
+  await dispatch({ type: "premineReset" }, 1);
+  assert.deepEqual(plain(sandbox.heldFor(1)), []);
+  assert.equal(sandbox.heldFor(2).length, 1);
+  closeTab(2);
+  assert.equal(sandbox.premined.size, 0);
+});
+
+// ------------------------------------------------------------------ mining from the cache
+
+function mineMsg(key, patch) {
+  return Object.assign(
+    {
+      type: "mine",
+      videoId: VIDEO,
+      key,
+      cue: { start: key * 10, end: key * 10 + 2, text: `文${key}` },
+      sentence: { start: key * 10, end: key * 10 + 2, text: `文${key}` },
+      noteId: 555,
+    },
+    patch
+  );
+}
+
+const ankiOk = {
+  requestPermission: granted,
+  notesInfo: () => noteFields("文0"),
+  storeMediaFile: (p) => p.filename,
+  updateNoteFields: null,
+};
+
+test("mining a pre-mined sentence asks the server for nothing and uses the frame it kept", async () => {
+  const mock = miningFetch(ankiOk);
+  const { dispatch } = loadBackground({ fetch: mock.fetch, ...instantTimers });
+  await dispatch(premine(0, { imageDataUrl: jpeg("the frame that was read") }), 1);
+  await settle();
+  assert.equal(mock.clips.length, 1);
+
+  const res = await dispatch(mineMsg(0), 1);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(mock.clips.length, 1, "the clip was already there");
+  const image = mock.calls.find((c) => c.action === "storeMediaFile" && c.params.filename.endsWith(".jpg"));
+  assert.equal(Buffer.from(image.params.data, "base64").toString(), "the frame that was read");
+});
+
+test("a frame sent with the mine beats the pre-mined one", async () => {
+  const mock = miningFetch(ankiOk);
+  const { dispatch } = loadBackground({ fetch: mock.fetch, ...instantTimers });
+  await dispatch(premine(0, { imageDataUrl: jpeg("prepared") }), 1);
+  await settle();
+  const res = await dispatch(mineMsg(0, { imageDataUrl: jpeg("captured now") }), 1);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const image = mock.calls.find((c) => c.action === "storeMediaFile" && c.params.filename.endsWith(".jpg"));
+  assert.equal(Buffer.from(image.params.data, "base64").toString(), "captured now");
+});
+
+test("a clip cut with the old padding is fetched again, not reused", async () => {
+  const mock = miningFetch(ankiOk);
+  const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch, ...instantTimers });
+  await dispatch(premine(0), 1);
+  await settle();
+  assert.match(mock.clips[0], /start=0\.000&end=2\.200/);
+
+  await sandbox.saveSettings({ clipPaddingMs: 500 });
+  const res = await dispatch(mineMsg(0), 1);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(mock.clips.length, 2, "the held clip is the wrong length now");
+  assert.match(mock.clips[1], /start=0\.000&end=2\.500/);
+});
+
+test("a sentence survives being mined: two words from one line make two cards", async () => {
+  const mock = miningFetch(ankiOk);
+  const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch, ...instantTimers });
+  await dispatch(premine(0, { imageDataUrl: jpeg("frame") }), 1);
+  await settle();
+  assert.equal((await dispatch(mineMsg(0), 1)).ok, true);
+  assert.equal((await dispatch(mineMsg(0), 1)).ok, true);
+  assert.equal(mock.clips.length, 1, "the second card reuses the same clip");
+  assert.deepEqual(plain(sandbox.heldFor(1)), [{ key: 0, cueIds: [0], image: true, audio: true }]);
+});
+
 // ------------------------------------------------------------------ downloads fallback
 
 test("downloadFiles hands Firefox object URLs, never data: URLs", async () => {

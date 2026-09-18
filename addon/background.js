@@ -9,6 +9,8 @@
  *     both to the Downloads folder.
  *  4. Watch AnkiConnect for a note Yomitan has just added, so the content script can attach the
  *     material without the viewer pressing anything.
+ *  5. Pre-mine: hold the screenshot and the audio clip of the sentences that just played, so a
+ *     card gets them at once and still gets them after the line has gone from the screen.
  */
 
 const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
@@ -22,6 +24,16 @@ const ANKI_POLL_TIMEOUT_MS = 5000;      // a hung poll would otherwise block the
 const ANKI_BASELINE_MAX_AGE_MS = 10000; // a gap this long means the baseline can no longer be trusted
 
 const ankiWatch = { baseline: null, lastPollAt: 0, lastOk: false, permission: null, permissionCheckedAt: 0 };
+
+// Pre-mined sentences, keyed by tab, video and sentence. Memory only: this is material for a card
+// that may never be made, and none of it is worth a file on disk. The caps keep a long session
+// from growing without bound; five sentences per tab is far more than a reader is ever behind.
+const PREMINE_PER_TAB = 5;
+const PREMINE_TOTAL = 10;
+const PREMINE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
+const PREMINE_AUDIO_MAX_BYTES = 5 * 1024 * 1024;
+
+const premined = new Map();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -108,11 +120,14 @@ function bytesToBase64(buffer) {
   return btoa(binary);
 }
 
-async function fetchClip(settings, videoId, start, end) {
+// `attempts` is 1 for pre-mining: nobody is waiting, and the next sentence will ask again anyway.
+// A mine the viewer can see keeps the four tries, so a clip that is still being decoded arrives.
+async function fetchClip(settings, videoId, start, end, attempts) {
+  const tries = Math.max(1, Number(attempts) || 4);
   const base = normalizeBase(settings.serverUrl, DEFAULT_SETTINGS.serverUrl);
   const format = settings.clipFormat === "wav" ? "wav" : "mp3";
   const url = `${base}/clip?video_id=${encodeURIComponent(videoId)}&start=${start.toFixed(3)}&end=${end.toFixed(3)}&format=${format}`;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < tries; attempt++) {
     let res;
     try {
       res = await fetch(url);
@@ -120,6 +135,7 @@ async function fetchClip(settings, videoId, start, end) {
       return { ok: false, error: "Whisper server unreachable" };
     }
     if (res.status === 503) {
+      if (attempt + 1 >= tries) break;
       await sleep(1500);
       continue;
     }
@@ -137,6 +153,139 @@ async function fetchClip(settings, videoId, start, end) {
     return { ok: true, base64: bytesToBase64(buffer), mime, ext: mime === "audio/wav" ? "wav" : "mp3" };
   }
   return { ok: false, error: "The server is still fetching this video's audio, try again in a moment" };
+}
+
+// ------------------------------------------------------------------ pre-mined sentences
+
+function base64Bytes(base64) {
+  const text = String(base64 || "");
+  if (!text) return 0;
+  const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0;
+  return Math.floor((text.length * 3) / 4) - padding;
+}
+
+function premineId(tabId, videoId, key) {
+  return `${tabId}|${videoId}|${key}`;
+}
+
+// The clip the whole sentence needs, the one place that decides it. Pre-mining and mining must
+// agree to the millisecond, or a cached clip would be thrown away for one exactly like it.
+function clipParams(settings, sentence) {
+  const pad = Math.max(0, Number(settings.clipPaddingMs) || 0) / 1000;
+  const start = Math.max(0, sentence.start - pad);
+  const end = Math.max(start + 0.3, sentence.end + pad);
+  return { start, end, format: settings.clipFormat === "wav" ? "wav" : "mp3" };
+}
+
+function sameClip(a, b) {
+  return !!a && !!b && a.format === b.format && a.start.toFixed(3) === b.start.toFixed(3) && a.end.toFixed(3) === b.end.toFixed(3);
+}
+
+function premineEntry(tabId, videoId, key) {
+  if (key === undefined || key === null || !videoId) return null;
+  return premined.get(premineId(tabId, videoId, key)) || null;
+}
+
+function tabEntries(tabId) {
+  const list = [];
+  for (const entry of premined.values()) if (entry.tabId === tabId) list.push(entry);
+  return list;
+}
+
+// The oldest entry that may go: a pinned one (the sentence the viewer is hovering) is given up
+// only when there is nothing else left.
+function evictionVictim(entries) {
+  let pick = null;
+  for (const entry of entries) {
+    if (entry.pinned) continue;
+    if (!pick || entry.touched < pick.touched) pick = entry;
+  }
+  if (pick) return pick;
+  for (const entry of entries) if (!pick || entry.touched < pick.touched) pick = entry;
+  return pick;
+}
+
+function dropPremined(entry) {
+  premined.delete(premineId(entry.tabId, entry.videoId, entry.key));
+}
+
+function evictPremined(tabId) {
+  let mine = tabEntries(tabId);
+  while (mine.length > PREMINE_PER_TAB) {
+    const victim = evictionVictim(mine);
+    if (!victim) break;
+    dropPremined(victim);
+    mine = tabEntries(tabId);
+  }
+  while (premined.size > PREMINE_TOTAL) {
+    const victim = evictionVictim([...premined.values()]);
+    if (!victim) break;
+    dropPremined(victim);
+  }
+}
+
+// What this tab holds, newest first, without the payloads: the content script only needs to know
+// whether a sentence already has its image and its audio.
+function heldFor(tabId) {
+  return tabEntries(tabId)
+    .sort((a, b) => b.touched - a.touched)
+    .map((entry) => ({ key: entry.key, cueIds: entry.cueIds, image: !!entry.image, audio: !!entry.audio }));
+}
+
+function dropTabPremined(tabId) {
+  for (const entry of tabEntries(tabId)) dropPremined(entry);
+}
+
+// Prepare a sentence: keep the frame the content script captured and start the one clip request
+// this sentence gets. Nothing is awaited; the reply is the tab's inventory, so the content script
+// knows what it no longer has to capture.
+async function premineSentence(msg, tabId) {
+  const videoId = String((msg && msg.videoId) || "");
+  const key = msg ? msg.key : null;
+  const sentence = msg && msg.sentence;
+  if (!videoId || key === undefined || key === null) return { ok: false, error: "Nothing to pre-mine" };
+  if (!sentence || typeof sentence.start !== "number" || typeof sentence.end !== "number") {
+    return { ok: false, error: "Nothing to pre-mine" };
+  }
+  const settings = await getSettings();
+  const id = premineId(tabId, videoId, key);
+  let entry = premined.get(id);
+  if (!entry) {
+    entry = { tabId, videoId, key, cueIds: [], sentence: null, image: null, audio: null, clip: null, audioPromise: null, pinned: false, touched: 0 };
+    premined.set(id, entry);
+  }
+  entry.touched = Date.now();
+  if (Array.isArray(msg.cueIds)) entry.cueIds = msg.cueIds.slice();
+  entry.sentence = { start: sentence.start, end: sentence.end, text: String(sentence.text || "") };
+
+  const dataUrl = typeof msg.imageDataUrl === "string" ? msg.imageDataUrl : "";
+  const comma = dataUrl.indexOf(",");
+  if (comma >= 0) {
+    const base64 = dataUrl.slice(comma + 1);
+    // A frame this large is a bug somewhere, not a screenshot; holding ten of them is not free.
+    if (base64 && base64Bytes(base64) <= PREMINE_IMAGE_MAX_BYTES) entry.image = { base64 };
+  }
+  if (msg.hover) {
+    // The hovered sentence is the one being looked up: it outlives everything else in this tab.
+    for (const other of tabEntries(tabId)) other.pinned = other === entry;
+  }
+  if (!entry.audio && !entry.audioPromise) {
+    const params = clipParams(settings, entry.sentence);
+    entry.clip = params;
+    entry.audioPromise = fetchClip(settings, videoId, params.start, params.end, 1)
+      .then((clip) => {
+        entry.audioPromise = null;
+        if (!clip.ok || base64Bytes(clip.base64) > PREMINE_AUDIO_MAX_BYTES) return null;
+        entry.audio = { base64: clip.base64, mime: clip.mime, ext: clip.ext };
+        return entry.audio;
+      })
+      .catch(() => {
+        entry.audioPromise = null;
+        return null;
+      });
+  }
+  evictPremined(tabId);
+  return { ok: true, held: heldFor(tabId) };
 }
 
 async function anki(url, action, params, timeoutMs) {
@@ -394,7 +543,16 @@ async function downloadFiles(image, audio) {
   }
 }
 
-async function mineCue(msg) {
+// The clip and the frame this sentence was pre-mined with, when they are still the ones wanted.
+// A setting the viewer changed since (padding, format) makes the held clip the wrong clip.
+async function cachedClip(entry, params) {
+  if (!entry || !sameClip(entry.clip, params)) return null;
+  if (entry.audio) return entry.audio;
+  if (entry.audioPromise) return (await entry.audioPromise) || null;
+  return null;
+}
+
+async function mineCue(msg, tabId) {
   const settings = await getSettings();
   const cue = msg && msg.cue;
   if (!cue || typeof cue.start !== "number" || typeof cue.end !== "number") {
@@ -402,16 +560,27 @@ async function mineCue(msg) {
   }
   // The clip covers the whole sentence the cue belongs to; the file name still marks the cue.
   const sentence = sentenceOf(msg);
-  const pad = Math.max(0, Number(settings.clipPaddingMs) || 0) / 1000;
-  const start = Math.max(0, sentence.start - pad);
-  const end = Math.max(start + 0.3, sentence.end + pad);
+  const params = clipParams(settings, sentence);
   const base = `shisuko_${msg.videoId}_${Math.round(cue.start * 1000)}`;
+  const entry = premineEntry(tabId, msg.videoId, msg.key);
 
-  const image = msg.imageDataUrl && msg.imageDataUrl.includes(",")
-    ? { base64: msg.imageDataUrl.split(",")[1], filename: `${base}.jpg` }
-    : null;
+  // A frame sent with the message beats the pre-mined one: the content script only sends one when
+  // it knows better, and the pre-mined frame is there for when it has none.
+  const sentImage = msg.imageDataUrl && msg.imageDataUrl.includes(",") ? msg.imageDataUrl.split(",")[1] : null;
+  const imageBase64 = sentImage || (entry && entry.image ? entry.image.base64 : null);
+  const image = imageBase64 ? { base64: imageBase64, filename: `${base}.jpg` } : null;
 
-  const clip = await fetchClip(settings, msg.videoId, start, end);
+  let clip = await cachedClip(entry, params);
+  if (clip) clip = { ok: true, base64: clip.base64, mime: clip.mime, ext: clip.ext };
+  else {
+    clip = await fetchClip(settings, msg.videoId, params.start, params.end);
+    // A second word from the same sentence must not fetch the clip again.
+    if (clip.ok && entry) {
+      entry.clip = params;
+      entry.audio = { base64: clip.base64, mime: clip.mime, ext: clip.ext };
+      entry.touched = Date.now();
+    }
+  }
   const audio = clip.ok ? { base64: clip.base64, filename: `${base}.${clip.ext}`, mime: clip.mime } : null;
   if (!image && !audio) {
     return { ok: false, error: clip.error || "Neither screenshot nor audio could be captured" };
@@ -441,8 +610,10 @@ async function mineCue(msg) {
 
 // ------------------------------------------------------------------ messaging
 
-browser.runtime.onMessage.addListener((msg) => {
+browser.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || typeof msg !== "object") return undefined;
+  // Pre-mined material belongs to the tab that captured it; the popup (no tab) gets -1 and holds none.
+  const tabId = sender && sender.tab && typeof sender.tab.id === "number" ? sender.tab.id : -1;
   switch (msg.type) {
     case "api":
       return apiRequest(msg.path, msg.body);
@@ -451,13 +622,21 @@ browser.runtime.onMessage.addListener((msg) => {
     case "saveSettings":
       return saveSettings(msg.settings);
     case "mine":
-      return mineCue(msg);
+      return mineCue(msg, tabId);
+    case "premine":
+      return premineSentence(msg, tabId);
+    case "premineReset":
+      dropTabPremined(tabId);
+      return Promise.resolve({ ok: true });
     case "ankiPoll":
       return ankiPoll();
     default:
       return undefined;
   }
 });
+
+// A closed tab can never mine what it prepared.
+browser.tabs.onRemoved.addListener((tabId) => dropTabPremined(tabId));
 
 browser.commands.onCommand.addListener(async (name) => {
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });
