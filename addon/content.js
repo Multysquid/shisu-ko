@@ -61,6 +61,7 @@
     activeCueKey: null,
     activeLineEl: null,
     transcriptDirty: true,
+    transcriptAppendFrom: null, // index of the first unrendered cue when only appends are pending
     hoverPaused: false,
     awaitingPlayerMove: false,
     resumeTimer: null,
@@ -164,6 +165,7 @@
       state.transcriptEl.classList.toggle("shisuko-hidden", !s.showTranscript);
       if (s.showTranscript) {
         state.transcriptDirty = true;
+        state.transcriptAppendFrom = null;
         renderTranscript();
       }
     }
@@ -238,6 +240,7 @@
     state.activeCueKey = null;
     state.activeLineEl = null;
     state.transcriptDirty = true;
+    state.transcriptAppendFrom = null;
     applySettings();
   }
 
@@ -317,6 +320,7 @@
     state.serverError = null;
     state.offline = false;
     state.transcriptDirty = true;
+    state.transcriptAppendFrom = null;
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
     clearResumeTimer();
@@ -372,6 +376,9 @@
 
   function mergeCues(incoming) {
     const seen = new Set(state.cues.map((c) => c.id));
+    const before = state.cues.length;
+    const lastStart = before ? state.cues[before - 1].start : -Infinity;
+    let inOrder = true;
     let added = false;
     for (const raw of incoming) {
       if (!raw || typeof raw.text !== "string") continue;
@@ -383,11 +390,19 @@
       };
       if (!cue.text || !Number.isFinite(cue.id) || seen.has(cue.id)) continue;
       seen.add(cue.id);
+      if (cue.start <= lastStart) inOrder = false;
       state.cues.push(cue);
       added = true;
     }
     if (added) {
       state.cues.sort((a, b) => a.start - b.start || a.end - b.end);
+      // New cues that all lie after the last rendered one keep the rendered prefix intact (the
+      // sort is stable), so the panel can append them; anything else needs a full rebuild.
+      const rebuildPending = state.transcriptDirty && state.transcriptAppendFrom === null;
+      if (!rebuildPending) {
+        if (inOrder) state.transcriptAppendFrom = state.transcriptAppendFrom === null ? before : Math.min(state.transcriptAppendFrom, before);
+        else state.transcriptAppendFrom = null;
+      }
       state.transcriptDirty = true;
       renderTranscript();
     }
@@ -532,41 +547,52 @@
 
   // ------------------------------------------------------------ transcript panel
 
+  function transcriptLine(cue) {
+    const line = document.createElement("div");
+    line.className = "shisuko-line";
+    line.dataset.start = String(cue.start);
+    line.dataset.id = String(cue.id);
+    const time = document.createElement("span");
+    time.className = "shisuko-time";
+    time.textContent = formatTime(cue.start);
+    time.title = "Jump here";
+    const text = document.createElement("span");
+    text.className = "shisuko-linetext";
+    text.textContent = cue.text;
+    const mine = document.createElement("button");
+    mine.type = "button";
+    mine.className = "shisuko-line-mine";
+    mine.textContent = "⛏";
+    mine.title = "Mine this sentence: screenshot + audio";
+    line.appendChild(time);
+    line.appendChild(text);
+    line.appendChild(mine);
+    return line;
+  }
+
   function renderTranscript() {
     const list = state.transcriptList;
     if (!list || !state.settings.showTranscript || !state.transcriptDirty) return;
     state.transcriptDirty = false;
+    const from = state.transcriptAppendFrom;
+    state.transcriptAppendFrom = null;
+    const rendered = list.querySelectorAll(".shisuko-line").length;
     const frag = document.createDocumentFragment();
-    for (const cue of state.cues) {
-      const line = document.createElement("div");
-      line.className = "shisuko-line";
-      line.dataset.start = String(cue.start);
-      line.dataset.id = String(cue.id);
-      const time = document.createElement("span");
-      time.className = "shisuko-time";
-      time.textContent = formatTime(cue.start);
-      time.title = "Jump here";
-      const text = document.createElement("span");
-      text.className = "shisuko-linetext";
-      text.textContent = cue.text;
-      const mine = document.createElement("button");
-      mine.type = "button";
-      mine.className = "shisuko-line-mine";
-      mine.textContent = "⛏";
-      mine.title = "Mine this sentence: screenshot + audio";
-      line.appendChild(time);
-      line.appendChild(text);
-      line.appendChild(mine);
-      frag.appendChild(line);
+    if (from !== null && from > 0 && from === rendered && from <= state.cues.length) {
+      // Only cues after the rendered ones arrived: append them instead of rebuilding thousands of nodes.
+      for (let i = from; i < state.cues.length; i++) frag.appendChild(transcriptLine(state.cues[i]));
+      list.appendChild(frag);
+    } else {
+      for (const cue of state.cues) frag.appendChild(transcriptLine(cue));
+      if (!state.cues.length) {
+        const empty = document.createElement("div");
+        empty.className = "shisuko-empty";
+        empty.textContent = "No transcript yet.";
+        frag.appendChild(empty);
+      }
+      list.replaceChildren(frag);
+      state.activeLineEl = null;
     }
-    if (!state.cues.length) {
-      const empty = document.createElement("div");
-      empty.className = "shisuko-empty";
-      empty.textContent = "No transcript yet.";
-      frag.appendChild(empty);
-    }
-    list.replaceChildren(frag);
-    state.activeLineEl = null;
     if (state.activeCueKey) highlightTranscript(cueById(state.activeCueKey));
   }
 
