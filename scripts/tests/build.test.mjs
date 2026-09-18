@@ -44,7 +44,7 @@ test("build emits Firefox and Chrome packages from the same version", () => {
   const chrome = JSON.parse(readFileSync(join(dist, "chrome/manifest.json")));
   assert.equal(firefox.version, chrome.version);
   assert.ok(firefox.browser_specific_settings.gecko);
-  assert.deepEqual(firefox.background.scripts, ["browser-api.js", "settings.js", "background.js"]);
+  assert.deepEqual(firefox.background.scripts, ["browser-api.js", "settings.js", "match.js", "background.js"]);
   assert.equal(chrome.background.service_worker, "service-worker.js");
   assert.equal(chrome.minimum_chrome_version, "120");
   assert.equal(chrome.browser_specific_settings, undefined);
@@ -52,10 +52,10 @@ test("build emits Firefox and Chrome packages from the same version", () => {
   assert.equal(server.match(/^VERSION = "([^"]+)"/m)?.[1], firefox.version);
   assert.equal(chrome.icons["128"], "icons/icon-128.png");
   for (const path of Object.values(chrome.icons)) assert.ok(existsSync(join(dist, "chrome", path)));
-  for (const path of ["background.js", "browser-api.js", "content.js", "settings.js", "popup.html", "icons/icon.svg"]) {
+  for (const path of ["background.js", "browser-api.js", "content.js", "match.js", "settings.js", "popup.html", "icons/icon.svg"]) {
     assert.deepEqual(readFileSync(join(dist, "firefox", path)), readFileSync(join(dist, "chrome", path)), path);
   }
-  assert.equal(readFileSync(join(dist, "chrome/service-worker.js"), "utf8"), "importScripts(\"browser-api.js\", \"settings.js\", \"background.js\");\n");
+  assert.equal(readFileSync(join(dist, "chrome/service-worker.js"), "utf8"), "importScripts(\"browser-api.js\", \"settings.js\", \"match.js\", \"background.js\");\n");
   });
 });
 
