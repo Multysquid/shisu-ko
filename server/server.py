@@ -632,6 +632,12 @@ class App:
                 if s.duration:
                     end = min(end, s.duration)
         if find_cached_audio(video_id) is None and fallback is None:
+            if s is not None:
+                with s.lock:
+                    # Cached cues can outlive the audio file: the session then looks ready but holds
+                    # no audio, so mark it pending to make get_session fetch the audio again.
+                    if s.status == "ready" and s.audio is None and not s.fetching:
+                        s.status = "pending"
             self.get_session(video_id, f"https://www.youtube.com/watch?v={video_id}")
             raise ClipNotReady()
         return make_clip(video_id, max(0.0, start), end, fmt, fallback)
