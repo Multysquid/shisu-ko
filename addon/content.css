@@ -78,8 +78,10 @@
   font-size: 0.75em;
   line-height: 1;
   cursor: pointer;
+  /* Hidden, not just transparent: an invisible button must not catch clicks next to the subtitle. */
   opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  visibility: hidden;
+  transition: opacity 0.15s ease, background 0.15s ease, visibility 0s linear 0.15s;
   pointer-events: auto;
   user-select: none;
 }
@@ -87,6 +89,8 @@
 .shisuko-sub:hover .shisuko-mine,
 .shisuko-mine:focus-visible {
   opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
 }
 
 .shisuko-mine:hover {
@@ -239,12 +243,15 @@
   line-height: 1.4;
   padding: 0 2px;
   opacity: 0;
-  transition: opacity 0.15s ease;
+  visibility: hidden;
+  transition: opacity 0.15s ease, visibility 0s linear 0.15s;
 }
 
 .shisuko-line:hover .shisuko-line-mine,
 .shisuko-line-mine:focus-visible {
   opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
 }
 
 .shisuko-empty {
