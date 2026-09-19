@@ -27,6 +27,12 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   never shadow DOM. Yomitan and other popup dictionaries depend on it.
 - Never use `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `eval` or `script.src` in the content
   script. youtube.com enforces Trusted Types; only `textContent`/`createElement` style DOM code works.
+- Settings are untrusted input before they reach CSS: every style value goes through a sanitiser
+  in `applyStyleSettings()` (`clampNumber`, `oneOf`, `hexColor`, `fontStack` with
+  `FONT_FAMILY_RE`, which admits only letters, digits, spaces, dots, hyphens and underscores). A
+  font family that fails the rule falls back to the preset; no quote, semicolon or `url(` reaches
+  the stylesheet. `popup.js` keeps copies of `FONT_FAMILY_RE`, the preset stacks and
+  `MODEL_NAME_RE`; `addon/tests/popup-copies.test.js` keeps them equal to the originals.
 - Application code uses the `browser.*` promise API. Firefox provides it natively; the shared
   `browser-api.js` adapter supplies it on Chrome, where its internal bridge necessarily calls
   `chrome.*` callbacks. Application code must not call `chrome.*` directly.
@@ -39,6 +45,13 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   localhost, validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`, and answers browser requests
   only from the extension's own origin or from pages on loopback hosts (`origin_allowed()`), so
   arbitrary websites cannot drive downloads and transcription.
+- A model name from a client (`model` in `/sync`) must match `MODEL_NAME_RE`
+  (`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$`) and contain no `..`;
+  anything else is answered with `MODEL_NAME_HINT` and never stored. A valid name is reduced to
+  its canonical alias (`canonical_model_name()`: `large`, `Systran/faster-whisper-large-v3` and
+  `large-v3` are one model) and resolved through `faster_whisper.download_model()` before it is
+  loaded. A raw client string must never reach `WhisperModel()`, which also opens local
+  directories; only the operator's `--model` may be a folder, and it skips the download.
 - `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S).
   Off must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption
   hiding, no arrow-key handling, no Anki polling. Only the toggle command itself keeps working.
@@ -47,7 +60,11 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   an arbitrary point on every page load. Every place the content script reads or seeks the
   playhead goes through `playhead()` / `seekPlayhead()`.
 - Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`.
-  Cue caches are `cache/<video_id>.cues.json` and are only reused when model and language match.
+  Cue caches are only reused when model (compared canonically) and language match. The loaded
+  model's cues are `cache/<video_id>.cues.json`; when another model takes the file over,
+  `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json` (slug: the
+  canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
+  `load_cache()` brings them back from there after a switch back.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
@@ -98,6 +115,72 @@ seconds are there instead of being marked covered) and `/clip` read it. Live ses
 written to the cue cache; when the stream ends and comes back as a video, `Fetcher.fetch()` drops
 the live cues and changes the session token so the client starts over on the video's clock.
 `server/tests/test_live.py` drives the follower with a fake source and clock.
+
+## How model switching works
+
+The popup's `model` setting names the Whisper model the server should run; `--model` is only the
+default. The content script sends it with every `/sync` (`modelForSync()`, trimmed, empty for the
+default), and `App.request_model()` stores the wish: an empty name becomes the operator's
+`--model` (not validated, it may be a folder), an invalid name is not stored (`model_state()`
+answers that request with `MODEL_NAME_HINT`), a valid one is stored as its canonical alias
+(`canonical_model_name()`, built lazily from `faster_whisper.utils._MODELS`: alias -> repo id ->
+first alias, so `large` and `Systran/faster-whisper-large-v3` are `large-v3`), and a name that
+failed less than `--retry-after` seconds ago is ignored (`in_cooldown()`), since the client
+re-sends the setting every second.
+
+`Transcriber.run()` calls `App.switch_model_if_wanted()` before every window, so the swap never
+runs while a window is being transcribed. It is a small state machine over `wanted_model`,
+`model_name`, `model_preparing`, `model_prepared`, `model_loading` and `model_error`, all under
+`App.lock`:
+
+1. Nothing wanted (`wanted == model_name`): drop leftover prepared files, clear `model_loading`.
+2. Wanted but nothing in flight: start `prepare_model(wanted)` on a daemon thread
+   (`prepare_thread`), set `model_preparing = model_loading = wanted`, keep transcribing with the
+   old model. `prepare_model()` runs `download_model_files()`: `faster_whisper.download_model()`
+   into `MODELS_DIR` plus a `model.bin` check, so a PyTorch checkpoint is refused before
+   `WhisperModel()` sees it (the operator's `--model` folder skips the download). Nothing here
+   touches the GPU, so a typo, a missing repo or an offline hub costs only a failed download:
+   `model_error = (name, friendly_model_error())`, `model_failed_at`, `wanted_model` reset to the
+   loaded model. There is no retry without a new request.
+3. A download still running: keep transcribing, report the wanted name as loading (a change of
+   mind cannot cancel a download; the new name waits behind it and stale files are dropped).
+4. Files prepared for the wanted name: `self.model = None; gc.collect()` first, because on a GPU
+   whose memory is mostly held by other programs two models rarely fit side by side, then
+   `load_model(args, wanted, path=dir)`. Success: `model_name = wanted`, error cleared,
+   `restart_sessions()`. Failure: `model_error`, `wanted_model = previous`, `reload_model(previous)`;
+   if even that fails the server has no model left and calls `os._exit(3)` so the launcher
+   restarts it on `--model`.
+
+`restart_session()` clears cues, covered ranges, speech and `seg_next`, gives the session a new
+token (the client drops everything on a token change, `dropCues()` in `content.js`), sets a
+session without audio back to `pending` so `get_session()` fetches it again (the old model's
+cache may have marked it covered without ever downloading), and calls `load_cache()` for the new
+model. `/health` reports `model` (loaded, canonical), `default_model`, `model_loading`,
+`model_error` as `{model, error, names}` (`names` from `model_spellings()`: every alias and the
+repo id of the failed model, so the popup can match whatever spelling the viewer typed) and
+`models` (`downloaded_models()`, the `models--owner--name` folders under canonical names).
+`/sync` adds `model`, `model_loading` and `model_error`, the last judged for the name that
+request carried and null for any other. `friendly_model_error()` turns huggingface_hub's
+exceptions into one line: unknown size, not found on Hugging Face, could not reach Hugging Face,
+no `model.bin`, else the last line of the message cut to 200 characters.
+
+On the client, `content.js` keeps `state.modelLoading` / `state.modelError` from each answer,
+shows `Loading model X… (a first use downloads it)` or `Shisu-ko: model X: <error>` (an error is
+shown even with progress messages off, both parts capped by `truncate()`), and the storage
+listener clears the verdict and syncs at once when the model setting changes. `popup.js` polls
+`/health` every two seconds while open: the badge says "Loading model" during a switch, and
+`modelErrorFor()` puts the server's verdict under the field only when the field's value (or the
+default while empty) is one of the failed model's spellings.
+
+Tests: `server/tests/test_model_switch.py` fakes `faster_whisper` in `sys.modules` (a
+`download_model()` over a temp directory and a slice of `_MODELS`), stands the transcriber thread
+down and calls `switch_model_if_wanted()` by hand (`tick()` joins the real prepare thread, a
+blocking `Event` variant looks at the server mid-download); it covers names and aliases, the
+prepare and swap, every failure path and the cooldown, the per-model cache files and both
+endpoints. `addon/tests/content.test.js` covers the model name in `/sync`, the restart on a new
+session token, the status texts and `fontStack()`; `addon/tests/popup-copies.test.js` keeps the
+popup's copies of `FONT_FAMILY_RE`, the preset stacks and `MODEL_NAME_RE` equal to the originals
+and the model hint in step with the `/health` shape.
 
 ## How automatic mining works
 
@@ -239,7 +322,8 @@ node --test addon/tests/*.test.js
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
 `REQUEST_TIMEOUT_MS`) need an extra script run in the same context to expose them, since they
 live in the global lexical environment rather than as globalThis properties. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting its IIFE to return its
-pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, ...); it throws if the file's shape changes.
+pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, `fontStack`, `modelForSync`, ...) and the
+`browser.storage.onChanged` listener as `onSettingsChanged`; it throws if the file's shape changes.
 When adding a new setting or a new pure helper, add a matching test rather than only exercising
 it manually.
 
@@ -260,7 +344,9 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 - GPU memory is often shared with games or wallpaper apps. `load_model()` reads free VRAM with
   `nvidia-smi` and picks `int8_float16` below 4.5 GB; a driver reset shows up as a process death
   without a traceback (Windows LiveKernelEvent 141). The launchers restart the server; exit code 2
-  means a startup error that must not be retried.
+  means a startup error that must not be retried. Exit code 3 asks for a restart: a broken GPU
+  context, and also a failed model switch after which the previous model could not be reloaded,
+  which would leave the server running without any model.
 - AnkiConnect: send requests without a `Content-Type` header (a "simple" request needs no CORS
   preflight), call `requestPermission` first, find the newest card with `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.

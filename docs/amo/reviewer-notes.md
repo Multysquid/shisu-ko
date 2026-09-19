@@ -4,8 +4,10 @@ Shisu-ko shows live Japanese subtitles on YouTube. It is one half of a two-part 
 companion server (server/server.py in the same repository, Python, MIT) runs on the user's own
 computer, listens on http://127.0.0.1:8790, downloads the audio track of the video the user is
 watching with yt-dlp and transcribes it with Whisper (faster-whisper). The extension sends the
-video id and the current playback position to that server once per second while a video plays,
-receives subtitle cues back and renders them over the player as plain DOM text (textContent), so
+video id, the current playback position and the name of the Whisper model chosen in the popup
+(a faster-whisper size or a Hugging Face repo id; empty for the server's default) to that server
+once per second while a video plays, receives subtitle cues back and renders them over the
+player as plain DOM text (textContent), so
 popup dictionaries such as Yomitan can scan them. Optionally it sends a screenshot of the video
 frame and an MP3 clip of the sentence to Anki through the AnkiConnect add-on
 (http://127.0.0.1:8765), or saves them to Downloads/shisu-ko-mining/.
@@ -83,7 +85,7 @@ CODE THAT MAY NEED A WORD
   mined screenshot. DRM-protected videos taint the canvas; the extension then attaches only the
   audio.
 - background.js, apiRequest()/fetchClip(): the only requests to the server, POST /sync with
-  {video_id, t, since} and GET /clip?video_id&start&end&format; anki(): AnkiConnect JSON
+  {video_id, t, since, model} and GET /clip?video_id&start&end&format; anki(): AnkiConnect JSON
   requests (requestPermission, findNotes, storeMediaFile, updateNoteFields, and the fields of
   the one note being filled).
 - The content script never uses innerHTML or similar: youtube.com enforces Trusted Types, so

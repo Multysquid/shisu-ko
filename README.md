@@ -30,8 +30,10 @@ audio from YouTube and the one-time model download.
 - **Sentence mining by itself.** The moment Yomitan adds a card, a screenshot and an MP3 clip of
   the whole sentence go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
   does the same on demand, into the newest card or into your Downloads folder.
-- **Your hardware, your model.** Whisper large-v3 by default; one flag switches to
-  `kotoba-whisper-v2.0-faster` (Japanese-specialised, about 6x faster) or to a small CPU model.
+- **Your hardware, your model.** Whisper large-v3 by default. The popup switches to any other
+  model without restarting the server: a faster-whisper size or a Hugging Face repo id of a
+  CTranslate2 model, such as `kotoba-tech/kotoba-whisper-v2.0-faster` (Japanese-specialised,
+  about 6x faster) or a small CPU model. `--model` only sets the default.
 - **Native, Nix or Docker.** A one-time setup script on Windows, Linux and macOS, a Nix flake,
   or a container with GPU support. All of them share the same model folder.
 
@@ -225,11 +227,24 @@ box, an outline, and the transcript docked left:
 |---|---|
 | Height above the bottom | Where the subtitle box sits, 2-40% of the player height; it still drops when YouTube's controls fade out |
 | Font | Gothic (the default stack), Gothic bold, Rounded or Mincho, for the subtitle and the transcript |
+| Font family | Any font installed on this computer, by name. It goes in front of the preset's stack, so the preset stays the fallback and still decides the weight. The popup previews the result and says whether the name resolved; Firefox cannot list installed fonts, hence the suggestions instead of a menu |
 | Text colour | Colour of the subtitle text |
 | Background | Opacity of the black box behind the text, 0-100% |
 | Outline the text | Black outline instead of the box; readable over bright video with the background turned down |
 | Transcript panel side | Docks the panel right or left; the subtitle moves out of its way |
-| Reset style | Restores the six settings above and nothing else |
+| Reset style | Restores the seven settings above and nothing else |
+
+The **Transcription model** drawer picks the Whisper model the server runs. The field takes a
+faster-whisper size (`large-v3`, `large-v3-turbo`, `distil-large-v3`, `medium`, `small`, ...)
+or the Hugging Face repo id `owner/name` of a CTranslate2 model
+(`kotoba-tech/kotoba-whisper-v2.0-faster`); empty means the server's own `--model`, which the
+placeholder shows. Models already downloaded are offered as suggestions. The change applies while
+a video plays: a model that is not on disk yet is downloaded from Hugging Face first, while the
+current model keeps subtitling, and once the swap is done the video's transcript starts over with
+the new model. Meanwhile the badge on the video says "Loading model X…"; a name the server cannot
+use shows "Shisu-ko: model X: …" with the reason, even with progress messages off, and the previous
+model keeps running. The popup mirrors this under the field: the status badge says "Loading model"
+during a switch, and the hint under the field carries the server's verdict on the name you typed.
 
 The last drawer, **Anki, clips and server**, holds where mined material goes (Anki's newest
 card or the Downloads folder, with an optional Downloads fallback when Anki is unreachable), the
@@ -243,7 +258,7 @@ sentence, the clip format (MP3 or WAV) and the Shisu-ko server URL (default
 Firefox (addon/)                                 Local server (server/), http://127.0.0.1:8790
 +----------------------------------+             +------------------------------------------------+
 | content script on youtube.com    |  POST /sync | 1. yt-dlp downloads the audio track once       |
-|  - video id + playhead, 1x/s     | ----------> |    (a live stream: follows its audio segments) |
+|  - video id, playhead, model 1x/s| ----------> |    (a live stream: follows its audio segments) |
 |  - renders cues as DOM text      | <---------- | 2. PyAV decodes it to 16 kHz mono              |
 |  - hover pauses, Yomitan scans   |   new cues  | 3. Silero VAD + faster-whisper transcribe      |
 |  - screenshot via <canvas>       |  GET /clip  |    windows at the playhead, then ahead of it   |
@@ -256,8 +271,9 @@ Firefox (addon/)                                 Local server (server/), http://
 
 Why a local server instead of running the model in the browser: Whisper large-v3 has 1.5
 billion parameters and needs a GPU, which a browser extension cannot use well. The extension
-therefore only sends the video id and the current playhead once per second, and the server does
-the heavy lifting with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2).
+therefore only sends the video id, the current playhead and the wanted model once per second,
+and the server does the heavy lifting with
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2).
 
 **Scheduling.** When you open a video the server fetches the audio track with
 [yt-dlp](https://github.com/yt-dlp/yt-dlp), decodes a minute around the playhead while the
@@ -273,8 +289,10 @@ timestamps then split the rest into subtitle-sized cues at sentence ends, long p
 character and duration limit; starts snap to the onset of speech, ends get a short lead-out into
 the following silence, fragments are merged and gaps under half a second are closed. The
 reasoning and the measurements behind these rules are in
-[docs/subtitle-quality.md](docs/subtitle-quality.md). Cues are saved per video in
-`~/.shisu-ko/cache`, so a video you have watched before shows subtitles immediately.
+[docs/subtitle-quality.md](docs/subtitle-quality.md). Cues are saved per video and per model in
+`~/.shisu-ko/cache`, so a video you have watched before shows subtitles immediately: the
+current model's cues are `<video_id>.cues.json`, and when you switch models another model's
+cues are kept beside it and come back the moment you switch back.
 
 ## Server options
 
@@ -282,8 +300,8 @@ Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `c
 
 | Option | Effect |
 |---|---|
-| `--model kotoba-tech/kotoba-whisper-v2.0-faster` | Japanese-specialised distilled model, about 6x faster and lighter on memory than large-v3 |
-| `--model large-v3-turbo` | OpenAI's faster large model |
+| `--model kotoba-tech/kotoba-whisper-v2.0-faster` | Default model (here the Japanese-specialised distilled one, about 6x faster and lighter on memory than large-v3). The popup overrides the default with any faster-whisper size or Hugging Face repo id, without a restart |
+| `--model large-v3-turbo` | OpenAI's faster large model as the default |
 | `--model small --device cpu` | CPU-only operation |
 | `--compute-type int8_float16` | Halves GPU memory use; chosen by itself when less than 4.5 GB is free |
 | `--cookies-from-browser firefox` | Age-restricted or members-only videos, or when YouTube asks for a sign-in |
@@ -294,18 +312,26 @@ Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `c
 | `--max-cue-seconds 6` / `--min-cue-seconds 0.8` | Longest and shortest cue; shorter ones are extended or merged |
 | `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
+| `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
 | `--allow-remote-ejs` | Lets yt-dlp fetch updated YouTube challenge-solver scripts from GitHub |
 | `--check` | Print environment diagnostics and exit |
 | `--no-update` | Start without looking for a newer version of Shisu-ko first (`run.cmd` / `run.sh`) |
 
-Endpoints, for anyone building on the server: `GET /health`, `POST /sync`
-(`{video_id, t, since}` returns new cues and covered ranges; for a live stream `t` is the
-stream's media clock, `getProgressState().current` in YouTube's player, and the reply carries
-`live: true`), `GET /clip?video_id=&start=&end=&format=mp3|wav`, `GET /sessions` for debugging.
-The server only listens on 127.0.0.1 and answers browser requests only from the extension itself
-or from pages served on this machine, so an arbitrary website cannot drive downloads and
-transcription.
+Endpoints, for anyone building on the server: `GET /health` (`model`, `default_model`,
+`model_loading`, `model_error` as `{model, error, names}` or null, where `names` lists every
+spelling of the failed model (aliases and repo id), `models` with the models downloaded so far,
+device, compute type, language), `POST /sync` (`{video_id, url, t, paused, since, model}`
+returns new cues and covered ranges plus `model` (the loaded one), `model_loading` (the name being
+prepared or swapped in) and `model_error`, the last judged for the name this request asked for
+and null for any other; a model switch answers with a new session token, so the client starts
+over; for a live stream `t` is the stream's media clock, `getProgressState().current` in
+YouTube's player, and the reply carries `live: true`), `GET /clip?video_id=&start=&end=&format=mp3|wav`,
+`GET /sessions` for debugging. The server only listens on 127.0.0.1 and answers browser requests
+only from the extension itself or from pages served on this machine, so an arbitrary website
+cannot drive downloads and transcription. A model name is validated (a size alias or
+`owner/name`, never a path) and resolved through faster-whisper's own download before anything
+is loaded, so a request can never point the server at a local folder.
 
 ## Docker
 
@@ -317,8 +343,9 @@ docker\down.cmd    stop
 
 On Linux/macOS use `docker compose up -d`, `docker compose logs -f`, `docker compose down`.
 Settings live in `.env` (copy `.env.example`): `DATA_DIR` is the host folder for models and
-caches and `WHISPER_MODEL` the model. Point `DATA_DIR` at the native setup's `~/.shisu-ko` to
-share the downloaded model. `compose.cpu.yaml` is a CPU-only variant.
+caches and `WHISPER_MODEL` the default model; the popup can switch the container to another
+model, which is downloaded into `DATA_DIR`. Point `DATA_DIR` at the native setup's `~/.shisu-ko`
+to share the downloaded models. `compose.cpu.yaml` is a CPU-only variant.
 
 The image is `python:3.12-slim` plus the pip-installed CUDA libraries and Deno, about 2 GB. The
 GPU driver comes from the host through the NVIDIA Container Toolkit. Two ways to get that on
@@ -342,13 +369,18 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`. Check the server URL in the popup. |
 | First start sits at "Loading Whisper model" for a long time | The 3 GB download runs at your connection speed. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
+| "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
+| "Shisu-ko: model X: unknown model size" or "… was not found on Hugging Face" | The name in the popup's Transcription model field is not a faster-whisper size or an existing `owner/name` repo. Fix the name there; the previous model keeps running meanwhile. |
+| "Shisu-ko: model X: … not a CTranslate2/faster-whisper model" | The repo holds a PyTorch checkpoint, not converted weights. Convert it with `ct2-transformers-converter`, or pick a `*-ct2` or `faster-whisper` repo of the same model. |
+| Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. |
+| Popup says "X was not found on this computer; the preset is used" or that a font name is letters, digits, spaces, dots, hyphens and underscores | Install the font, or type its family name exactly as the operating system lists it. Quotes, commas and other punctuation are refused; in both cases the preset font applies until the name resolves. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |
 | "YouTube asks for a sign-in" | Restart with `--cookies-from-browser firefox` (native) or `--cookies /data/cookies.txt` (Docker). |
 | Downloads fail after a YouTube update | Update yt-dlp: `~/.shisu-ko/venv/Scripts/python -m pip install -U yt-dlp` (Windows) or the `bin/python` equivalent; or start with `--allow-remote-ejs`. |
 | "This live stream offers no audio segments (DVR may be disabled)" | The streamer turned DVR off. Nothing can be done until the stream is published as a video. |
 | "The live stream has ended" | Reload the page once YouTube shows the recording; the server starts over on the video's clock. |
-| Server says "Only N MiB of GPU memory is free" or restarts by itself | Other programs (games, Wallpaper Engine, VR software) hold most of the VRAM. The server switches to int8 weights; with under about 2.5 GB free the display driver can reset under load (Windows logs LiveKernelEvent 141). Close GPU-heavy apps or use `kotoba-whisper-v2.0-faster`. Cached cues survive restarts. |
-| CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device; update the NVIDIA driver or use `--model small`. |
+| Server says "Only N MiB of GPU memory is free" or restarts by itself | Other programs (games, Wallpaper Engine, VR software) hold most of the VRAM. The server switches to int8 weights; with under about 2.5 GB free the display driver can reset under load (Windows logs LiveKernelEvent 141). Close GPU-heavy apps or type `kotoba-tech/kotoba-whisper-v2.0-faster` into the popup's model field. Cached cues survive restarts. |
+| CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device; update the NVIDIA driver or type `small` into the popup's model field. |
 | Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
 | Mining says the card has none of the fields | Set the image/audio field names in the popup to the fields of your note type. |
 | No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |
@@ -423,10 +455,16 @@ not change your Anki collection.
 
 The server suite covers window planning, interval merging, cue building and the hallucination
 gates, the preview decode, the live-stream buffer and follower (driven by a fake source and
-clock), fetch retries, the origin policy, session tokens and the on-disk cue cache. The extension
+clock), fetch retries, the origin policy, session tokens and the on-disk cue cache.
+`test_model_switch.py` drives a model switch with a fake faster-whisper: name validation and
+aliases, the download beside the working model, the swap and session restart, every failure path
+and cooldown, the per-model cache files and what `/health` and `/sync` report. The extension
 suite runs `background.js` and the helpers of `content.js` in a Node `vm` sandbox that stands in
 for the WebExtension APIs: settings storage, the server, AnkiConnect and Downloads proxying,
-sentence mining, the live clock and the master switch.
+sentence mining, the live clock and the master switch. `content.test.js` also covers the model
+name sent with every sync, the restart on a new session token, the model status and error
+messages and the font stack; `popup-copies.test.js` keeps the popup's copies of the font and
+model-name rules equal to those in `content.js` and `server.py`.
 
 ## Acknowledgements
 

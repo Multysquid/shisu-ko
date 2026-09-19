@@ -38,6 +38,9 @@
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
   const TOAST_MAX_CHARS = 240;
+  // The status line is one line over the video; a server error can carry a traceback or a URL.
+  const STATUS_ERROR_MAX_CHARS = 160;
+  const STATUS_NAME_MAX_CHARS = 100;
   const MINE_RECENT_WINDOW_S = 6;
   const HOVER_CAPTURE_DELAY_MS = 400;
   // Long enough that skimming through a video prepares nothing, short enough that a sentence the
@@ -63,6 +66,10 @@
     rounded: '"M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", "Hiragino Maru Gothic Pro", "Yu Gothic UI", "Yu Gothic", sans-serif',
     mincho: '"Noto Serif JP", "Noto Serif CJK JP", "Hiragino Mincho ProN", "Hiragino Mincho Pro", "Yu Mincho", "YuMincho", serif',
   };
+  // A font family name as CSS may see it: letters and digits (Japanese names such as 游ゴシック
+  // included), spaces, dots, hyphens and underscores. Anything else (quotes, semicolons, braces,
+  // backslashes, url(...)) never reaches the stylesheet. popup.js keeps a copy for its preview.
+  const FONT_FAMILY_RE = /^[\p{L}\p{N}][\p{L}\p{N} _.\-]{0,99}$/u;
   const TRANSCRIPT_SIDES = ["right", "left"];
   const SUB_POSITION_MIN = 2;
   const SUB_POSITION_MAX = 40;
@@ -97,6 +104,8 @@
     serverError: null,
     offline: false,
     serverSession: null,
+    modelLoading: null, // name of the model the server is loading right now; cues wait for it
+    modelError: null, // why the model this client asked for cannot be used
     activeCueId: null,
     activeLineEl: null,
     transcriptDirty: true,
@@ -177,6 +186,12 @@
       /* ignore malformed URLs */
     }
     return null;
+  }
+
+  // Text cut to `max` characters, the last one an ellipsis when something was cut. Pure.
+  function truncate(text, max) {
+    const s = String(text);
+    return s.length > max ? s.slice(0, max - 1) + "…" : s;
   }
 
   function formatTime(seconds) {
@@ -267,8 +282,18 @@
 
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !changes.settings) return;
-    state.settings = Object.assign({}, DEFAULT_SETTINGS, changes.settings.newValue || {});
+    const next = Object.assign({}, DEFAULT_SETTINGS, changes.settings.newValue || {});
+    // A verdict belongs to the name it was given for. Keeping it under a corrected name would show
+    // "model large-v3: not a model name" until the next round trip, up to five seconds while paused,
+    // so the old verdict goes now and the server is asked about the new name at once.
+    const modelChanged = modelForSync(next) !== modelForSync(state.settings);
+    if (modelChanged) {
+      state.modelError = null;
+      state.modelLoading = null;
+    }
+    state.settings = next;
     applySettings();
+    if (modelChanged) sync();
   });
 
   // Settings come from storage, so every value is treated as untrusted input before it reaches CSS.
@@ -286,7 +311,28 @@
     return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
   }
 
-  // Turn the six style settings into custom properties that content.css reads. Setting them on
+  function fontFamilyName(value) {
+    const name = typeof value === "string" ? value.trim() : "";
+    return FONT_FAMILY_RE.test(name) ? name : "";
+  }
+
+  // The font-family value for the subtitle and the transcript: the preset's stack, with the
+  // viewer's own installed font in front of it when the name is clean. The preset still decides
+  // the weight. Pure: the two settings in, a CSS value out.
+  function fontStack(subFont, subFontFamily) {
+    const preset = SUB_FONTS[oneOf(subFont, Object.keys(SUB_FONTS), DEFAULT_SETTINGS.subFont)];
+    const family = fontFamilyName(subFontFamily);
+    return family ? `"${family}", ${preset}` : preset;
+  }
+
+  // The model name the server is asked for: the setting, trimmed; anything that is not a string
+  // is the server's default. Pure. The server validates the name itself; this only cleans it.
+  function modelForSync(settings) {
+    const model = settings && settings.model;
+    return typeof model === "string" ? model.trim() : "";
+  }
+
+  // Turn the style settings into custom properties that content.css reads. Setting them on
   // the root keeps the stylesheet the single place that decides where each value lands.
   function applyStyleSettings(root, s) {
     const bottom = clampNumber(s.subPosition, SUB_POSITION_MIN, SUB_POSITION_MAX, DEFAULT_SETTINGS.subPosition);
@@ -296,7 +342,7 @@
     style.setProperty("--shisuko-sub-bottom", `${bottom}%`);
     // The controls have faded out, so the box drops by the same amount it does at the default.
     style.setProperty("--shisuko-sub-bottom-autohide", `${Math.max(SUB_POSITION_MIN, bottom - AUTOHIDE_DROP)}%`);
-    style.setProperty("--shisuko-sub-font", SUB_FONTS[font]);
+    style.setProperty("--shisuko-sub-font", fontStack(font, s.subFontFamily));
     style.setProperty("--shisuko-sub-weight", font === "gothic-bold" ? "700" : "400");
     style.setProperty("--shisuko-sub-color", hexColor(s.subTextColor, DEFAULT_SETTINGS.subTextColor));
     style.setProperty("--shisuko-sub-bg", `rgba(0, 0, 0, ${alpha})`);
@@ -503,30 +549,44 @@
     }
   }
 
-  function onVideoChanged(id) {
-    state.videoId = id;
+  // Forget every cue and everything keyed by a cue id: the transcript lines, the active line, the
+  // hover frame, the covered ranges and the `since` cursor. Cue ids start at 0 again in every
+  // fresh session (another video, a server restart, a model switch), so a stale entry in cueById
+  // would make mergeCues() drop the new cue with the same id and cueById() answer with old text.
+  function dropCues() {
     state.cues = [];
     state.cueById.clear();
     state.since = 0;
     state.covered = [];
+    state.transcriptDirty = true;
+    state.transcriptAppendFrom = null;
+    state.lineById.clear();
+    clearHoverCapture();
+    // The cue ids the held sentences are keyed by mean nothing once the cues are gone.
+    resetPremine();
+    setSubtitle(null);
+    // setSubtitle() already did this where there is an overlay; without one nothing else would.
+    state.activeCueId = null;
+    state.activeLineEl = null;
+  }
+
+  function onVideoChanged(id) {
+    state.videoId = id;
+    dropCues();
     state.duration = 0;
     state.serverStatus = id ? "connecting" : "idle";
     state.serverError = null;
     state.offline = false;
     state.serverSession = null;
-    state.transcriptDirty = true;
-    state.transcriptAppendFrom = null;
-    state.lineById.clear();
+    state.modelLoading = null;
+    state.modelError = null;
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
     state.lastSyncAt = 0;
     state.pausedSince = state.video && state.video.paused ? Date.now() : 0;
     state.live = false;
     state.liveOffset = 0;
-    clearHoverCapture();
-    resetPremine();
     clearResumeTimer();
-    setSubtitle(null);
     renderTranscript();
     updateStatus();
     if (id) sync();
@@ -594,6 +654,7 @@
           t: playhead(),
           paused: !!state.video.paused,
           since: state.since,
+          model: modelForSync(s),
         },
       });
     } finally {
@@ -609,20 +670,31 @@
     }
     state.offline = false;
     const data = result.data || {};
+    // Read before the session check: a model switch ends in a fresh session, and the status must
+    // already say what is being loaded while the old one's cues are dropped. An older server sends
+    // neither key, which is the same as nothing loading and nothing wrong. Both are judged for the
+    // name this request carried: when the settings changed it while the request was out, the
+    // storage listener dropped that name's verdict and could not ask about the new one (this
+    // request was in flight), so this answer's verdict stays out and the new name goes right after.
+    const modelChanged = modelForSync(s) !== modelForSync(state.settings);
+    if (!modelChanged) {
+      state.modelLoading = typeof data.model_loading === "string" && data.model_loading ? data.model_loading : null;
+      state.modelError = typeof data.model_error === "string" && data.model_error ? data.model_error : null;
+    }
     if (typeof data.session === "string" && data.session !== state.serverSession) {
       const restarted = state.serverSession !== null;
       state.serverSession = data.session;
       if (restarted) {
         // The server started a fresh session for this video (restart, model change): its cue ids
-        // begin at 0 again, so drop what we have and fetch the new transcript from the start.
-        state.cues = [];
-        state.since = 0;
-        state.transcriptDirty = true;
-        // The cue ids the held sentences are keyed by mean nothing under the new session.
-        resetPremine();
-        setSubtitle(null);
+        // begin at 0 again, so drop what we have (the held sentences too) and fetch the new
+        // transcript from the start. The cues in this answer were asked for with the old session's
+        // `since`, so they are not taken; the status is the new session's and can be shown right away.
+        dropCues();
+        state.serverStatus = data.status || "unknown";
+        state.serverError = data.error || null;
         renderTranscript();
         updateStatus();
+        if (modelChanged) sync();
         return;
       }
     }
@@ -634,6 +706,7 @@
     if (typeof data.next === "number") state.since = data.next;
     updateStatus();
     render();
+    if (modelChanged) sync(); // after this answer is applied, so the new request carries the right `since`
   }
 
   function mergeCues(incoming) {
@@ -821,6 +894,18 @@
       if (state.offline || state.serverStatus === "offline") {
         text = "Shisu-ko server offline. Start it with server/run.cmd or docker/up.cmd";
         isError = true;
+      } else if (state.modelError) {
+        // The model this viewer asked for is unusable: an error like the server's own, so it shows
+        // even with progress messages off. The fix is in the popup, so the name goes in the text;
+        // both are capped like a toast, since neither is ours.
+        const name = truncate(modelForSync(s), STATUS_NAME_MAX_CHARS);
+        text = `Shisu-ko: model${name ? " " + name : ""}: ${truncate(state.modelError, STATUS_ERROR_MAX_CHARS)}`;
+        isError = true;
+      } else if (state.modelLoading && state.serverStatus !== "error") {
+        // Transcription waits for the load, whatever the session's status says meanwhile. A session
+        // that failed is the exception: no load makes an audio fetch succeed, and its error must
+        // not sit behind minutes of "Loading model" (or, with progress messages off, behind nothing).
+        text = `Loading model ${state.modelLoading}… (a first use downloads it)`;
       } else {
         switch (state.serverStatus) {
           case "connecting":
@@ -866,7 +951,7 @@
     const el = state.toastEl;
     if (!el) return;
     // An error can carry a whole URL or payload; a toast that fills the player helps nobody.
-    el.textContent = text.length > TOAST_MAX_CHARS ? text.slice(0, TOAST_MAX_CHARS - 1) + "\u2026" : text;
+    el.textContent = truncate(text, TOAST_MAX_CHARS);
     let cls = "shisuko-toast";
     if (kind === "error") cls += " shisuko-toast-error";
     else if (kind === "warn") cls += " shisuko-toast-warn";

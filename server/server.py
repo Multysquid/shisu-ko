@@ -3,7 +3,7 @@
 Local transcription server for Shisu-ko, the Firefox extension that overlays live Whisper
 subtitles on YouTube for Japanese learners.
 
-The extension posts {video_id, url, t, since} to /sync about once a second while a
+The extension posts {video_id, url, t, since, model} to /sync about once a second while a
 YouTube video plays. For each new video the server downloads the audio track with
 yt-dlp, decodes it to 16 kHz mono, and a single worker thread transcribes it with
 faster-whisper, starting at the current playhead and continuing ahead of it in
@@ -16,8 +16,9 @@ live edge. Times are the stream's own media clock, which the extension reads fro
 player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
-  GET  /health -> {ok, version, model, device, compute_type, language}
-  POST /sync   -> {ok, session, status, error, duration, title, live, covered, cues, next, busy}
+  GET  /health -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type, language}
+  POST /sync   -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
+                   model, model_loading, model_error}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
@@ -26,6 +27,7 @@ the Python environment, downloaded models, cached audio and cue files.
 from __future__ import annotations
 
 import argparse
+import gc
 import glob
 import io
 import json
@@ -53,6 +55,11 @@ APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
 MODELS_DIR = APP_DIR / "models"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
+# A faster-whisper size or a Hugging Face repo id. WhisperModel() also opens local directories, so
+# anything else (paths, "..") is refused before it can point the server at an arbitrary folder.
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$")
+MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
+                   "or a Hugging Face repo id like owner/name")
 CACHE_FORMAT = 2  # bumped when cue fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
@@ -591,6 +598,11 @@ class Session:
 
     def cache_path(self) -> Path:
         return CACHE_DIR / f"{self.video_id}.cues.json"
+
+    def model_cache_path(self, model) -> Path:
+        """Where the cues of `model` are kept while another model owns cache_path() (see save_cache)."""
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(model))
+        return CACHE_DIR / f"{self.video_id}.{slug}.cues.json"
 
     def fully_covered(self) -> bool:
         return (
@@ -1366,6 +1378,8 @@ class Transcriber(threading.Thread):
     def run(self) -> None:
         while True:
             try:
+                if self.app.switch_model_if_wanted():
+                    continue
                 picked = self.app.pick_work()
                 if picked is None:
                     time.sleep(0.15)
@@ -1466,6 +1480,19 @@ class App:
         self.model = model
         self.device = device
         self.compute_type = compute_type
+        # Which model is loaded, which one the client last asked for, and how the last switch went.
+        # Only the transcriber thread replaces self.model (switch_model_if_wanted, between windows),
+        # so the HTTP threads never touch a model that is being freed or loaded. Names are kept in
+        # their canonical form (canonical_model_name) so that an alias and its repo id compare equal.
+        self.default_model = canonical_model_name(getattr(args, "model", None))
+        self.model_name = self.default_model
+        self.wanted_model = self.model_name
+        self.model_loading: Optional[str] = None  # the name being prepared or swapped in
+        self.model_preparing: Optional[str] = None  # a download runs for this name on prepare_thread
+        self.model_prepared: Optional[tuple] = None  # (name, directory) ready for the transcriber to swap
+        self.prepare_thread: Optional[threading.Thread] = None
+        self.model_error: Optional[tuple] = None  # (name, message) of the last failed prepare or load
+        self.model_failed_at = 0.0
         self.sessions: dict = {}
         self.lock = threading.Lock()
         self.fetcher = Fetcher(args)
@@ -1474,14 +1501,168 @@ class App:
         self.transcriber.start()
 
     def health(self) -> dict:
-        return {
-            "ok": True,
-            "version": VERSION,
-            "model": self.args.model,
-            "device": self.device,
-            "compute_type": self.compute_type,
-            "language": self.args.language,
-        }
+        with self.lock:
+            error = self.model_error
+            state = {
+                "model": self.model_name,
+                "default_model": self.default_model,
+                "model_loading": self.model_loading,
+                "model_error": ({"model": error[0], "error": error[1], "names": model_spellings(error[0])}
+                                if error else None),
+                "models": downloaded_models(),
+                "device": self.device,
+                "compute_type": self.compute_type,
+            }
+        return {"ok": True, "version": VERSION, **state, "language": self.args.language}
+
+    def request_model(self, name) -> None:
+        """Remember the model the client wants; the transcriber switches to it between windows."""
+        name = (name or "").strip()
+        if not name:
+            # An empty setting means the operator's --model. It is not validated: it may be a
+            # local directory, which valid_model_name() refuses because a browser could name one.
+            name = self.default_model
+        elif not valid_model_name(name):
+            return  # not stored: an invalid name is reported per request by model_state()
+        else:
+            name = canonical_model_name(name)
+        with self.lock:
+            if name is None or self.in_cooldown(name):
+                return  # the client re-sends the setting every second; a failed name waits for --retry-after
+            self.wanted_model = name
+
+    def model_state(self, requested) -> dict:
+        """The /sync fields about the model, judged for the name this request asked for."""
+        requested = (requested or "").strip()
+        with self.lock:
+            error = None
+            if not requested:
+                requested = self.default_model  # the operator's choice, valid by definition
+            elif not valid_model_name(requested):
+                error = MODEL_NAME_HINT
+            else:
+                requested = canonical_model_name(requested)
+            if error is None and self.model_error is not None and self.model_error[0] == requested:
+                error = self.model_error[1]
+            return {"model": self.model_name, "model_loading": self.model_loading, "model_error": error}
+
+    def in_cooldown(self, name) -> bool:
+        """True while `name` failed less than --retry-after seconds ago. Call with self.lock held."""
+        return (self.model_error is not None and self.model_error[0] == name
+                and time.time() - self.model_failed_at < getattr(self.args, "retry_after", 30.0))
+
+    def switch_model_if_wanted(self) -> bool:
+        """One step towards the wanted model, called by the transcriber between windows.
+
+        The files come first, on a side thread (prepare_model), while the loaded model keeps
+        transcribing: a typo, a repo that does not exist or an offline hub then costs nothing but
+        a failed download, never the model in use. Once the files are in place the swap happens
+        here, on the transcriber thread so no window runs meanwhile, and the old model is released
+        before the new one loads: on a GPU whose memory is mostly held by other programs the two
+        rarely fit side by side. If the previous model cannot come back after a failed swap, the
+        server exits with code 3 so the launcher restarts it with the default.
+        """
+        with self.lock:
+            wanted, previous = self.wanted_model, self.model_name
+            if wanted == previous or wanted is None:
+                # The client changed its mind: nothing is loading, and files a finished download
+                # left behind are dropped (a running one is dropped by the tick after it ends).
+                self.model_prepared, self.model_loading = None, None
+                return False
+            if self.model_preparing is not None:
+                # A download is still running; keep transcribing with the old model. The wanted
+                # name is reported as loading whether it is that download or the one that follows
+                # it: a change of mind cannot cancel a download, so the new name waits behind it.
+                self.model_loading = wanted
+                return False
+            prepared = self.model_prepared
+            if prepared is None or prepared[0] != wanted:
+                self.model_prepared = None  # files of a name nobody wants any more
+                if self.in_cooldown(wanted):
+                    return False
+                if self.model_error is not None and self.model_error[0] == wanted:
+                    self.model_error = None  # a fresh attempt: the old verdict would be reported beside it
+                self.model_preparing = self.model_loading = wanted
+                self.prepare_thread = threading.Thread(target=self.prepare_model, args=(wanted,),
+                                                       daemon=True, name="prepare-model")
+                self.prepare_thread.start()
+                return False
+            self.model_prepared = None
+            self.model_loading = wanted
+        log.info("Switching from model '%s' to '%s'", previous, wanted)
+        self.model = None
+        gc.collect()  # CTranslate2 gives the GPU memory back once the last reference is gone
+        try:
+            loaded = load_model(self.args, wanted, path=prepared[1])
+        except Exception as exc:  # noqa: BLE001
+            log.error("Could not load the model '%s': %s", wanted, exc)
+            with self.lock:
+                self.model_error = (wanted, friendly_model_error(exc, wanted))
+                self.model_failed_at = time.time()
+                if self.wanted_model == wanted:
+                    self.wanted_model = previous  # nothing retries on its own: the client has to ask again
+                self.model_loading = previous
+            self.reload_model(previous)
+            return False
+        with self.lock:
+            self.model, self.device, self.compute_type = loaded
+            self.model_name = wanted
+            self.model_loading = None
+            self.model_error = None
+        self.restart_sessions()
+        return True
+
+    def prepare_model(self, name: str) -> None:
+        """Download (or locate) the files of `name` and hand them to the transcriber; runs on its own thread."""
+        try:
+            if name == self.default_model and os.path.isdir(name):
+                path = name  # the operator's --model is a folder (see request_model): nothing to download
+            else:
+                path = download_model_files(name)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Could not prepare the model '%s': %s", name, exc)
+            with self.lock:
+                self.model_error = (name, friendly_model_error(exc, name))
+                self.model_failed_at = time.time()
+                self.model_preparing = None
+                self.model_loading = None
+                if self.wanted_model == name:
+                    self.wanted_model = self.model_name  # see switch_model_if_wanted: no retry without a request
+            return
+        with self.lock:
+            self.model_preparing = None
+            self.model_prepared = (name, path)
+
+    def reload_model(self, name) -> None:
+        """Bring the previous model back after a failed switch; without any model the server is useless."""
+        try:
+            loaded = load_model(self.args, name)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Could not load the previous model '%s' either (%s). The server has no model left; "
+                      "exiting so the launcher can restart it.", name, exc)
+            os._exit(3)
+        with self.lock:
+            self.model, self.device, self.compute_type = loaded
+            self.model_loading = None
+
+    def restart_sessions(self) -> None:
+        with self.lock:
+            sessions = list(self.sessions.values())
+        for s in sessions:
+            self.restart_session(s)
+
+    def restart_session(self, s: Session) -> None:
+        """Drop the cues of the model that is gone; the new token tells the client to start over."""
+        with s.lock:
+            s.cues, s.covered, s.speech, s.seg_next = [], [], [], 0
+            s.busy = None
+            s.token = uuid.uuid4().hex[:12]
+            no_audio = s.audio is None and s.preview is None and s.live_audio is None
+            if no_audio and not s.fetching and s.status == "ready":
+                # The old model's cache had marked the video covered, so its audio was never
+                # fetched; pending makes get_session fetch it again (the same trick as in clip()).
+                s.status = "pending"
+            self.load_cache(s)
 
     def sessions_summary(self) -> dict:
         with self.lock:
@@ -1516,7 +1697,8 @@ class App:
             threading.Thread(target=self.fetcher.fetch, args=(s,), daemon=True, name=f"fetch-{video_id}").start()
         return s
 
-    def sync(self, video_id: str, url: str, t: float, since: int) -> dict:
+    def sync(self, video_id: str, url: str, t: float, since: int, model=None) -> dict:
+        self.request_model(model)
         s = self.get_session(video_id, url)
         with s.lock:
             s.want_t = max(0.0, float(t))
@@ -1538,6 +1720,7 @@ class App:
                 "next": len(s.cues),
                 "busy": s.busy,
             }
+        resp.update(self.model_state(model))
         self.maybe_evict()
         return resp
 
@@ -1608,17 +1791,32 @@ class App:
                     s.live_audio = None  # a follower that stopped on an error leaves its buffer behind
                     s.status = "evicted"
 
-    def load_cache(self, s: Session) -> None:
-        path = s.cache_path()
+    def read_cache(self, s: Session, path: Path) -> Optional[dict]:
         if not path.is_file():
-            return
+            return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
-            log.warning("[%s] ignoring unreadable cue cache: %s", s.video_id, exc)
+            log.warning("[%s] ignoring unreadable cue cache %s: %s", s.video_id, path.name, exc)
+            return None
+        return data if isinstance(data, dict) else None
+
+    def cache_model_matches(self, data: dict) -> bool:
+        return canonical_model_name(data.get("model")) == self.model_name
+
+    def load_cache(self, s: Session) -> None:
+        data = self.read_cache(s, s.cache_path())
+        title = (data or {}).get("title") or ""
+        if data is None or not self.cache_model_matches(data):
+            # Another model owns the primary file: save_cache() moved ours aside when it took over.
+            archived = self.read_cache(s, s.model_cache_path(self.model_name))
+            if archived is not None and self.cache_model_matches(archived):
+                data = archived
+                title = title or (archived.get("title") or "")
+        if data is None:
             return
-        s.title = data.get("title") or ""
-        if data.get("model") != self.args.model or data.get("language") != self.args.language:
+        s.title = title
+        if not self.cache_model_matches(data) or data.get("language") != self.args.language:
             return  # cues from another model are not reused, the title is
         if data.get("format") != CACHE_FORMAT:
             return  # older caches have no segment ids, so they are transcribed again
@@ -1640,16 +1838,33 @@ class App:
             data = {
                 "video_id": s.video_id, "title": s.title, "duration": s.duration,
                 "format": CACHE_FORMAT,
-                "model": self.args.model, "language": self.args.language,
+                "model": self.model_name, "language": self.args.language,
                 "cues": list(s.cues), "covered": [list(iv) for iv in s.covered],
                 "speech": [[round(a, 2), round(b, 2)] for a, b in s.speech],
             }
         tmp = s.cache_path().with_suffix(".tmp")
         try:
+            self.archive_other_model_cache(s)
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, s.cache_path())
         except Exception as exc:  # noqa: BLE001
             log.warning("[%s] could not write cue cache: %s", s.video_id, exc)
+
+    def archive_other_model_cache(self, s: Session) -> None:
+        """Move another model's cues out of the primary file before it is overwritten.
+
+        Two hours of large-v3 must survive a one-minute experiment with small: the primary
+        <id>.cues.json always holds the loaded model's cues (the tools and docs refer to it), the
+        other model's go to model_cache_path() and come back through load_cache() after the
+        next switch.
+        """
+        primary = s.cache_path()
+        old = self.read_cache(s, primary)
+        if old is None or self.cache_model_matches(old):
+            return
+        model = old.get("model")
+        if isinstance(model, str) and model:
+            os.replace(primary, s.model_cache_path(canonical_model_name(model)))
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -1801,8 +2016,12 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             self._json(400, {"ok": False, "error": "invalid t/since"})
             return
+        model = body.get("model", "")  # absent in older extensions: the server's own default
+        if not isinstance(model, str):
+            self._json(400, {"ok": False, "error": "invalid model"})
+            return
         try:
-            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since))
+            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model))
         except Exception as exc:  # noqa: BLE001
             log.exception("sync failed")
             self._json(500, {"ok": False, "error": str(exc)})
@@ -1840,9 +2059,109 @@ LOW_VRAM_MB = 4500      # below this, int8 weights are used automatically
 CRITICAL_VRAM_MB = 2500  # below this, warn that the driver may reset under load
 
 
-def load_model(args):
+def valid_model_name(name) -> bool:
+    return isinstance(name, str) and MODEL_NAME_RE.fullmatch(name) is not None and ".." not in name
+
+
+_MODEL_ALIASES: Optional[tuple] = None  # (alias -> repo id, repo id -> first alias), built on first use
+
+
+def model_alias_tables() -> tuple:
+    """faster-whisper's size table both ways; empty when the library (or its private table) is missing."""
+    global _MODEL_ALIASES
+    if _MODEL_ALIASES is None:
+        try:
+            from faster_whisper import utils
+
+            forward = dict(getattr(utils, "_MODELS", None) or {})
+        except Exception:  # noqa: BLE001
+            return {}, {}  # not remembered: the tables can only appear once the library is importable
+        reverse: dict = {}
+        for alias, repo in forward.items():
+            reverse.setdefault(repo, alias)  # the first alias wins: large-v3, not large
+        _MODEL_ALIASES = (forward, reverse)
+    return _MODEL_ALIASES
+
+
+def canonical_model_name(name):
+    """One name per set of weights: large-v3 for Systran/faster-whisper-large-v3, large and itself.
+
+    faster-whisper's size aliases and their repo ids load the same files, so the server compares,
+    reports and caches under the first alias of the repo. Anything it does not know passes through.
+    """
+    if not isinstance(name, str):
+        return name
+    forward, reverse = model_alias_tables()
+    return reverse.get(forward.get(name, name), name)
+
+
+def model_spellings(name) -> list:
+    """Every name that loads the same weights as `name`: its aliases in faster-whisper's table and the repo id.
+
+    /health reports a failed model under its canonical name and lists these beside it, so the
+    popup can match whatever spelling the viewer typed without a table of its own. A name the
+    table does not know is its own only spelling.
+    """
+    forward, _ = model_alias_tables()
+    repo = forward.get(name, name)
+    return [alias for alias, target in forward.items() if target == repo] + [repo]
+
+
+def downloaded_models() -> list:
+    """The models in MODELS_DIR (the hub stores owner/name as models--owner--name), under their canonical names."""
+    if not MODELS_DIR.is_dir():
+        return []
+    names = set()
+    for p in MODELS_DIR.glob("models--*"):
+        parts = p.name[len("models--"):].split("--")
+        if p.is_dir() and len(parts) == 2 and all(parts):
+            names.add(canonical_model_name("/".join(parts)))
+    return sorted(names)
+
+
+def download_model_files(name: str) -> str:
+    """Fetch the CTranslate2 files of `name` into MODELS_DIR (or find them there) and return the directory.
+
+    faster-whisper resolves its size aliases through its own table (ValueError for an unknown
+    size), treats owner/name as a Hugging Face repo id and downloads only the model files. Nothing
+    here touches the GPU, so it runs beside the working model. A repo that is not a converted
+    model (a PyTorch checkpoint, say) comes back without model.bin and is refused before
+    WhisperModel() can choke on it.
+    """
+    from faster_whisper import download_model
+
+    path = download_model(name, cache_dir=str(MODELS_DIR))
+    if not os.path.isfile(os.path.join(path, "model.bin")):
+        raise ValueError(f"{name} is not a CTranslate2/faster-whisper model (no model.bin); convert it with "
+                         "ct2-transformers-converter or pick a *-ct2 / faster-whisper repo")
+    return path
+
+
+def friendly_model_error(exc: BaseException, name: str) -> str:
+    """A short reason for the popup; huggingface_hub's exceptions run to several lines with request ids."""
+    msg = str(exc) or exc.__class__.__name__
+    low = msg.lower()
+    if "invalid model size" in low:
+        return f"unknown model size '{name}'; use a size such as large-v3 or a Hugging Face repo id owner/name"
+    if "no model.bin" in low:
+        return msg
+    if "404" in msg or "not found" in low:
+        return f"'{name}' was not found on Hugging Face"
+    if any(word in low for word in ("connection", "timed out", "timeout", "unreachable", "offline")):
+        return f"could not reach Hugging Face to download '{name}'"
+    lines = [line.strip() for line in msg.splitlines() if line.strip()]
+    return (lines[-1] if lines else msg)[:200]
+
+
+def load_model(args, name: Optional[str] = None, path: Optional[str] = None):
+    """Load `name` (default: --model), picking device and precision for the GPU memory free right now.
+
+    `path` is the directory download_model_files() prepared for `name`; without it WhisperModel
+    resolves the name itself, which is fine for the operator's --model (a size, a repo or a folder).
+    """
     from faster_whisper import WhisperModel
 
+    name = name or args.model
     device = args.device
     if device == "auto":
         device = "cuda" if cuda_available() else "cpu"
@@ -1863,19 +2182,19 @@ def load_model(args):
                             "under load. Consider closing other GPU apps, or run with --device cpu --model small.", free)
     if compute == "auto":
         compute = "float16" if device == "cuda" else "int8"
-    log.info("Loading Whisper model '%s' on %s (%s); models are stored in %s", args.model, device, compute, MODELS_DIR)
+    log.info("Loading Whisper model '%s' on %s (%s); models are stored in %s", name, device, compute, MODELS_DIR)
     kwargs = {"device": device, "compute_type": compute, "download_root": str(MODELS_DIR)}
     if args.cpu_threads:
         kwargs["cpu_threads"] = args.cpu_threads
     try:
-        model = WhisperModel(args.model, **kwargs)
+        model = WhisperModel(path or name, **kwargs)
     except Exception as exc:  # noqa: BLE001
         if device != "cuda":
             raise
         log.warning("CUDA initialisation failed (%s). Falling back to CPU int8, which is slow for large models.", exc)
         device, compute = "cpu", "int8"
         kwargs.update(device=device, compute_type=compute)
-        model = WhisperModel(args.model, **kwargs)
+        model = WhisperModel(path or name, **kwargs)
     try:
         t0 = time.time()
         segs, _ = model.transcribe(np.zeros(SAMPLE_RATE * 2, dtype=np.float32), language=args.language, beam_size=1, vad_filter=False)
@@ -1935,16 +2254,16 @@ def parse_args(argv=None):
     p.add_argument("--max-cue-seconds", type=float, default=6.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8, help="cues shorter than this are extended or merged")
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
-    p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically")
+    p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically, and the least time between two attempts to load a model that failed to download or load")
     p.add_argument("--client-timeout", type=float, default=30.0, help="stop transcribing ahead for a video whose tab has not synced for this many seconds (0 = never stop)")
     p.add_argument("--cpu-threads", type=int, default=0)
     p.add_argument("--cookies-from-browser", default="", help="e.g. firefox, for age-restricted or members-only videos")
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
     p.add_argument("--js-runtime", default="auto", help="JS runtime for yt-dlp: auto, node, deno, bun, or name:path")
     p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
-    p.add_argument("--no-update", action="store_true", help="accepted for run.cmd / run.sh, which skip their update check (server/update.py) when it is given")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--check", action="store_true", help="print environment diagnostics and exit")
+    p.add_argument("--no-update", action="store_true", help="accepted for run.cmd / run.sh, which skip their update check (server/update.py) when it is given")
     return p.parse_args(argv)
 
 
@@ -1967,11 +2286,11 @@ def main() -> None:
         return
 
     try:
-        model, device, compute = load_model(args)
+        # No local name for the model: the switch frees it through App alone (see switch_model_if_wanted).
+        app = App(args, *load_model(args))
     except Exception as exc:  # noqa: BLE001
         log.error("Could not load the model '%s': %s", args.model, exc)
         sys.exit(2)
-    app = App(args, model, device, compute)
     Handler.app = app
     try:
         server = ThreadingHTTPServer((args.host, args.port), Handler)

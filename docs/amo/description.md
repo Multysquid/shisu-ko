@@ -6,7 +6,8 @@ Shisu-ko shows live Japanese subtitles on YouTube in Firefox. A small server on 
 - **Text a dictionary can read.** Subtitles are real page text, so [Yomitan](https://yomitan.wiki/) or any popup dictionary scans them. Hovering a line pauses the video, the dictionary popup keeps it paused, and moving back over the video resumes it.
 - **A transcript panel** with every line so far. A timestamp jumps there, a pickaxe mines it.
 - **Sentence mining without pressing anything.** The moment Yomitan adds a card, Shisu-ko attaches a screenshot of the frame you were reading and an MP3 clip of the whole sentence, through AnkiConnect. The pickaxe on a line, or Alt+Shift+M, does the same on demand, into the newest card or into your Downloads folder.
-- **Your hardware, your model.** Whisper large-v3 by default on an NVIDIA GPU; one flag switches to the Japanese-specialised kotoba-whisper (about 6x faster) or to a small model on the CPU.
+- **Your hardware, your model.** Whisper large-v3 by default on an NVIDIA GPU; the popup switches to the Japanese-specialised kotoba-whisper (about 6x faster), to a small model on the CPU or to any other faster-whisper model, without restarting the server.
+- **Your fonts.** The subtitle font is a preset (gothic, rounded, mincho) or any font installed on your computer, with position, colour, box and outline adjustable.
 
 **You need the companion server**
 

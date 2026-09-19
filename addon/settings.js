@@ -21,10 +21,18 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // subtitle style and position. The defaults reproduce the look before these settings existed.
   subPosition: 11, // % of the player height between the bottom edge and the subtitle box
   subFont: "default", // "default" | "rounded" | "mincho" | "gothic-bold"
+  // A font family installed on this computer, put in front of the preset's stack; the preset
+  // stays the fallback and still decides the weight. Empty means the preset alone.
+  subFontFamily: "",
   subTextColor: "#ffffff",
   subBackgroundOpacity: 72, // % alpha of the black box behind the text
   subOutline: false, // draw a black outline instead of relying on the box
   transcriptSide: "right", // "right" | "left"
+  // transcription
+  // The Whisper model the server should use: a faster-whisper size (large-v3, large-v3-turbo,
+  // distil-large-v3, medium, small, base, tiny, ...) or the Hugging Face repo id "owner/name" of a
+  // CTranslate2 model (kotoba-tech/kotoba-whisper-v2.0-faster). Empty means the server's --model.
+  model: "",
   // sentence mining
   mineTarget: "anki", // "anki" (newest card via AnkiConnect) or "download"
   // Attach screenshot + audio automatically when a new Anki note appears while a video is open.

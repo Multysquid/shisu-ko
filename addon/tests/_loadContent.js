@@ -18,7 +18,8 @@ const OPEN = "(() => {";
 const CLOSE = "})();";
 const EXPORTS =
   "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
-  " premineAllowed, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown };\n";
+  " premineAllowed, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown," +
+  " modelForSync, fontStack, sync, updateStatus };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
@@ -47,6 +48,7 @@ function stubElement() {
 
 function loadContent(overrides = {}) {
   const sent = [];
+  const storageListeners = []; // what content.js registered on browser.storage.onChanged
   const sandbox = {
     console,
     setTimeout: () => 0,
@@ -76,7 +78,7 @@ function loadContent(overrides = {}) {
           return msg.type === "getSettings" ? {} : { ok: true };
         },
       },
-      storage: { onChanged: { addListener: () => {} } },
+      storage: { onChanged: { addListener: (fn) => storageListeners.push(fn) } },
     },
   };
   sandbox.globalThis = sandbox;
@@ -88,7 +90,8 @@ function loadContent(overrides = {}) {
 
   const api = sandbox.__shisukoExports;
   if (!api || typeof api.shouldSync !== "function") throw new Error("content.js did not hand the test harness its helpers");
-  return { api, sandbox, sent };
+  if (storageListeners.length !== 1) throw new Error(`content.js registered ${storageListeners.length} storage listeners, expected one`);
+  return { api, sandbox, sent, onSettingsChanged: storageListeners[0] };
 }
 
 module.exports = { loadContent };

@@ -21,6 +21,7 @@
   --accent: #2f5fd0;
   --accent-ink: #ffffff;
   --ok: #1a7f45;
+  --warn: #9a6700;
   --alert: #b42318;
   --alert-bg: #fdf3f1;
   --alert-line: #f0c7c0;
@@ -38,6 +39,7 @@
     --accent: #7ea6ff;
     --accent-ink: #10121a;
     --ok: #63d089;
+    --warn: #e3b341;
     --alert: #ff938a;
     --alert-bg: #3a2420;
     --alert-line: #5c3630;
@@ -225,6 +227,34 @@ h2 {
   padding-left: 26px;
   font-size: var(--fs-cap);
   color: var(--muted);
+}
+
+/* Hints in a drawer sit under a field, not under a checkbox, so there is nothing to align with. */
+.drawer .hint {
+  padding-left: 0;
+}
+
+/* Amber for "this will fall back", red for "the server refused it": both readable, neither loud. */
+.hint.warn {
+  color: var(--warn);
+}
+
+.hint.error {
+  color: var(--alert);
+}
+
+/* The subtitle in miniature, so a font choice can be judged without a video. */
+.sample {
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: #15181d;
+  color: #ffffff;
+  font-size: 15px;
+  line-height: 1.35;
+  text-align: center;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  overflow-wrap: anywhere;
 }
 
 .soft {

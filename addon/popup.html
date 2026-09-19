@@ -92,6 +92,49 @@
             <option value="mincho">Mincho</option>
           </select>
         </label>
+        <!-- Firefox has no API to list installed fonts: a free field, the usual Japanese-capable
+             fonts as suggestions, and a check in popup.js that says whether the name resolved. -->
+        <label class="row field">
+          <span class="lead">Font family <span class="soft">any font installed on this computer</span></span>
+          <input type="text" id="subFontFamily" list="font-suggestions" spellcheck="false" placeholder="preset above">
+        </label>
+        <datalist id="font-suggestions">
+          <!-- Windows -->
+          <option value="Yu Gothic UI"></option>
+          <option value="Yu Gothic"></option>
+          <option value="Yu Mincho"></option>
+          <option value="Meiryo"></option>
+          <option value="MS Gothic"></option>
+          <option value="MS PGothic"></option>
+          <option value="BIZ UDPGothic"></option>
+          <option value="BIZ UDPMincho"></option>
+          <option value="UD Digi Kyokasho NP-R"></option>
+          <!-- Linux -->
+          <option value="Noto Sans CJK JP"></option>
+          <option value="Noto Serif CJK JP"></option>
+          <option value="Noto Sans JP"></option>
+          <option value="Source Han Sans JP"></option>
+          <option value="IPAexGothic"></option>
+          <option value="IPAexMincho"></option>
+          <option value="VL Gothic"></option>
+          <option value="TakaoPGothic"></option>
+          <option value="Sarasa Gothic J"></option>
+          <!-- macOS -->
+          <option value="Hiragino Sans"></option>
+          <option value="Hiragino Mincho ProN"></option>
+          <option value="Hiragino Maru Gothic ProN"></option>
+          <option value="Klee"></option>
+          <option value="Toppan Bunkyu Gothic"></option>
+          <!-- Google Fonts and other free ones, once installed -->
+          <option value="Zen Kaku Gothic New"></option>
+          <option value="M PLUS 1p"></option>
+          <option value="M PLUS Rounded 1c"></option>
+          <option value="Kosugi Maru"></option>
+          <option value="Klee One"></option>
+          <option value="Shippori Mincho"></option>
+        </datalist>
+        <p class="sample" id="font-sample" lang="ja">日本語の字幕はこう見えます。 Subtitle sample 123</p>
+        <p class="hint" id="font-hint"></p>
         <label class="row swatch">
           <span class="lead">Text colour</span>
           <input type="color" id="subTextColor">
@@ -115,6 +158,28 @@
           </select>
         </label>
         <button type="button" id="reset-style" class="linkbtn">Reset style</button>
+      </div>
+    </details>
+
+    <details>
+      <summary>Transcription model</summary>
+      <div class="drawer">
+        <!-- The server validates the name; popup.js only mirrors the rule for an early hint and
+             adds the models already downloaded (from /health) to the suggestions. -->
+        <label class="row field">
+          <span class="lead">Whisper model <span class="soft">size or Hugging Face repo id</span></span>
+          <input type="text" id="model" list="model-suggestions" spellcheck="false" placeholder="server default">
+        </label>
+        <datalist id="model-suggestions">
+          <option value="large-v3"></option>
+          <option value="large-v3-turbo"></option>
+          <option value="kotoba-tech/kotoba-whisper-v2.0-faster"></option>
+          <option value="distil-large-v3"></option>
+          <option value="medium"></option>
+          <option value="small"></option>
+          <option value="base"></option>
+        </datalist>
+        <p class="hint" id="model-hint"></p>
       </div>
     </details>
 
