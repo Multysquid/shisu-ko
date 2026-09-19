@@ -30,8 +30,19 @@ jobs:
       - name: Check tag version
         if: github.ref_type == 'tag'
         run: test "v$(node -p "require('./addon/manifest.json').version")" = "${GITHUB_REF_NAME}"
+      # Regular Firefox only keeps signed add-ons. The built Firefox package is signed through
+      # addons.mozilla.org (unlisted channel) with the AMO API key kept in the repository secrets;
+      # without the secrets the release still ships the unsigned zips.
+      - name: Sign the Firefox package
+        if: env.WEB_EXT_API_KEY != ''
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+        run: npx --yes web-ext sign --source-dir dist/firefox --artifacts-dir dist --channel unlisted --no-input
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.xpi

@@ -90,7 +90,7 @@ Chrome development uses the same source. Run `npm ci` and `npm run build:chrome`
 After edits, run `npm run watch`; reload the extension on that page and reload the YouTube tab.
 The Firefox source remains directly loadable from `addon/manifest.json`. `npm run build` writes
 both unpacked trees and `dist/shisu-ko-<version>-{firefox,chrome}.zip`. For a Chrome release,
-download `shisu-ko-0.5.0-chrome.zip` from the [Chrome release](https://github.com/ForeverAnApple/shisu-ko/releases/latest),
+download `shisu-ko-0.6.0-chrome.zip` from the [Chrome release](https://github.com/Multysquid/shisu-ko/releases/latest),
 unzip it, and choose **Load unpacked** on the extracted folder. This ZIP is unsigned and is not a
 Chrome Web Store install; it has no automatic updates. Keep the extracted folder and reload the
 extension from `chrome://extensions` after updates. Chrome shortcuts are under
