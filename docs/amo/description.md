@@ -22,7 +22,7 @@ Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScri
 **Shortcuts**
 
 - Alt+Shift+S turns Shisu-ko on or off (the switch in the popup header).
-- Alt+Shift+T toggles the transcript panel.
+- Alt+Shift+L toggles the transcript panel.
 - Alt+Shift+M mines the current sentence.
 - Left and Right jump to the previous or next subtitle (can be turned off).
 

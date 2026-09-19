@@ -5,7 +5,7 @@ Read this before changing code; the README is the user-facing document.
 
 ## What this project is
 
-Shisu-ko shows live Japanese subtitles on YouTube in Firefox. A local Python server transcribes
+Shisu-ko shows live Japanese subtitles on YouTube in Firefox and Chrome. A local Python server transcribes
 the video's audio with Whisper (faster-whisper / CTranslate2) a little ahead of the playhead; the
 extension renders the cues as real DOM text so Yomitan can scan them, and can mine a screenshot
 plus sentence audio into the newest Anki card via AnkiConnect.
@@ -304,8 +304,8 @@ npm run test:browser
 it never maintains a second application copy. `npm run watch` rebuilds after edits; reload the
 unpacked extension in `chrome://extensions` and reload the YouTube tab. The build writes
 versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and development metadata.
-Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, and `background.js` in that
-order with classic `importScripts`, so settings globals retain the same behavior as Firefox.
+Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `match.js` and `background.js`
+in that order with classic `importScripts`, so settings globals retain the same behavior as Firefox.
 
 Server check: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`.
 

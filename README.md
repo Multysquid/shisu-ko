@@ -21,8 +21,8 @@ audio from YouTube and the one-time model download.
 
 - **Live subtitles**, starting a few seconds after a video opens. The server transcribes ahead
   of the playhead and caches every cue, so seeking back or rewatching is instant.
-- **Live streams too.** The server follows the stream's audio a little ahead of where you are
-  watching, so a stream gets the same subtitles, transcript and mining as a video.
+- **Live streams too** (Firefox). The server follows the stream's audio a little ahead of where
+  you are watching, so a stream gets the same subtitles, transcript and mining as a video.
 - **Dictionary-friendly text.** Subtitles are real DOM text, so Yomitan or any popup dictionary
   scans them. Hovering pauses the video, the dictionary popup keeps it paused, and moving back
   over the video resumes it.
@@ -88,17 +88,19 @@ Temporary install (until Firefox restarts):
 
 Permanent install: download the signed `shisu-ko-<version>-signed.xpi` from the
 [latest release](https://github.com/Multysquid/shisu-ko/releases/latest) and open it in Firefox.
-Regular Firefox only keeps signed add-ons; the signed build is produced with `sign-addon.cmd`
-and a free [addons.mozilla.org API key](https://addons.mozilla.org/developers/addon/api/key/)
-(unlisted channel, nobody else sees it). Firefox Developer Edition, Nightly and ESR can instead
-load the unsigned zip with `xpinstall.signatures.required` set to `false` in `about:config`.
+Regular Firefox only keeps signed add-ons; the release workflow signs each tagged version
+through addons.mozilla.org (unlisted channel, nobody else sees it), and `sign-addon.cmd` does
+the same for a local build with a free
+[addons.mozilla.org API key](https://addons.mozilla.org/developers/addon/api/key/). Firefox
+Developer Edition, Nightly and ESR can instead load the unsigned zip with
+`xpinstall.signatures.required` set to `false` in `about:config`.
 
 Chrome development uses the same source. Run `npm ci` and `npm run build:chrome`, then open
 `chrome://extensions`, enable Developer mode, and choose **Load unpacked** on `dist/chrome`.
 After edits, run `npm run watch`; reload the extension on that page and reload the YouTube tab.
 The Firefox source remains directly loadable from `addon/manifest.json`. `npm run build` writes
 both unpacked trees and `dist/shisu-ko-<version>-{firefox,chrome}.zip`. For a Chrome release,
-download `shisu-ko-0.6.0-chrome.zip` from the [Chrome release](https://github.com/Multysquid/shisu-ko/releases/latest),
+download `shisu-ko-<version>-chrome.zip` from the [Chrome release](https://github.com/Multysquid/shisu-ko/releases/latest),
 unzip it, and choose **Load unpacked** on the extracted folder. This ZIP is unsigned and is not a
 Chrome Web Store install; it has no automatic updates. Keep the extracted folder and reload the
 extension from `chrome://extensions` after updates. Chrome shortcuts are under
@@ -192,7 +194,9 @@ live edge, and transcribes each stretch of new audio as it arrives. YouTube's pl
 plays 10-40 seconds behind the live edge, which is the head start the transcription needs; on a
 low-latency stream the subtitles can trail the sound by a few seconds. The extension reads the
 stream's own clock from the player, so the cues stay aligned whatever your latency is and after
-seeking back into the stream.
+seeking back into the stream. That clock is read from the player through Firefox's
+`wrappedJSObject`, which Chrome does not have, so live streams are Firefox only; videos work
+in both browsers.
 
 The last 15 minutes of audio stay in memory for seeking back and for mining. Live cues are not
 cached, because the recording YouTube publishes afterwards runs on a different clock; when a
@@ -391,7 +395,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 
 - On a live stream the subtitles can only be as early as the transcription of the audio behind
   the live edge; with YouTube's low-latency setting they may trail the sound by a few seconds.
-  Streams with DVR disabled cannot be followed.
+  Streams with DVR disabled cannot be followed, and live streams work in Firefox only.
 - Subtitles are hidden while YouTube plays ads.
 - YouTube changes its player regularly; yt-dlp usually needs an update within days.
 - Whisper occasionally hallucinates on music or silence; the voice-activity gates remove most of

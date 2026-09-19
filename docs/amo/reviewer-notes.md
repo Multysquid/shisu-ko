@@ -44,7 +44,7 @@ The demo recording in the README shows the expected behaviour: https://github.co
    https://www.youtube.com/@cijapanese. A badge in the top-left corner of the player goes from
    "Fetching audio..." through "Decoding audio..." to "Transcribing...", and the first subtitles
    appear after 10-30 s on CPU. Hovering a subtitle pauses the video and shows a pickaxe at its
-   right edge; moving the pointer away resumes it. Alt+Shift+T opens the transcript panel;
+   right edge; moving the pointer away resumes it. Alt+Shift+L opens the transcript panel;
    clicking a timestamp seeks the video.
 
 5. Mining without Anki: open the popup, expand "Anki, clips and server", set "Send screenshot and
@@ -68,7 +68,8 @@ PERMISSIONS
 - tabs: the popup calls browser.tabs.query({url: <youtube origins>}) to reload the open YouTube
   tabs after the host permission is granted (a query filtered by URL needs this permission); the
   background script routes the keyboard commands with tabs.query({active: true}) and
-  tabs.sendMessage. Tab URLs are never stored or transmitted.
+  tabs.sendMessage. Tab URLs are never stored; the only URL that leaves the browser is the
+  address of the YouTube page being watched, sent to the local server in /sync (below).
 - host permissions *://www.youtube.com/*, *://m.youtube.com/*, *://youtube.com/*: the content
   script that draws the subtitles.
 - host permissions http://127.0.0.1/* and http://localhost/*: the companion server (port 8790)
@@ -85,7 +86,10 @@ CODE THAT MAY NEED A WORD
   mined screenshot. DRM-protected videos taint the canvas; the extension then attaches only the
   audio.
 - background.js, apiRequest()/fetchClip(): the only requests to the server, POST /sync with
-  {video_id, t, since, model} and GET /clip?video_id&start&end&format; anki(): AnkiConnect JSON
+  {video_id, url, t, paused, since, model} and GET /clip?video_id&start&end&format (asked for
+  the sentence being mined, and 400 ms after a line appears for that line and the next one, so
+  the clip is ready when a card is created; see "Pre-mined sentences" in AGENTS.md); anki():
+  AnkiConnect JSON
   requests (requestPermission, findNotes, storeMediaFile, updateNoteFields, and the fields of
   the one note being filled).
 - The content script never uses innerHTML or similar: youtube.com enforces Trusted Types, so

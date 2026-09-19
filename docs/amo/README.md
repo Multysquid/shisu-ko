@@ -36,13 +36,18 @@ Screenshot captions, in order:
 1. Bump `version` in `addon/manifest.json` and `VERSION` in `server/server.py` together. AMO
    refuses a version number that was uploaded before, in either channel (0.2.0 to 0.4.0 are
    taken by the unlisted builds).
-2. Run the checks: `node --check addon/*.js`, `npx web-ext lint --source-dir addon --ignore-files "tests/**"`,
+2. Run the checks: `for f in addon/*.js; do node --check "$f"; done` (`node --check` takes one file),
+   `npx web-ext lint --source-dir addon --ignore-files "tests/**"`,
    `node --test addon/tests/*.test.js`, `python -m pytest server/tests`.
 3. Build: `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"`
    gives `dist/shisu-ko-<version>.zip`. The zip is the source: there is no build step, so answer
    **No** when AMO asks whether source code needs to be submitted.
 4. Update `release-notes.md`, and `reviewer-notes.md` if permissions or the test steps changed.
-5. Commit and tag (`v<version>`); the reviewer notes point to the tag.
+5. Commit and tag (`v<version>`); the reviewer notes point to the tag. Mind that pushing the tag
+   runs the release workflow, which signs that version in the *unlisted* channel, and AMO then
+   refuses the same number in the listed channel: submit the listing first and tag afterwards
+   (the workflow's signing step then fails for that version, so re-run it or attach the zips by
+   hand), or give the listed submission a version number of its own.
 
 ## First listed version: Developer Hub
 
