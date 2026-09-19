@@ -57,6 +57,7 @@ CACHE_FORMAT = 2  # bumped when cue fields change; older caches are ignored and 
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
 AUDIO_SUFFIXES = {".webm", ".m4a", ".opus", ".mp4", ".mp3", ".ogg", ".oga", ".wav", ".mka", ".aac"}
+PARTIAL_SUFFIXES = {".part", ".ytdl"}  # yt-dlp's in-progress download and its fragment state
 
 log = logging.getLogger("shisu-ko")
 
@@ -775,6 +776,29 @@ def find_cached_audio(video_id: str) -> Optional[Path]:
     return None
 
 
+def discard_partial_downloads(video_id: str) -> int:
+    """Remove yt-dlp's leftover .part/.ytdl files so the next download starts from byte 0."""
+    removed = 0
+    for p in CACHE_DIR.glob(f"{video_id}.*"):
+        if p.suffix.lower() in PARTIAL_SUFFIXES and p.is_file():
+            try:
+                p.unlink()
+                removed += 1
+            except OSError as exc:
+                log.debug("[%s] could not remove %s: %s", video_id, p.name, exc)
+    return removed
+
+
+def is_range_error(exc: BaseException) -> bool:
+    """True for yt-dlp's "HTTP Error 416: Requested range not satisfiable".
+
+    It means yt-dlp resumed a stale .part file past the end of what YouTube serves now (a
+    different format, or a part that already held the whole file); resuming can never succeed.
+    """
+    text = str(exc)
+    return "416" in text and "range" in text.lower()
+
+
 def probe_duration(path: Path) -> Optional[float]:
     """Length of an audio file from its container header, available long before it is decoded."""
     import av
@@ -822,7 +846,7 @@ class Fetcher:
                 runtimes[name] = {}
         return runtimes or {"deno": {}}
 
-    def ytdlp_options(self, video_id: str, progress_hook=None) -> dict:
+    def ytdlp_options(self, video_id: str, progress_hook=None, resume: bool = True) -> dict:
         opts = {
             "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
             "outtmpl": str(CACHE_DIR / f"{video_id}.%(ext)s"),
@@ -834,6 +858,7 @@ class Fetcher:
             "socket_timeout": 30,
             "logger": YtdlpLogger(),
             "js_runtimes": self.js_runtimes(),
+            "continuedl": resume,  # False truncates a leftover .part instead of resuming it
         }
         if self.args.cookies_from_browser:
             opts["cookiesfrombrowser"] = (self.args.cookies_from_browser,)
@@ -969,13 +994,27 @@ class Fetcher:
         else:
             log.debug("[%s] the partial download did not decode yet; waiting for the full file", s.video_id)
 
-    def download(self, s: Session) -> Optional[Path]:
-        """Download the audio track; None for a live stream, which has no track to download."""
+    def download(self, s: Session, resume: bool = True) -> Optional[Path]:
+        """Download the audio track; None for a live stream, which has no track to download.
+
+        A leftover .part file is resumed first. When YouTube refuses the range (416), the file
+        is stale and is thrown away, and the download runs once more from the start.
+        """
+        try:
+            return self.download_once(s, resume)
+        except Exception as exc:  # noqa: BLE001
+            if not resume or not is_range_error(exc):
+                raise
+        log.info("[%s] the leftover partial download cannot be resumed; starting over", s.video_id)
+        discard_partial_downloads(s.video_id)
+        return self.download_once(s, resume=False)
+
+    def download_once(self, s: Session, resume: bool) -> Optional[Path]:
         import yt_dlp
 
         url = f"https://www.youtube.com/watch?v={s.video_id}"
         state = {"fired": False, "abr": 0.0}  # shared with the progress hook below
-        with yt_dlp.YoutubeDL(self.ytdlp_options(s.video_id, self.progress_hook(s, state))) as ydl:
+        with yt_dlp.YoutubeDL(self.ytdlp_options(s.video_id, self.progress_hook(s, state), resume)) as ydl:
             info = ydl.extract_info(url, download=False)
             hint, abr = info.get("duration"), info.get("abr")
             state["abr"] = float(abr) if isinstance(abr, (int, float)) else 0.0
