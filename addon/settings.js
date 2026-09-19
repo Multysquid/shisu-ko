@@ -34,6 +34,9 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   ankiImageField: "Picture",
   ankiAudioField: "SentenceAudio",
   ankiSentenceField: "",
+  // Word/expression field, used to match a new card to its subtitle; empty means the note's
+  // first field.
+  ankiWordField: "",
   clipPaddingMs: 200,
   clipFormat: "mp3",
 });

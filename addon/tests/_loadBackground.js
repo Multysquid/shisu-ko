@@ -11,6 +11,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
+const MATCH_PATH = path.join(__dirname, "..", "match.js");
 const SOURCE_PATH = path.join(__dirname, "..", "background.js");
 
 function makeMemoryStorage(initial) {
@@ -52,7 +53,7 @@ function notifyingStorage(storage, listeners) {
 function loadBackground(overrides = {}) {
   const source = fs.readFileSync(SOURCE_PATH, "utf8");
   const storage = overrides.storage || makeMemoryStorage();
-  const listeners = { onMessage: [], onCommand: [], onChanged: [] };
+  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [] };
 
   const sandbox = {
     console,
@@ -89,6 +90,7 @@ function loadBackground(overrides = {}) {
       tabs: {
         query: async () => [],
         sendMessage: async () => {},
+        onRemoved: { addListener: (fn) => listeners.onTabRemoved.push(fn) },
       },
     },
   };
@@ -98,6 +100,8 @@ function loadBackground(overrides = {}) {
   // settings.js defines SHISUKO_DEFAULT_SETTINGS in the shared global lexical scope, exactly as the
   // manifest loads it before background.js in Firefox.
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
+  // match.js sits between them in the manifest too: background.js reads SHISUKO_MATCH at load time.
+  new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
   // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, sleep) live in the global
   // *lexical* environment, not as globalThis properties, but that environment is shared across
@@ -105,11 +109,26 @@ function loadBackground(overrides = {}) {
   // copy them onto globalThis for the test harness to read.
   new vm.Script(
     "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
-      " globalThis.ankiWatch = ankiWatch;",
+      " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
 
-  return { sandbox, storage, listeners };
+  // Firefox hands every listener the sender as the second argument; the tab id in it is what
+  // tells the pre-mine store whose material this is.
+  function dispatch(msg, tabId) {
+    const sender = tabId === undefined ? {} : { tab: { id: tabId } };
+    for (const fn of listeners.onMessage) {
+      const result = fn(msg, sender);
+      if (result !== undefined) return result;
+    }
+    return undefined;
+  }
+
+  function closeTab(tabId) {
+    for (const fn of listeners.onTabRemoved.slice()) fn(tabId, {});
+  }
+
+  return { sandbox, storage, listeners, dispatch, closeTab };
 }
 
 module.exports = { loadBackground, makeMemoryStorage };

@@ -11,13 +11,14 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
+const MATCH_PATH = path.join(__dirname, "..", "match.js");
 const SOURCE_PATH = path.join(__dirname, "..", "content.js");
 
 const OPEN = "(() => {";
 const CLOSE = "})();";
 const EXPORTS =
-  "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue," +
-  " getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown };\n";
+  "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
+  " premineAllowed, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
@@ -82,6 +83,7 @@ function loadContent(overrides = {}) {
 
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
+  new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
   new vm.Script(instrument(fs.readFileSync(SOURCE_PATH, "utf8")), { filename: SOURCE_PATH }).runInContext(sandbox);
 
   const api = sandbox.__shisukoExports;

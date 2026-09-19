@@ -12,6 +12,7 @@ plus sentence audio into the newest Anki card via AnkiConnect.
 
 ```
 addon/        Firefox source extension, Manifest V3, plain JS; directly loadable without a build
+              (match.js is shared by background.js and content.js; loaded before both)
 server/       server.py (single file) + setup/run scripts; runtime data in ~/.shisu-ko
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
@@ -101,26 +102,70 @@ the live cues and changes the session token so the client starts over on the vid
 
 `ankiPoll()` in `addon/background.js` watches AnkiConnect so the viewer never presses anything:
 the content script asks once per sync tick (visible tab, no ad, not already mining) and the
-background answers with the id of a note Yomitan has just created. Four rules keep it from
-touching the wrong card.
+background answers with the id of a note Yomitan has just created, plus what that note says
+(`notesInfo`: its sentence field and its word field, `ankiWordField` or the field with `order` 0).
+Four rules keep it from touching the wrong card.
 
 - Baseline. Every poll remembers the highest `findNotes("added:1")` id. It reports nothing when
   that baseline cannot be trusted: first poll, previous poll failed, or more than 10 s since the
   previous successful one. Notes added while Anki was closed or no video was open stay untouched.
 - One at a time. Two or more ids above the baseline mean an import or a sync, not a lookup, so
   the baseline moves and nothing is reported.
-- Sentence guard. `addToAnki()` with an explicit note id compares `normalizeSentence()` of the
-  note's sentence field (`ankiSentenceField`, else `Sentence`) with the cue text; unless one
-  contains the other it returns `{ mismatch: true }` and writes nothing. Yomitan's `<b>` around
-  the looked-up word and any spacing difference normalise away.
+- Sentence guard. `addToAnki()` with an explicit note id scores the note's sentence field
+  (`ankiSentenceField`, else `Sentence`) against the spoken sentence and against the cue text with
+  `SHISUKO_MATCH.similarity`; below `MIN_SIMILARITY` on both it returns `{ mismatch: true }` and
+  writes nothing. It is the same scoring the content script used to pick the cue, so the guard can
+  no longer refuse what the matcher accepted.
 - No downloads fallback. `mineCue` with `auto: true` never falls back to the Downloads folder: a
   failure the viewer did not ask for must not scatter files.
 
 Polls are throttled to one request per 250 ms (several tabs poll the same background), and the
 `requestPermission` handshake is retried at most once a minute until Anki grants it. Poll errors
-are logged with `console.debug`, never toasted. The screenshot comes from `state.hoverFrame`,
-captured on `mouseenter` of the subtitle, so the card shows the frame the viewer was reading and
-not whatever is on screen a Yomitan lookup later.
+are logged with `console.debug`, never toasted. A `notesInfo` that fails still reports the id,
+with `note: null`, and the content script falls back to the cue at the playhead.
+
+### Matching a card to its subtitle (`addon/match.js`)
+
+`SHISUKO_MATCH` is a plain script loaded between `settings.js` and the two scripts that use it, in
+both `background.scripts` and `content_scripts[0].js`.
+
+- `normalize(text)` strips HTML tags, decodes `&nbsp; &amp; &lt; &gt; &quot; &#39;`, removes
+  bracket furigana (`{sentence-furigana}` writes ` 食[た]べる`), all whitespace and punctuation.
+- `similarity(a, b)` is 1 when either normalised text contains the other, otherwise the Dice
+  coefficient of their character-bigram sets; `MIN_SIMILARITY` is 0.6. Dice, not the overlap
+  coefficient: dividing by the smaller set alone passes two sentences that merely end the same way
+  (別の字幕です against これはテスト字幕です scores 0.6), and containment already covers a card
+  whose sentence is a real fragment of the cue. Either way the score is 0 unless the shorter text
+  has at least 6 characters or covers half of the longer one: a three-character cue (ですね) inside
+  a long card sentence is not a match, while a short cue's own card carries that same short
+  sentence and still scores 1. Ties in `matchCue` break on that coverage first.
+- `matchCue(cues, note, opts)` picks the cue a card belongs to: cues scoring below the threshold
+  against the note's sentence are out, a cue containing the note's word gets +0.2, and ties break
+  on `opts.rank(cue)` (the content script ranks pre-mined sentences, newest first) and then on
+  distance from `opts.t`, the playhead. A card with no sentence matches on the word alone; a card
+  with neither is nobody's, and `autoMine` falls back to `currentCueForMining()`.
+- It stays O(n): containment is tried on every cue first and bigrams only if nothing contained.
+
+### Pre-mined sentences
+
+Nothing is captured when the card appears; it was captured while the line played. 400 ms after a
+cue becomes active (`schedulePremine` in `content.js`), the content script reads the frame off the
+video and sends `premine` to the background, and asks for the *next* sentence's clip as well, so a
+lookup on either is already paid for. Hovering a line sends the frame again with `hover: true`:
+that is the frame the viewer was actually looking at, and it pins the sentence.
+
+The store is `premined`, a `Map` in `background.js` keyed by tab, video and sentence
+(`cueIds[0]`). Entries hold the base64 frame, the clip and the promise fetching it
+(`fetchClip(..., attempts = 1)`: nobody is waiting, and a failure simply leaves `audio` null for
+the next attempt). Caps: 5 sentences per tab, 10 in all, oldest-touched unpinned first; a pinned
+entry goes only when nothing else is left. Oversize payloads (3 MB image, 5 MB audio) are dropped.
+`premineReset`, `tabs.onRemoved` and a new video or server session clear a tab. Nothing is ever
+written to disk, and nothing survives a restart of the event page.
+
+`mineCue` then uses it: an `imageDataUrl` sent with the message wins, else the held frame; the
+held clip is used when its parameters still match the ones computed now (same start, end and
+format to the millisecond), else the clip is fetched with the usual four tries and stored. Mining
+does not remove an entry: two words from one line make two cards.
 
 ## Commands
 

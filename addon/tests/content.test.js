@@ -250,17 +250,73 @@ test("the master switch also silences the arrow keys", () => {
   assert.equal(off.count(), 0); // YouTube keeps its own 5 s seek
 });
 
+// ------------------------------------------------------------------ sentences
+
+// Four cues: two of one segment, then the same segment again after 13 s of music, then another.
+const SENTENCE_CUES = [
+  { id: 0, seg: 7, start: 0, end: 1, text: "あ" },
+  { id: 1, seg: 7, start: 1.2, end: 2, text: "い" },
+  { id: 2, seg: 7, start: 15, end: 16, text: "う" },
+  { id: 3, seg: 8, start: 16.1, end: 17, text: "え" },
+];
+
 test("sentenceForCue joins the cues of a segment but stops at a long pause", () => {
   const { api } = loadContent();
   const sentenceForCue = api.sentenceForCue;
-  const cues = [
-    { id: 0, seg: 7, start: 0, end: 1, text: "あ" },
-    { id: 1, seg: 7, start: 1.2, end: 2, text: "い" },
-    { id: 2, seg: 7, start: 15, end: 16, text: "う" }, // 13 s of music in between
-    { id: 3, seg: 8, start: 16.1, end: 17, text: "え" },
+  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[1])), { start: 0, end: 2, text: "あい", cueIds: [0, 1] });
+  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[2])), { start: 15, end: 16, text: "う", cueIds: [2] });
+  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[3])), { start: 16.1, end: 17, text: "え", cueIds: [3] });
+});
+
+test("nextSentence steps past every cue of the sentence it is given", () => {
+  const { api } = loadContent();
+  const first = api.sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[0]);
+  assert.deepEqual(plain(api.nextSentence(SENTENCE_CUES, first)), { start: 15, end: 16, text: "う", cueIds: [2] });
+  const third = api.sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[2]);
+  assert.deepEqual(plain(api.nextSentence(SENTENCE_CUES, third)), { start: 16.1, end: 17, text: "え", cueIds: [3] });
+  // Nothing after the last one, and nothing to step from without cue ids.
+  const last = api.sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[3]);
+  assert.equal(api.nextSentence(SENTENCE_CUES, last), null);
+  assert.equal(api.nextSentence(SENTENCE_CUES, null), null);
+  assert.equal(api.nextSentence(SENTENCE_CUES, { start: 0, end: 1, text: "x", cueIds: [99] }), null);
+});
+
+// ------------------------------------------------------------------ pre-mining
+
+test("rankOfCue prefers the sentences the background is already holding, newest first", () => {
+  const { api } = loadContent();
+  const held = [
+    { key: 4, cueIds: [4, 5], image: true, audio: true },
+    { key: 2, cueIds: [2], image: true, audio: false },
   ];
-  const plain = (v) => JSON.parse(JSON.stringify(v)); // vm realm objects differ by prototype
-  assert.deepEqual(plain(sentenceForCue(cues, cues[1])), { start: 0, end: 2, text: "あい" });
-  assert.deepEqual(plain(sentenceForCue(cues, cues[2])), { start: 15, end: 16, text: "う" });
-  assert.deepEqual(plain(sentenceForCue(cues, cues[3])), { start: 16.1, end: 17, text: "え" });
+  assert.equal(api.rankOfCue(held, { id: 5 }), 0);
+  assert.equal(api.rankOfCue(held, { id: 2 }), 1);
+  assert.equal(api.rankOfCue(held, { id: 9 }), Infinity);
+  assert.equal(api.rankOfCue([], { id: 4 }), Infinity);
+});
+
+test("resetPremine tells the background only when the tab holds something", () => {
+  const { api, sent } = loadContent();
+  const before = sent.length;
+  api.resetPremine();
+  assert.equal(sent.length, before, "nothing held, nothing to drop");
+  api.state.premined = [{ key: 4, cueIds: [4], image: true, audio: true }];
+  api.resetPremine();
+  assert.equal(sent[sent.length - 1].type, "premineReset");
+  assert.deepEqual(plain(api.state.premined), []);
+});
+
+test("premineAllowed stops on a hidden tab, an offline server and the master switch", () => {
+  const { api, sandbox } = loadContent();
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 0, paused: false };
+  assert.equal(api.premineAllowed(), true);
+  sandbox.document.visibilityState = "hidden";
+  assert.equal(api.premineAllowed(), false);
+  sandbox.document.visibilityState = "visible";
+  api.state.offline = true;
+  assert.equal(api.premineAllowed(), false);
+  api.state.offline = false;
+  api.state.settings.enabled = false;
+  assert.equal(api.premineAllowed(), false);
 });

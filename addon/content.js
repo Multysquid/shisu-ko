@@ -39,8 +39,11 @@
   const TOAST_MS = 3500;
   const TOAST_MAX_CHARS = 240;
   const MINE_RECENT_WINDOW_S = 6;
-  const HOVER_FRAME_MAX_AGE_MS = 60000;
   const HOVER_CAPTURE_DELAY_MS = 400;
+  // Long enough that skimming through a video prepares nothing, short enough that a sentence the
+  // viewer actually reads is ready before the lookup. Reading a frame back stalls the main thread,
+  // so it must not happen on the tick that puts the line on screen.
+  const PREMINE_CAPTURE_DELAY_MS = 400;
   const ANKI_POLL_LOG_MS = 60000;
   const HOVER_POLL_INTERVAL_MS = 300;
   const SENTENCE_MAX_GAP_S = 1.5; // cues of one segment further apart than this are not one sentence // a card is most likely to appear while a subtitle is hovered
@@ -106,7 +109,10 @@
     lastPointer: { x: 0, y: 0 },
     syncInFlight: false,
     mining: false,
-    hoverFrame: null, // frame grabbed when the subtitle was hovered: the moment the viewer read it
+    // What the background holds ready for this tab, newest sentence first: [{ key, cueIds, image,
+    // audio }]. Replaced by every premine reply; the payloads themselves never come back here.
+    premined: [],
+    premineTimer: null,
     hoverCaptureTimer: null,
     ankiPollInFlight: false,
     lastAnkiPollLog: 0,
@@ -138,6 +144,7 @@
     timers.length = 0;
     detach();
     clearHoverCapture();
+    clearPremineTimer();
     clearResumeTimer();
     // An orphaned instance must stop swallowing arrow keys; the fresh one owns them now.
     window.removeEventListener("keydown", onKeyDown, true);
@@ -512,12 +519,12 @@
     state.lineById.clear();
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
-    state.hoverFrame = null;
     state.lastSyncAt = 0;
     state.pausedSince = state.video && state.video.paused ? Date.now() : 0;
     state.live = false;
     state.liveOffset = 0;
     clearHoverCapture();
+    resetPremine();
     clearResumeTimer();
     setSubtitle(null);
     renderTranscript();
@@ -611,6 +618,8 @@
         state.cues = [];
         state.since = 0;
         state.transcriptDirty = true;
+        // The cue ids the held sentences are keyed by mean nothing under the new session.
+        resetPremine();
         setSubtitle(null);
         renderTranscript();
         updateStatus();
@@ -781,6 +790,7 @@
     } else {
       state.subText.textContent = cue.text;
       state.subBox.classList.remove("shisuko-hidden");
+      schedulePremine(cue);
     }
     highlightTranscript(cue);
   }
@@ -975,7 +985,7 @@
   // sentence, and their outer bounds give its audio range. Pure: cues in, sentence out.
   function sentenceForCue(cues, cue) {
     if (!cue) return null;
-    const own = { start: cue.start, end: cue.end, text: cue.text };
+    const own = { start: cue.start, end: cue.end, text: cue.text, cueIds: [cue.id] };
     if (!Number.isFinite(cue.seg)) return own;
     const all = cues.filter((c) => c && c.seg === cue.seg);
     if (all.length < 2) return own;
@@ -995,7 +1005,23 @@
       start: Math.min(...parts.map((c) => c.start)),
       end: Math.max(...parts.map((c) => c.end)),
       text: parts.map((c) => c.text).join(""),
+      cueIds: parts.map((c) => c.id),
     };
+  }
+
+  // The sentence after this one, so its audio can be fetched before it is spoken. Pure: the cue
+  // list and a sentence in, the sentence starting at the next cue after it out, or null at the end.
+  function nextSentence(cues, sentence) {
+    const list = cues || [];
+    const ids = sentence && Array.isArray(sentence.cueIds) ? sentence.cueIds : [];
+    if (!ids.length) return null;
+    let last = -1;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i] && ids.indexOf(list[i].id) >= 0 && i > last) last = i;
+    }
+    if (last < 0) return null;
+    const next = list[last + 1];
+    return next ? sentenceForCue(list, next) : null;
   }
 
   function captureFrame(video) {
@@ -1015,18 +1041,113 @@
     }
   }
 
+  // ---- pre-mining: prepare every sentence that plays, before any card exists ----
+
+  // Where a cue sits in what the background holds ready, Infinity when it holds nothing for it.
+  // The newest sentence ranks first, so a card that could belong to two identical lines is given
+  // the one the viewer just read. Pure: the held list and a cue in, an order out.
+  function rankOfCue(held, cue) {
+    const list = held || [];
+    for (let i = 0; i < list.length; i++) {
+      const ids = list[i] && list[i].cueIds;
+      if (Array.isArray(ids) && cue && ids.indexOf(cue.id) >= 0) return i;
+    }
+    return Infinity;
+  }
+
+  function heldHas(key, what) {
+    return state.premined.some((entry) => entry.key === key && entry[what]);
+  }
+
+  // Preparing material costs a frame read and a clip request, so it is spent only where a card can
+  // follow: the add-on on, a video open, the server reachable, the tab in front, no ad running.
+  function premineAllowed() {
+    return !!(
+      state.settings.enabled &&
+      state.videoId &&
+      state.video &&
+      !state.offline &&
+      document.visibilityState === "visible" &&
+      !isAdPlaying()
+    );
+  }
+
+  async function sendPremine(sentence, extra) {
+    const res = await sendMessage(
+      Object.assign(
+        {
+          type: "premine",
+          videoId: state.videoId,
+          key: sentence.cueIds[0],
+          cueIds: sentence.cueIds,
+          sentence: { start: sentence.start, end: sentence.end, text: sentence.text },
+        },
+        extra || {}
+      )
+    );
+    if (res && res.ok && Array.isArray(res.held)) state.premined = res.held;
+    return res;
+  }
+
+  function clearPremineTimer() {
+    if (state.premineTimer) {
+      clearTimeout(state.premineTimer);
+      state.premineTimer = null;
+    }
+  }
+
+  function resetPremine() {
+    clearPremineTimer();
+    // Nothing held means nothing to drop, and with the master switch off nothing is ever held: a
+    // switched-off add-on sends no messages at all.
+    if (state.premined.length) sendMessage({ type: "premineReset" });
+    state.premined = [];
+  }
+
+  // A new line is on screen. Wait out the delay before touching the GPU, then prepare this
+  // sentence and ask for the next one's audio, so a lookup on either is already paid for.
+  function schedulePremine(cue) {
+    clearPremineTimer();
+    if (!cue || !premineAllowed()) return;
+    const sentence = sentenceForCue(state.cues, cue);
+    if (!sentence) return;
+    const key = sentence.cueIds[0];
+    state.premineTimer = setTimeout(() => {
+      state.premineTimer = null;
+      premineNow(key);
+    }, PREMINE_CAPTURE_DELAY_MS);
+  }
+
+  async function premineNow(key) {
+    if (!premineAllowed()) return;
+    const active = cueById(state.activeCueId);
+    const sentence = active ? sentenceForCue(state.cues, active) : null;
+    if (!sentence || sentence.cueIds[0] !== key) return; // the line moved on while we waited
+    if (!heldHas(key, "image")) {
+      const imageDataUrl = await captureFrameAsync(state.video);
+      if (!premineAllowed()) return;
+      await sendPremine(sentence, { imageDataUrl });
+    }
+    const next = nextSentence(state.cues, sentence);
+    if (next && !heldHas(next.cueIds[0], "audio")) await sendPremine(next, { ahead: true });
+  }
+
   function captureHoverFrame() {
     // The frame to attach is the one on screen when the viewer hovered the line, but reading a
     // video frame back from the GPU stalls the main thread, so wait until Yomitan's scan has run
-    // and encode off the main thread. With hover-pause on, the frame is the same anyway.
+    // and encode off the main thread. It replaces the frame taken when the line appeared: this is
+    // the one the viewer was looking at, and hovering pins the sentence against eviction.
     clearHoverCapture();
     const id = state.activeCueId;
-    if (id === null || !state.video || (state.hoverFrame && state.hoverFrame.cueId === id)) return;
+    if (id === null || !premineAllowed()) return;
     state.hoverCaptureTimer = setTimeout(() => {
       state.hoverCaptureTimer = null;
-      if (state.activeCueId !== id || !state.video) return;
-      captureFrameAsync(state.video).then((dataUrl) => {
-        if (dataUrl && state.activeCueId === id) state.hoverFrame = { cueId: id, dataUrl, at: Date.now() };
+      if (state.activeCueId !== id || !premineAllowed()) return;
+      const sentence = sentenceForCue(state.cues, cueById(id));
+      if (!sentence) return;
+      captureFrameAsync(state.video).then((imageDataUrl) => {
+        if (!imageDataUrl || state.activeCueId !== id) return;
+        sendPremine(sentence, { imageDataUrl, hover: true });
       });
     }, HOVER_CAPTURE_DELAY_MS);
   }
@@ -1087,15 +1208,20 @@
     showToast(opts.auto ? "Attaching to the new card…" : "Mining…", "info", 15000);
     try {
       const video = state.video;
+      const sentence = sentenceForCue(state.cues, cue);
+      const key = sentence ? sentence.cueIds[0] : null;
+      // The viewer asking for this line gets the frame on screen now. An automatic mine takes the
+      // pre-mined frame when there is one: it is the frame that was up while the line was read,
+      // and by now the video has moved on. Only a line still on screen, or one worth seeking
+      // back to, is captured afresh.
+      const capture = !opts.auto || (!heldHas(key, "image") && (cue.id === state.activeCueId || !!opts.seekForFrame));
       let restore = null;
-      if (opts.seekForFrame) {
+      if (capture && opts.seekForFrame) {
         restore = { t: video.currentTime, paused: video.paused };
         video.pause();
         await seekTo(video, Math.min(cue.end, cue.start + 0.4) - (state.live ? state.liveOffset : 0));
       }
-      const hover = state.hoverFrame;
-      const useHover = opts.auto && hover && hover.cueId === cue.id && Date.now() - hover.at < HOVER_FRAME_MAX_AGE_MS;
-      const imageDataUrl = useHover ? hover.dataUrl : captureFrame(video);
+      const imageDataUrl = capture ? captureFrame(video) : null;
       if (restore) {
         await seekTo(video, restore.t);
         if (!restore.paused) video.play().catch(() => {});
@@ -1105,8 +1231,9 @@
       const result = await sendMessage({
         type: "mine",
         videoId: state.videoId,
+        key,
         cue: { start: cue.start, end: cue.end, text: cue.text },
-        sentence: sentenceForCue(state.cues, cue),
+        sentence: sentence ? { start: sentence.start, end: sentence.end, text: sentence.text } : null,
         imageDataUrl,
         noteId: opts.noteId,
         auto: !!opts.auto,
@@ -1158,7 +1285,7 @@
     if (!res) return;
     // Anki being closed or not having granted access is normal; it must not raise toasts.
     if (!res.ok) logAnkiPollError(res.error);
-    else if (res.newNoteId) autoMine(res.newNoteId);
+    else if (res.newNoteId) autoMine(res.newNoteId, res.note);
   }
 
   function logAnkiPollError(error) {
@@ -1168,13 +1295,30 @@
     console.debug("Shisu-ko: Anki watch:", error || "unknown error");
   }
 
-  function autoMine(noteId) {
-    const cue = currentCueForMining();
-    if (!cue) {
-      showToast("New card detected but no subtitle to attach", "warn");
-      return;
+  // A card is matched to the line it is about, not assumed to be about the line playing now: by
+  // the time Yomitan has written the note the video has moved on, and with pause-on-hover off it
+  // has moved on by several lines. Only a card with neither sentence nor word to go on falls back
+  // to the playhead. Sentences already prepared rank first, so two identical lines resolve to the
+  // one the viewer just read.
+  function autoMine(noteId, note) {
+    const written = note ? SHISUKO_MATCH.normalize(note.sentence) : "";
+    const word = note ? SHISUKO_MATCH.normalize(note.word) : "";
+    let cue;
+    if (written || word) {
+      cue = SHISUKO_MATCH.matchCue(state.cues, note, { rank: (c) => rankOfCue(state.premined, c), t: playhead() });
+      if (!cue) {
+        showToast("New card's sentence matches no subtitle; nothing attached", "warn");
+        return;
+      }
+    } else {
+      cue = currentCueForMining();
+      if (!cue) {
+        showToast("New card detected but no subtitle to attach", "warn");
+        return;
+      }
     }
-    mineCue(cue, { seekForFrame: false, noteId, auto: true });
+    const seekForFrame = cue.id !== state.activeCueId && !!(state.video && state.video.paused);
+    mineCue(cue, { seekForFrame, noteId, auto: true });
   }
 
   function mineCurrent() {

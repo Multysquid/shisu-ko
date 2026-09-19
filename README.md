@@ -129,6 +129,11 @@ sides. A long sentence is shown as several short subtitle lines, but mining alwa
 whole sentence: the clip spans it, and the card's sentence field is grown from the single line
 Yomitan copied to the full sentence, keeping the bold around the word you looked up.
 
+Both are prepared while you watch. Each line that plays has its frame and its clip made ready in
+the background, so making a card attaches them at once, and still attaches them after the line has
+gone from the screen. Nothing is written to disk; a handful of recent sentences are held in memory
+and dropped when you leave the page.
+
 **Anki (default).** Normally you never trigger mining at all:
 
 1. Hover the subtitle; the video pauses.
@@ -138,6 +143,11 @@ Yomitan copied to the full sentence, keeping the bold around the word you looked
    `.mp3` to Anki's media folder, writing `<img src=...>` and `[sound:...]` into the fields. A
    toast on the player confirms it. The screenshot is the frame that was on screen when you
    hovered the line, and playback is left alone so you can keep reading the popup.
+
+The card is matched to the line it is about. Shisu-ko compares the card's sentence and word
+against the transcript rather than assuming you looked up whatever is on screen now, so a card
+made a few lines later, or while the video kept playing, still gets the right frame and the right
+audio. A card that matches no subtitle is left alone and says so.
 
 Shisu-ko only touches a card that appeared while you were watching, one card at a time, and only
 when the card's sentence matches the subtitle, so an import, a sync or a card made elsewhere is
@@ -155,7 +165,9 @@ To mine by hand instead:
 The first time, Anki shows a dialog asking whether to allow the extension; click **Yes**. Field
 names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types;
 change them in the popup to match yours. An optional sentence field is filled with the subtitle
-text only when it is empty, so it never overwrites what Yomitan wrote. If Anki is not running,
+text only when it is empty, so it never overwrites what Yomitan wrote. An optional word field
+names the field holding the expression, used to tell two similar lines apart; left empty, the
+note's first field is read. If Anki is not running,
 mining by hand saves the files to Downloads instead (can be turned off).
 
 **Downloads.** With **Send screenshot and audio to** set to Downloads, the files land in
