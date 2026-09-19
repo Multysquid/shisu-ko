@@ -13,11 +13,12 @@ plus sentence audio into the newest Anki card via AnkiConnect.
 ```
 addon/        Firefox source extension, Manifest V3, plain JS; directly loadable without a build
               (match.js is shared by background.js and content.js; loaded before both)
-server/       server.py (single file) + setup/run scripts; runtime data in ~/.shisu-ko
+server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
 flake.nix        Nix package/app/dev shell for the server and the extension build
 sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner's API key)
+publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds the listing text and assets
 ```
 
 ## Invariants (do not break these)
@@ -167,6 +168,26 @@ held clip is used when its parameters still match the ones computed now (same st
 format to the millisecond), else the clip is fetched with the usual four tries and stored. Mining
 does not remove an entry: two words from one line make two cards.
 
+## How the update step works
+
+`server/update.py` (stdlib only) runs first in `run.cmd` / `run.sh`, never in Docker or Nix. In a
+git checkout it fetches the tracked upstream and fast-forwards (`merge --ff-only`); a diverged
+branch, local changes git would overwrite, a detached HEAD or an unreachable remote leave the
+tree alone with a message. In a folder without `.git` it compares `VERSION` with the newest
+GitHub release tag (`v<VERSION>`, so keep bumping `VERSION`, the manifest and the tag together)
+and unpacks the release zip over the folder, staging each file next to its target and
+`os.replace()`-ing it, without deleting anything. Both paths reinstall `requirements.txt` into
+the running interpreter when it changed (only inside a venv) and point out a changed
+`addon/manifest.json` version. It always exits 0: the server must start even when the update
+fails. `--no-update` or `SHISUKO_NO_UPDATE=1` skips it; `server.py` accepts `--no-update` as a
+no-op so the launchers can pass all arguments through.
+
+The update can replace the launcher that is running it. cmd.exe reads batch files incrementally,
+so in `run.cmd` the update call and `goto loop` must stay on one line and the `:loop` label must
+keep its name; `run.sh` keeps everything in `main()` and ends with `main "$@"; exit` for the same
+reason. `server/tests/test_update.py` drives the real git against a bare repository in a temp
+directory and feeds a locally built zip in place of the GitHub download.
+
 ## Commands
 
 Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
@@ -263,4 +284,10 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 
 - `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"` produces the zip (without the tests folder).
 - `sign-addon.cmd` (repository owner only) produces a signed `.xpi` for regular Firefox.
+- `publish-addon.cmd` (repository owner only) submits the build to the public listing on
+  addons.mozilla.org: `docs/amo/make_metadata.py` turns `docs/amo/{summary.txt,description.md,
+  release-notes.md,reviewer-notes.md}` into the metadata JSON that `web-ext sign --channel listed`
+  sends. The privacy policy, icon and screenshots in `docs/amo/` are set in the Developer Hub;
+  `docs/amo/README.md` is the checklist. AMO refuses a version number that was uploaded before in
+  either channel, so bump before signing or publishing. Update `release-notes.md` per release.
 - Attach the zip/xpi to a GitHub release; rebuild the Docker image with `docker compose build`.

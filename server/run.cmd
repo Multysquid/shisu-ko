@@ -5,6 +5,7 @@ REM (for example after a GPU driver reset). Extra arguments are passed through, 
 REM       run.cmd --model kotoba-tech/kotoba-whisper-v2.0-faster
 REM       run.cmd --cookies-from-browser firefox
 REM       run.cmd --check
+REM       run.cmd --no-update     start without looking for a newer version first
 
 set "VENV=%USERPROFILE%\.shisu-ko\venv"
 if not exist "%VENV%\Scripts\python.exe" (
@@ -12,6 +13,11 @@ if not exist "%VENV%\Scripts\python.exe" (
   pause
   exit /b 1
 )
+
+REM Look for a newer version (git fast-forward, or the newest release for a downloaded folder)
+REM and install it. That can replace this very file, and cmd reads batch files as it goes: the
+REM jump to :loop shares the update's line, so everything after it is read from the new file.
+"%VENV%\Scripts\python.exe" "%~dp0update.py" %* & goto loop
 
 :loop
 "%VENV%\Scripts\python.exe" "%~dp0server.py" %*

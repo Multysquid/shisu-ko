@@ -60,6 +60,12 @@ downloads the Whisper large-v3 model (about 3 GB) into `~/.shisu-ko/models`. The
 when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
 restarts itself if it ever crashes.
 
+Every start first looks for a newer Shisu-ko: a git clone is fast-forwarded to the branch it
+tracks, a folder downloaded as a zip is replaced with the newest release, changed Python
+requirements are installed, and a changed extension is pointed out (reload it in Firefox or
+install the new `.xpi`). Local changes are never overwritten, and being offline just starts
+the current version. `run.cmd --no-update` (or `SHISUKO_NO_UPDATE=1`) skips the check.
+
 **Nix / NixOS:** `nix run github:Multysquid/shisu-ko` (or `nix run .` in a checkout) starts the
 server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` opens a shell with
 Python, web-ext, Node and Deno for development. The flake takes CTranslate2 with CUDA from the
@@ -291,6 +297,7 @@ Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `c
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
 | `--allow-remote-ejs` | Lets yt-dlp fetch updated YouTube challenge-solver scripts from GitHub |
 | `--check` | Print environment diagnostics and exit |
+| `--no-update` | Start without looking for a newer version of Shisu-ko first (`run.cmd` / `run.sh`) |
 
 Endpoints, for anyone building on the server: `GET /health`, `POST /sync`
 (`{video_id, t, since}` returns new cues and covered ranges; for a live stream `t` is the
@@ -372,11 +379,13 @@ addon/                Firefox extension (Manifest V3, plain JS, no build step)
 server/
   server.py           HTTP server: yt-dlp + faster-whisper + live follower + clip cutting
   setup.cmd/.sh       one-time environment setup     run.cmd/.sh   start (with auto-restart)
+  update.py           self-update run first by run.cmd/.sh: git fast-forward or newest release
   tests/              pytest suite                   tools/        cue statistics, re-transcription
 docker/               Windows wrappers for docker compose and the WSL engine installer
-docs/                 subtitle-quality.md, screenshots, the demo recording
+docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing)
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example, flake.nix
-sign-addon.cmd        signs the extension through addons.mozilla.org
+sign-addon.cmd        signs the extension through addons.mozilla.org for self-distribution
+publish-addon.cmd     submits a version to the public listing on addons.mozilla.org
 AGENTS.md             architecture notes, invariants and gotchas for contributors and coding agents
 ```
 

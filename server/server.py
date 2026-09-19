@@ -1903,6 +1903,7 @@ def parse_args(argv=None):
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
     p.add_argument("--js-runtime", default="auto", help="JS runtime for yt-dlp: auto, node, deno, bun, or name:path")
     p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
+    p.add_argument("--no-update", action="store_true", help="accepted for run.cmd / run.sh, which skip their update check (server/update.py) when it is given")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--check", action="store_true", help="print environment diagnostics and exit")
     return p.parse_args(argv)
