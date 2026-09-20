@@ -27,6 +27,7 @@ the Python environment, downloaded models, cached audio and cue files.
 from __future__ import annotations
 
 import argparse
+import errno
 import gc
 import glob
 import io
@@ -48,6 +49,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
+
+try:
+    import msvcrt  # Windows: byte-range locks for the instance lock
+except ImportError:  # pragma: no cover - not Windows
+    msvcrt = None  # type: ignore[assignment]
+try:
+    import fcntl  # POSIX: flock for the same
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 VERSION = "0.7.1"
 SAMPLE_RATE = 16000
@@ -2205,6 +2215,66 @@ def load_model(args, name: Optional[str] = None, path: Optional[str] = None):
     return model, device, compute
 
 
+INSTANCE_LOCK = None  # the open, locked file of hold_instance_lock(); lives as long as the process
+
+
+def instance_lock_path(port: int) -> Path:
+    """The file this server holds locked from before its model load until it exits.
+
+    native_host.py (the popup's Start button) tries the same lock: while it is held and /health
+    does not answer yet, a server is loading, and the button must not start a second one.
+    """
+    return APP_DIR / f"server-{port}.lock"
+
+
+# What the non-blocking lock call raises while another process holds the lock: EWOULDBLOCK /
+# EAGAIN from flock(), EACCES (EDEADLOCK after retries) from msvcrt.locking(). Anything else
+# (ENOLCK on NFS without a lock manager, EOPNOTSUPP, ENOSYS, EINVAL) means the file cannot be
+# locked at all, and must not read as "held": that would stop every start on such a mount.
+LOCK_HELD_ERRNOS = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, getattr(errno, "EDEADLOCK", -1)})
+
+
+def try_lock(path: Path):
+    """Lock `path` for this process, or None when another process holds it; native_host.py has the twin.
+
+    The open file keeps the lock; closing it, or the process ending however it ends, releases it.
+    An errno outside LOCK_HELD_ERRNOS (the file cannot be locked at all) raises, like a file
+    that cannot be opened, and the callers carry on without the lock.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in LOCK_HELD_ERRNOS:
+            return None
+        raise
+    return handle
+
+
+def hold_instance_lock(port: int) -> bool:
+    """Take the port's instance lock for the life of this process; False when another server holds it.
+
+    Taken before the model load, which is when a second server is most likely to be started
+    (the Start button while /health is still silent, a second double-click on run.cmd): it
+    stops here instead of loading the model a second time and failing on the port afterwards.
+    Without a usable lock file the server starts as it always did.
+    """
+    global INSTANCE_LOCK
+    path = instance_lock_path(port)
+    try:
+        INSTANCE_LOCK = try_lock(path)
+    except OSError as exc:
+        log.warning("Cannot use the instance lock %s (%s)", path, exc)
+        return True
+    return INSTANCE_LOCK is not None
+
+
 def run_check() -> None:
     print(f"Python {sys.version.split()[0]} at {sys.executable}")
     print(f"Data directory: {APP_DIR}")
@@ -2235,6 +2305,17 @@ def run_check() -> None:
         print("WARNING: yt-dlp needs Node.js or Deno to download from YouTube.")
     models = sorted(p.name for p in MODELS_DIR.glob("models--*")) if MODELS_DIR.is_dir() else []
     print("Downloaded models: " + (", ".join(models) if models else "none yet (downloaded on first start)"))
+    # The native-messaging host behind the popup's "Start server" button lives next to this file;
+    # loaded by path so a missing or broken native_host.py only costs this one line.
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("shisuko_native_host", Path(__file__).with_name("native_host.py"))
+        native_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native_host)
+        print(f"Start button launcher: {native_host.status_text()}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Start button launcher: could not check ({exc})")
 
 
 def parse_args(argv=None):
@@ -2285,6 +2366,10 @@ def main() -> None:
         run_check()
         return
 
+    if not hold_instance_lock(args.port):
+        log.error("Another server is already starting or running on port %d (it holds %s). Stop it first.",
+                  args.port, instance_lock_path(args.port))
+        sys.exit(2)
     try:
         # No local name for the model: the switch frees it through App alone (see switch_model_if_wanted).
         app = App(args, *load_model(args))

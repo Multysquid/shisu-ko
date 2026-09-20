@@ -38,6 +38,9 @@ if errorlevel 1 (
 echo Installing NVIDIA CUDA libraries for GPU inference (harmless on CPU-only machines) ...
 "%VENV%\Scripts\python.exe" -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 
+REM Register the native-messaging host behind the extension's "Start server" button before
+REM the environment check, which reports whether it is registered.
+"%VENV%\Scripts\python.exe" "%~dp0native_host.py" --register --verbose
 echo.
 echo Environment check:
 "%VENV%\Scripts\python.exe" "%~dp0server.py" --check

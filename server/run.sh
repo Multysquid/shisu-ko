@@ -11,6 +11,10 @@ main() {
   # Looks for a newer version (git fast-forward, or the newest release for a downloaded
   # folder) and installs it; it never stops the server from starting.
   "${VENV}/bin/python" "${HERE}/update.py" "$@"
+  # Registers the native-messaging host behind the extension's "Start server" button
+  # (cheap, idempotent), so a checkout that never re-ran setup.sh gets the button too. After
+  # the update, which writes files without their mode bits: registering restores the wrapper's.
+  "${VENV}/bin/python" "${HERE}/native_host.py" --register
   while true; do
     "${VENV}/bin/python" "${HERE}/server.py" "$@"
     code=$?
