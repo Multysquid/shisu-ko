@@ -18,6 +18,11 @@
     <div class="statusline">
       <span id="server-status" class="badge">Checking server</span>
       <span id="server-detail" class="detail"></span>
+      <!-- Shown only while the server is offline, and in Firefox alone (the launcher is
+           registered for Firefox; see START_AVAILABLE in popup.js). It asks for the
+           nativeMessaging permission on the first click and then has the background start
+           server/run.cmd (run.sh) through the "shisuko" native host; popup.js owns the state. -->
+      <button id="start-server" type="button" class="linkbtn hidden">Start server</button>
     </div>
   </header>
 

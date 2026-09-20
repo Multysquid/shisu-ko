@@ -194,6 +194,21 @@ body.off main {
   color: var(--muted);
 }
 
+/* The one action in the header, shown only while the server is offline: a text button on the
+   status line, in the accent rather than the alarm red, so it reads as the fix and not as more of
+   the problem. It stays put while a start is under way, muted, so the line does not jump. */
+.statusline .linkbtn {
+  align-self: baseline;
+  font-size: var(--fs-cap);
+  font-weight: 600;
+}
+
+.statusline .linkbtn:disabled {
+  color: var(--muted);
+  cursor: default;
+  text-decoration: none;
+}
+
 /* Sections */
 
 main {

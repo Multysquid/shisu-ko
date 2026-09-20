@@ -20,6 +20,9 @@
     "downloads",
     "tabs"
   ],
+  "optional_permissions": [
+    "nativeMessaging"
+  ],
   "host_permissions": [
     "*://www.youtube.com/*",
     "*://m.youtube.com/*",

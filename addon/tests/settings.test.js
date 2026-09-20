@@ -61,3 +61,13 @@ test("settings.js is loaded before the scripts that use it", () => {
     assert.ok(!/const DEFAULT_SETTINGS = (Object\.freeze\()?\{/.test(fs.readFileSync(path.join(ADDON, file), "utf8")), `${file} still defines its own defaults`);
   }
 });
+
+// The "Start server" button talks to a native host, which needs nativeMessaging. Optional, not
+// required: the install prompt stays as it is, and the permission is asked for on the first click.
+test("nativeMessaging is an optional permission, never a required one", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
+  assert.ok(manifest.optional_permissions.includes("nativeMessaging"));
+  assert.ok(!manifest.permissions.includes("nativeMessaging"));
+  const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
+  assert.match(html, /<button id="start-server" type="button" class="linkbtn hidden">Start server<\/button>/);
+});
