@@ -104,6 +104,11 @@
     serverError: null,
     offline: false,
     serverSession: null,
+    // The background refused this tab's /sync: another tab holds the server. Nothing in such an
+    // answer came from the server, so nothing about the server is known while this is true.
+    standby: false,
+    languagePaused: false, // the server stopped transcribing: the speech is not the subtitle language
+    heard: null, // the language code the server hears instead, when it names one
     modelLoading: null, // name of the model the server is loading right now; cues wait for it
     modelError: null, // why the model this client asked for cannot be used
     activeCueId: null,
@@ -578,6 +583,9 @@
     state.serverError = null;
     state.offline = false;
     state.serverSession = null;
+    state.standby = false;
+    state.languagePaused = false;
+    state.heard = null;
     state.modelLoading = null;
     state.modelError = null;
     state.hoverPaused = false;
@@ -609,10 +617,15 @@
   // and cues are wanted. While it is paused, only while the server still has work around the
   // playhead, plus a slow heartbeat so a restart, an error or a late cue is still noticed — and so
   // the server does not drop the session for want of a client.
-  // Pure: { paused, t, status, covered, duration, lastSyncAt } and a clock in, a decision out.
+  // Pure: { paused, t, status, covered, duration, lastSyncAt, standby } and a clock in, a decision out.
   function shouldSync(st, now) {
     if (!st.paused) return true;
     if (now - (st.lastSyncAt || 0) >= SYNC_IDLE_INTERVAL_MS) return true;
+    // Standing by, paused: the heartbeat above is the whole cadence. Its status was left wherever
+    // the last real answer put it, so without this the rule below would make the tab ask every
+    // tick for a server it is not allowed to reach. A playing tab already returned true: that is
+    // what makes taking the right back immediate the moment the viewer looks at it.
+    if (st.standby) return false;
     if (st.status !== "ready") return true; // still fetching, decoding, erroring: keep watching
     const duration = Number(st.duration) || 0;
     const target = duration > 0 ? Math.min(duration, st.t + SYNC_LOOKAHEAD_S) : Infinity;
@@ -631,6 +644,7 @@
       covered: state.covered,
       duration: state.duration,
       lastSyncAt: state.lastSyncAt,
+      standby: state.standby,
     };
     if (shouldSync(decision, Date.now())) sync();
   }
@@ -661,6 +675,16 @@
       state.syncInFlight = false;
     }
     if (videoId !== state.videoId) return;
+    // The background refused this tab: another tab holds the server, and this answer never left
+    // the browser. So nothing is written down here -- not the cues, not `since`, not the covered
+    // ranges, and least of all "the server is reachable". A standby tab that recorded that would
+    // be unable to tell waiting for its turn from a dead server, and would go on fetching clips
+    // and polling Anki against a server it never contacted.
+    if (result && result.ok && result.data && result.data.status === "standby") {
+      state.standby = true;
+      updateStatus();
+      return;
+    }
     if (!result || !result.ok) {
       state.offline = true;
       state.serverStatus = "offline";
@@ -668,6 +692,7 @@
       updateStatus();
       return;
     }
+    state.standby = false;
     state.offline = false;
     const data = result.data || {};
     // Read before the session check: a model switch ends in a fresh session, and the status must
@@ -692,6 +717,8 @@
         dropCues();
         state.serverStatus = data.status || "unknown";
         state.serverError = data.error || null;
+        state.languagePaused = false;
+        state.heard = null;
         renderTranscript();
         updateStatus();
         if (modelChanged) sync();
@@ -700,6 +727,10 @@
     }
     state.serverStatus = data.status || "unknown";
     state.serverError = data.error || null;
+    // The server gave up on this video's language and stopped transcribing. An older server sends
+    // neither key, which reads as "still listening".
+    state.languagePaused = data.language_paused === true;
+    state.heard = typeof data.heard === "string" ? data.heard : null;
     if (typeof data.duration === "number") state.duration = data.duration;
     if (Array.isArray(data.covered)) state.covered = data.covered;
     if (Array.isArray(data.cues) && data.cues.length) mergeCues(data.cues);
@@ -884,30 +915,46 @@
     return coveredEnd(state.covered, t);
   }
 
-  function updateStatus() {
-    const el = state.statusEl;
-    if (!el) return;
-    const s = state.settings;
+  // What the status line should say, and whether it is an error. Pure: a plain view in,
+  // { text, isError } out.
+  //
+  // Precedence. "Offline" and a refused model are verdicts about the server this tab last reached,
+  // and they outrank a local standby: a tab that cannot see the server has worse news than a tab
+  // waiting for its turn. The language pause comes next, above the status switch and not inside
+  // `case "ready"`: it is a property of the video, not a stage of the work, and nesting it would
+  // let it vanish the moment the server reported it beside any other status. Both of the new lines
+  // are shown even with progress messages off, because they are the only answer to "why is nothing
+  // appearing?" -- but neither is an error, so `always`, not `isError`, is what carries them past
+  // the setting.
+  function statusText(view) {
     let text = null;
     let isError = false;
-    if (s.enabled && state.videoId) {
-      if (state.offline || state.serverStatus === "offline") {
+    let always = false;
+    if (view.enabled && view.videoId) {
+      if (view.offline || view.status === "offline") {
         text = "Shisu-ko server offline. Start it with server/run.cmd or docker/up.cmd";
         isError = true;
-      } else if (state.modelError) {
+      } else if (view.modelError) {
         // The model this viewer asked for is unusable: an error like the server's own, so it shows
         // even with progress messages off. The fix is in the popup, so the name goes in the text;
         // both are capped like a toast, since neither is ours.
-        const name = truncate(modelForSync(s), STATUS_NAME_MAX_CHARS);
-        text = `Shisu-ko: model${name ? " " + name : ""}: ${truncate(state.modelError, STATUS_ERROR_MAX_CHARS)}`;
+        const name = truncate(view.model, STATUS_NAME_MAX_CHARS);
+        text = `Shisu-ko: model${name ? " " + name : ""}: ${truncate(view.modelError, STATUS_ERROR_MAX_CHARS)}`;
         isError = true;
-      } else if (state.modelLoading && state.serverStatus !== "error") {
+      } else if (view.standby) {
+        text = "Shisu-ko: subtitles are running in another tab";
+        always = true;
+      } else if (view.languagePaused) {
+        const heard = typeof view.heard === "string" && view.heard ? ` (hearing ${truncate(view.heard, STATUS_NAME_MAX_CHARS)})` : "";
+        text = "Shisu-ko paused: the speech is not in the subtitle language" + heard;
+        always = true;
+      } else if (view.modelLoading && view.status !== "error") {
         // Transcription waits for the load, whatever the session's status says meanwhile. A session
         // that failed is the exception: no load makes an audio fetch succeed, and its error must
         // not sit behind minutes of "Loading model" (or, with progress messages off, behind nothing).
-        text = `Loading model ${state.modelLoading}… (a first use downloads it)`;
+        text = `Loading model ${view.modelLoading}… (a first use downloads it)`;
       } else {
-        switch (state.serverStatus) {
+        switch (view.status) {
           case "connecting":
             text = "Connecting to the Shisu-ko server…";
             break;
@@ -919,14 +966,14 @@
             text = "Decoding audio…";
             break;
           case "error":
-            text = "Shisu-ko: " + (state.serverError || "error");
+            text = "Shisu-ko: " + (view.error || "error");
             isError = true;
             break;
           case "ready": {
-            const t = playhead();
-            const ahead = coveredUntil(t);
+            const t = view.t;
+            const ahead = view.ahead;
             if (ahead === null) text = "Transcribing…";
-            else if (ahead - t < 8 && ahead < state.duration - 1) text = `Transcribing… (ready to ${formatTime(ahead)})`;
+            else if (ahead - t < 8 && ahead < view.duration - 1) text = `Transcribing… (ready to ${formatTime(ahead)})`;
             break;
           }
           default:
@@ -934,7 +981,32 @@
         }
       }
     }
-    if (!s.showStatus && !isError) text = null;
+    if (!view.showStatus && !isError && !always) text = null;
+    return { text, isError };
+  }
+
+  function updateStatus() {
+    const el = state.statusEl;
+    if (!el) return;
+    const s = state.settings;
+    const t = playhead();
+    const { text, isError } = statusText({
+      enabled: s.enabled,
+      showStatus: s.showStatus,
+      model: modelForSync(s),
+      videoId: state.videoId,
+      status: state.serverStatus,
+      error: state.serverError,
+      offline: state.offline,
+      standby: state.standby,
+      languagePaused: state.languagePaused,
+      heard: state.heard,
+      modelLoading: state.modelLoading,
+      modelError: state.modelError,
+      duration: state.duration,
+      t,
+      ahead: coveredUntil(t),
+    });
     // Only touch the DOM when something changed: every mutation wakes other extensions'
     // observers (Bitwarden re-walks the whole page after each one).
     const hidden = el.classList.contains("shisuko-hidden");
@@ -1152,6 +1224,7 @@
       state.videoId &&
       state.video &&
       !state.offline &&
+      !state.standby && // another tab has the server: a clip request would only be refused
       document.visibilityState === "visible" &&
       !isAdPlaying()
     );
@@ -1348,7 +1421,7 @@
   // viewer at the subtitle. A video left paused in a visible tab for two minutes is not being read.
   function ankiPollAllowed() {
     const s = state.settings;
-    if (!s.enabled || !s.autoMine || state.offline) return false;
+    if (!s.enabled || !s.autoMine || state.offline || state.standby) return false;
     // Nothing transcribed yet means nothing a new card could be given.
     if (!state.videoId || !state.cues.length) return false;
     if (document.visibilityState !== "visible" || isAdPlaying()) return false;

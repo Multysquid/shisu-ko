@@ -60,6 +60,14 @@
     browser.tabs = Object.create(chromeApi.tabs);
     for (const name of ["query", "reload", "sendMessage", "create"]) browser.tabs[name] = promiseMethod(chromeApi.tabs, name);
   }
+  // Which tab the viewer is watching. The events come through the prototype chain, as tabs' do;
+  // only WINDOW_ID_NONE and onFocusChanged are read, and both live on the namespace itself.
+  if (chromeApi.windows) {
+    browser.windows = Object.create(chromeApi.windows);
+    for (const name of ["get", "getLastFocused"]) {
+      if (chromeApi.windows[name]) browser.windows[name] = promiseMethod(chromeApi.windows, name);
+    }
+  }
   // The update nudges: the toolbar badge and the system notification. Only where Chrome offers
   // them (the background and the popup); background.js does without either.
   if (chromeApi.action) {

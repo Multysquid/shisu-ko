@@ -609,3 +609,179 @@ test("fontStack falls back to the preset alone for an empty or unusable family n
   assert.ok(!api.fontStack("default", "a\\b").includes("\\")); // a backslash would escape the closing quote
   assert.equal(api.fontStack("default", "x".repeat(100)), `"${"x".repeat(100)}", ${GOTHIC}`);
 });
+
+// ------------------------------------------------------------------ statusText
+
+// Everything updateStatus() reads, with nothing wrong and nothing in progress.
+function view(patch) {
+  return Object.assign(
+    {
+      enabled: true,
+      showStatus: true,
+      model: "",
+      videoId: "abcdef1234",
+      status: "ready",
+      error: null,
+      offline: false,
+      standby: false,
+      languagePaused: false,
+      heard: null,
+      modelLoading: null,
+      modelError: null,
+      duration: 1200,
+      t: 100,
+      ahead: null,
+    },
+    patch
+  );
+}
+
+// The verdict for one such view, in this realm: statusText builds its object inside the sandbox.
+const says = (api, patch) => plain(api.statusText(view(patch)));
+
+// The cases the refactor could most easily have broken, pinned before the new ones.
+test("statusText still says what upstream said about the work in progress", () => {
+  const { api } = loadContent();
+  assert.deepEqual(says(api, {}), { text: "Transcribing…", isError: false });
+  assert.deepEqual(says(api, { ahead: 105 }), { text: "Transcribing… (ready to 1:45)", isError: false });
+  assert.deepEqual(says(api, { ahead: 1199.5 }), { text: null, isError: false }); // caught up to the end
+  assert.deepEqual(says(api, { ahead: 400 }), { text: null, isError: false }); // minutes ahead: nothing to say
+  assert.deepEqual(says(api, { status: "error", error: "This video is only available to members" }), {
+    text: "Shisu-ko: This video is only available to members",
+    isError: true,
+  });
+  assert.deepEqual(says(api, { status: "error", error: null }), { text: "Shisu-ko: error", isError: true });
+  // An error is shown with progress messages off; ordinary chatter is not.
+  assert.equal(says(api, { showStatus: false, status: "error", error: "boom" }).text, "Shisu-ko: boom");
+  assert.equal(says(api, { showStatus: false, status: "connecting" }).text, null);
+  assert.equal(says(api, { enabled: false, status: "connecting" }).text, null);
+  assert.equal(says(api, { videoId: null, status: "connecting" }).text, null);
+});
+
+test("statusText explains a standby tab, even with progress messages off, and calls it no error", () => {
+  const { api } = loadContent();
+  const standby = { text: "Shisu-ko: subtitles are running in another tab", isError: false };
+  assert.deepEqual(says(api, { standby: true }), standby);
+  assert.deepEqual(says(api, { standby: true, showStatus: false }), standby);
+  // It is the answer to "why is nothing appearing?", so it outranks every progress message.
+  assert.deepEqual(says(api, { standby: true, status: "connecting" }), standby);
+  assert.deepEqual(says(api, { standby: true, modelLoading: "large-v3" }), standby);
+});
+
+test("statusText explains a video the server stopped transcribing, with the language it hears", () => {
+  const { api } = loadContent();
+  const paused = "Shisu-ko paused: the speech is not in the subtitle language";
+  assert.deepEqual(says(api, { languagePaused: true }), { text: paused, isError: false });
+  assert.deepEqual(says(api, { languagePaused: true, heard: "en" }), { text: `${paused} (hearing en)`, isError: false });
+  assert.deepEqual(says(api, { languagePaused: true, heard: "" }), { text: paused, isError: false });
+  assert.deepEqual(says(api, { languagePaused: true, heard: 7 }), { text: paused, isError: false });
+  assert.equal(says(api, { languagePaused: true, heard: "en", showStatus: false }).text, `${paused} (hearing en)`);
+  // Not nested in the "ready" case: a server reporting the pause beside any other status still says so.
+  assert.equal(says(api, { languagePaused: true, status: "downloading" }).text, paused);
+  assert.equal(says(api, { languagePaused: true, status: "connecting" }).text, paused);
+});
+
+test("statusText ranks the verdicts about the server above the local ones", () => {
+  const { api } = loadContent();
+  const offline = "Shisu-ko server offline. Start it with server/run.cmd or docker/up.cmd";
+  // A tab that cannot see the server has worse news than a tab waiting for its turn, and the
+  // model it asked for being unusable is a verdict about the server it did reach.
+  assert.deepEqual(says(api, { offline: true, standby: true, languagePaused: true }), { text: offline, isError: true });
+  assert.deepEqual(says(api, { status: "offline", standby: true }), { text: offline, isError: true });
+  assert.deepEqual(says(api, { modelError: "no such model", model: "tiny", standby: true }), {
+    text: "Shisu-ko: model tiny: no such model",
+    isError: true,
+  });
+  // Standby over the language pause: this tab never asked the server about this video at all.
+  assert.equal(says(api, { standby: true, languagePaused: true, heard: "en" }).text,
+    "Shisu-ko: subtitles are running in another tab");
+  // And the language pause over a model load and over "Transcribing…".
+  assert.equal(says(api, { languagePaused: true, modelLoading: "large-v3" }).text,
+    "Shisu-ko paused: the speech is not in the subtitle language");
+});
+
+// ------------------------------------------------------------------ standby
+
+test("a standby answer teaches the tab nothing about the server", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  const bodies = serverAnswering(sandbox, [
+    { status: "ready", session: "a", cues: [cue(0, "一"), cue(1, "二")], next: 2, covered: [[0, 30]], duration: 1200 },
+    { status: "standby" }, // the background refused this tab: it never left the browser
+    { status: "ready", session: "a", cues: [cue(2, "三")], next: 3, covered: [[0, 45]], duration: 1200 },
+  ]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 10, paused: false };
+  api.state.settings.autoMine = true;
+
+  await api.sync();
+  assert.equal(api.state.standby, false);
+  assert.equal(api.premineAllowed(), true);
+  assert.equal(api.ankiPollAllowed(), true);
+  const before = {
+    cues: plain(api.state.cues),
+    since: api.state.since,
+    covered: plain(api.state.covered),
+    duration: api.state.duration,
+    session: api.state.serverSession,
+    status: api.state.serverStatus,
+  };
+  assert.equal(before.since, 2);
+
+  await api.sync();
+  assert.equal(api.state.standby, true);
+  assert.deepEqual(plain(api.state.cues), before.cues);
+  assert.equal(api.state.since, before.since);
+  assert.deepEqual(plain(api.state.covered), before.covered);
+  assert.equal(api.state.duration, before.duration);
+  assert.equal(api.state.serverSession, before.session); // not a new session, not a restart
+  assert.equal(api.state.serverStatus, before.status);   // "standby" is not a server status
+  assert.equal(api.state.offline, false, "nothing was learned about the server either way");
+  assert.equal(api.state.serverError, null);
+  // A tab that may not sync must not fetch clips or poll Anki against a server it never reached.
+  assert.equal(api.premineAllowed(), false);
+  assert.equal(api.ankiPollAllowed(), false);
+  // Paused, it falls back to the idle heartbeat instead of asking every tick; playing, it keeps
+  // asking, which is what makes taking the right back immediate.
+  const st = { paused: true, t: 10, status: api.state.serverStatus, covered: api.state.covered, duration: 1200, lastSyncAt: NOW, standby: true };
+  assert.equal(api.shouldSync(st, NOW + 1000), false);
+  assert.equal(api.shouldSync(st, NOW + 5000), true);
+  assert.equal(api.shouldSync(Object.assign({}, st, { paused: false }), NOW + 1000), true);
+
+  await api.sync();
+  assert.equal(bodies[2].since, 2, "the tab asks on from where it was, not from the start");
+  assert.equal(api.state.standby, false);
+  assert.equal(api.cueById(2).text, "三");
+  assert.equal(api.state.since, 3);
+  assert.equal(api.premineAllowed(), true);
+  assert.equal(api.ankiPollAllowed(), true);
+});
+
+test("sync keeps the server's language verdict and drops it with the cues", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  serverAnswering(sandbox, [
+    { status: "ready", session: "a", language_paused: true, heard: "en", cues: [], next: 0 },
+    { status: "standby" },
+    { status: "ready", session: "a", cues: [], next: 0 },
+    { status: "pending", session: "b", cues: [], next: 0 }, // the server restarted: nothing heard yet
+  ]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 10, paused: false };
+
+  await api.sync();
+  assert.equal(api.state.languagePaused, true);
+  assert.equal(api.state.heard, "en");
+  await api.sync();
+  assert.equal(api.state.languagePaused, true, "a standby answer says nothing about the video");
+  assert.equal(api.state.heard, "en");
+  await api.sync();
+  assert.equal(api.state.languagePaused, false, "the server is listening again");
+  assert.equal(api.state.heard, null);
+
+  api.state.languagePaused = true;
+  api.state.heard = "en";
+  await api.sync();
+  assert.equal(api.state.languagePaused, false);
+  assert.equal(api.state.heard, null);
+});

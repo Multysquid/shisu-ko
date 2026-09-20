@@ -118,6 +118,25 @@ carries `seg`, the id of the Whisper segment it came from, so the extension can 
 mining. Cue caches are format 2; older caches are ignored. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change; keep them working.
 
+Language watch: when `--language-patience` is above 0 (default 60) every window's speech-only
+samples (`speech_samples()`, capped at 30 s) go through `model.detect_language()` before
+transcription. `language_vote()` is the pure state machine over `Session.foreign_seconds`,
+`heard` and `language_paused`: a foreign vote below the patience still transcribes, so one
+misdetection never costs a subtitle; at the patience the session pauses, and every planned window
+is then only listened to, until the target language is heard again.
+
+What a paused session listens to goes into `Session.probed`, never into `covered`, and `probed`
+is never written to the cache. That is the invariant that keeps a wrong pause cheap: `covered`
+always means "Whisper has seen this", so a video paused by mistake can never cache as finished
+and go permanently blank. `planned_ranges()` is the union the planners walk; hearing the target
+language again empties `probed` and offers that audio back. `lookahead_for()` keeps the probes
+within `LANGUAGE_PROBE_AHEAD` (90 s) of the playhead rather than `--lookahead`. A detector that
+raises is never what silences a video: the window is transcribed unjudged. `--language-patience 0`
+skips detection entirely and also refuses to restore a pause from the cache, so it really is the
+cure the README offers. `/sync` and `/sessions` report `heard` and `language_paused`; the cache
+stores them under `language_state`, discarded when `--language` changes. `retranscribe.py` sets
+the patience to 0. `server/tests/test_language.py` covers the rules with a scripted model.
+
 Before the whole track is decoded (seconds for a long video), `Fetcher.make_preview()` decodes a
 minute around the playhead into `Session.preview` (`(offset, samples)`) and marks the session
 ready; `plan_window()` then only plans inside the preview and `audio_slice()` serves it. When the
@@ -210,6 +229,29 @@ endpoints. `addon/tests/content.test.js` covers the model name in `/sync`, the r
 session token, the status texts and `fontStack()`; `addon/tests/popup-copies.test.js` keeps the
 popup's copies of `FONT_FAMILY_RE`, the preset stacks and `MODEL_NAME_RE` equal to the originals
 and the model hint in step with the `/health` shape.
+## One tab at a time
+
+Only one YouTube tab's `/sync` reaches the server. `background.js` elects it in `electSyncTab()`
+(pure, tested in `addon/tests/tabs.test.js`). The rules, in order: the tab the viewer is watching
+wins if it is the one asking; else the asker takes it when nobody holds it or the holder has been
+quiet for `HOLD_TIMEOUT_MS` (12 s, two missed idle heartbeats); else a holder that is the watched
+tab keeps it, playing or paused; else a playing asker beats a paused holder; else the holder keeps
+it. The election never names a tab that did not ask — a focused tab claims the right on its own
+next tick — because parking it on a tab that has stopped asking blanks every other tab until the
+entry ages out.
+
+Which tab is being watched comes from `tabs.onActivated` plus `windows.onFocusChanged`, and the
+focus listener must ask `tabs.query({active: true, windowId})` itself: browsers fire
+`onActivated` only when the selection inside a window changes, so a window whose tab was never
+re-selected would otherwise stay unknown and its video starve in standby.
+
+A refused tab gets `{status: "standby"}` from the background without a server call. The content
+script treats that as "this tab is not the one talking to the server" and nothing more: it leaves
+`offline`, the server status, the cues and `since` untouched, so a tab that stands by and comes
+back keeps its subtitles, and it stops pre-mining and polling Anki, which is what kept `/clip`
+reaching the server from a tab the election had refused. `statusText()` in `content.js` (pure,
+tested) shows standby and the language pause even with `showStatus` off, since they are the only
+answer to "why is nothing appearing?"; neither is styled as an error.
 
 ## How automatic mining works
 

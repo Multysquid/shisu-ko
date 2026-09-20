@@ -58,6 +58,7 @@ def parse_args(argv=None):
     p.add_argument("--cpu-threads", type=int, default=0)
     args = p.parse_args(argv)
     args.lookahead = 0.0          # no playhead here: cover the whole track
+    args.language_patience = 0.0  # transcribe every window, whatever language it is in
     args.client_timeout = 0.0
     args.idle_minutes = 10 ** 6
     args.retry_after = 10 ** 6

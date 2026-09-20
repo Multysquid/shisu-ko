@@ -19,7 +19,7 @@ const CLOSE = "})();";
 const EXPORTS =
   "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
   " premineAllowed, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown," +
-  " modelForSync, fontStack, sync, updateStatus };\n";
+  " modelForSync, fontStack, sync, updateStatus, statusText };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
