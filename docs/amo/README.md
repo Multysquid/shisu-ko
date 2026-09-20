@@ -43,6 +43,9 @@ Screenshot captions, in order:
    gives `dist/shisu-ko-<version>.zip`. The zip is the source: there is no build step, so answer
    **No** when AMO asks whether source code needs to be submitted.
 4. Update `release-notes.md`, and `reviewer-notes.md` if permissions or the test steps changed.
+   A changed `privacy-policy.md` is pasted into the Developer Hub by hand (the listing's **Edit**
+   pages): only the first submission takes it from the file, `publish-addon.cmd` never uploads
+   it. 0.9.0 changes it (the release check against GitHub).
 5. Commit and tag (`v<version>`); the reviewer notes point to the tag. Mind that pushing the tag
    runs the release workflow, which signs that version in the *unlisted* channel, and AMO then
    refuses the same number in the listed channel: submit the listing first and tag afterwards
@@ -78,7 +81,8 @@ version's page in the Developer Hub, and are answered there.
 `amo-metadata.json` and runs `web-ext sign --channel listed`, which uploads the build, creates the
 version with the release notes and reviewer notes, and rewrites the listing text from the files
 here. It returns as soon as the version exists; approval happens later. The privacy policy, icon
-and screenshots stay as set in the Developer Hub.
+and screenshots stay as set in the Developer Hub: a changed `privacy-policy.md` is pasted there
+by hand (step 4 above).
 
 It also works for the very first listed version (AMO accepts the metadata on version creation);
 the privacy policy, icon and screenshots then still have to be added in the Developer Hub before

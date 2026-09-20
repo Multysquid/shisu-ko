@@ -114,12 +114,19 @@ try {
     const command = commands.find((entry) => entry.name === name);
     assert.equal(command?.shortcut, shortcut, `Chrome command ${name} should register ${shortcut}`);
   }
-  await worker.evaluate((serverUrl) => new Promise((resolve) => chrome.storage.local.set({ settings: { serverUrl } }, resolve)), closedHealthUrl);
+  // A fresh update check with no release keeps every popup this test opens off api.github.com:
+  // the popup's first question asks for the day's check, and the background answers it from a
+  // stored one that is under a day old (background.js, startupCheck).
+  const updateCheck = { checkedAt: Date.now(), latest: null, error: null };
+  await worker.evaluate((stored) => new Promise((resolve) => chrome.storage.local.set(stored, resolve)), { settings: { serverUrl: closedHealthUrl }, updateCheck });
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await poll(() => popup.locator("#server-status").textContent(), (value) => value === "Server offline");
   assert.equal(await popup.locator("#serverUrl").inputValue(), closedHealthUrl);
   await popup.locator("details").last().locator("summary").click();
+  // The seeded check answers the result line; a live one would name a release or a failure.
+  await poll(() => popup.locator("#update-result").textContent(), (value) => value === "No release found, checked just now");
+  assert.equal(await popup.locator("#update-banner").isHidden(), true, "no banner without a release");
   await popup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
   await popup.locator("#mineTarget").selectOption("download");
   await popup.locator("#pauseOnHover").check();

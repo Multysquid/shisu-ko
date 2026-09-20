@@ -20,13 +20,26 @@ REM jump to :loop shares the update's line, so everything after it is read from 
 REM Before that, register the native-messaging host behind the extension's "Start server"
 REM button (cheap, idempotent), so a checkout that never re-ran setup.cmd gets the button too.
 "%VENV%\Scripts\python.exe" "%~dp0native_host.py" --register
+REM The server's exit code 4 (POST /update) jumps back to :update. That is safe although the
+REM update may replace this file: the lines between the server's exit and "goto update" are read
+REM from the old file, which nothing changed since the jump to :loop, and the "goto loop" that
+REM shares the update's line was parsed before the update ran and looks the label up in the new
+REM file, so no line is ever read from a stale offset.
+:update
 "%VENV%\Scripts\python.exe" "%~dp0update.py" %* & goto loop
 
 :loop
+REM Tells server.py that this loop is around: its POST /update (the extension's Update button)
+REM answers yes only then, and exits with code 4 so that this loop runs the update. Set here
+REM rather than at the top: a launcher from before this variable that has just updated itself
+REM arrives in this file through its own, already parsed "goto loop", so only the lines after
+REM :loop run for it, and the server it starts would otherwise refuse the button.
+set "SHISUKO_LAUNCHER=1"
 "%VENV%\Scripts\python.exe" "%~dp0server.py" %*
 set "CODE=%ERRORLEVEL%"
 if "%CODE%"=="0" goto end
 if "%CODE%"=="2" goto end
+if "%CODE%"=="4" goto update
 echo.
 echo The server stopped unexpectedly (exit code %CODE%). Restarting in 5 seconds... press Ctrl+C to quit.
 timeout /t 5 /nobreak >nul

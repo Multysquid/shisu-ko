@@ -156,3 +156,54 @@ test("a Chrome runtime without sendNativeMessage gets no wrapper for it", () => 
   assert.equal(typeof sandbox.browser.runtime.sendNativeMessage, "undefined");
   assert.equal(typeof sandbox.browser.permissions.request, "function");
 });
+
+// The update nudges: badge, notifications and the release page tab. Chrome's action and
+// notifications namespaces answer callbacks like the rest; the events pass through untouched.
+test("Chrome action and notifications are bridged to promises, with the events passed through", async () => {
+  const { chrome } = loadChrome();
+  const calls = [];
+  const onClicked = { addListener() {} };
+  chrome.action = {
+    setBadgeText(details, callback) { calls.push(["setBadgeText", details]); callback(); },
+    setBadgeBackgroundColor(details, callback) { calls.push(["setBadgeBackgroundColor", details]); callback(); },
+  };
+  chrome.notifications = {
+    create(id, options, callback) { calls.push(["create", id, options]); callback(id); },
+    clear(id, callback) { calls.push(["clear", id]); callback(true); },
+    onClicked,
+  };
+  chrome.tabs.create = (options, callback) => { calls.push(["tabs.create", options]); callback({ id: 9 }); };
+  const sandbox = { chrome, console, Promise, globalThis: null };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source).runInContext(sandbox);
+  const { browser } = sandbox;
+  assert.equal(await browser.action.setBadgeText({ text: "1" }), undefined);
+  assert.equal(await browser.action.setBadgeBackgroundColor({ color: "#5b6fb8" }), undefined);
+  assert.equal(await browser.notifications.create("shisuko-update", { type: "basic", title: "t", message: "m" }), "shisuko-update");
+  assert.equal(await browser.notifications.clear("shisuko-update"), true);
+  assert.equal(browser.notifications.onClicked, onClicked);
+  assert.deepEqual(await browser.tabs.create({ url: "https://example.com/" }), { id: 9 });
+  assert.deepEqual(calls, [
+    ["setBadgeText", { text: "1" }],
+    ["setBadgeBackgroundColor", { color: "#5b6fb8" }],
+    ["create", "shisuko-update", { type: "basic", title: "t", message: "m" }],
+    ["clear", "shisuko-update"],
+    ["tabs.create", { url: "https://example.com/" }],
+  ]);
+  // runtime.onStartup and onInstalled are Chrome's own, reachable through the prototype.
+  chrome.runtime.onStartup = { addListener() {} };
+  assert.equal(browser.runtime.onStartup, chrome.runtime.onStartup);
+});
+
+test("a Chrome without action or notifications (a content script) gets neither wrapper", () => {
+  const { chrome } = loadChrome();
+  delete chrome.action;
+  delete chrome.notifications;
+  const sandbox = { chrome, console, Promise, globalThis: null };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  assert.doesNotThrow(() => new vm.Script(source).runInContext(sandbox));
+  assert.equal(sandbox.browser.action, undefined);
+  assert.equal(sandbox.browser.notifications, undefined);
+});

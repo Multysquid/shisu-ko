@@ -16,10 +16,16 @@ live edge. Times are the stream's own media clock, which the extension reads fro
 player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
-  GET  /health -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type, language}
-  POST /sync   -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
-                   model, model_loading, model_error}
+  GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
+                     language, launcher}
+  POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
+                     model, model_loading, model_error}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
+  GET  /sessions -> the videos the server holds, for diagnostics
+  POST /update   -> {ok, restarting, version}: the server exits with EXIT_UPDATE so that run.cmd / run.sh
+                     run update.py and start it again; 409 {ok, error} when nothing would (Docker, Nix,
+                     a hand start, --no-update, SHISUKO_NO_UPDATE). Extension and local non-browser
+                     clients only: a loopback page may not restart the server (update_origin_allowed())
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
 the Python environment, downloaded models, cached audio and cue files.
@@ -59,7 +65,11 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
+# Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
+# (sys.exit), 3 asks for a plain restart (os._exit: a broken GPU context, no model left) and
+# EXIT_UPDATE asks the launcher to run update.py first and then start the server again (POST /update).
+EXIT_UPDATE = 4
 SAMPLE_RATE = 16000
 APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
@@ -1503,6 +1513,7 @@ class App:
         self.prepare_thread: Optional[threading.Thread] = None
         self.model_error: Optional[tuple] = None  # (name, message) of the last failed prepare or load
         self.model_failed_at = 0.0
+        self.exit_code: Optional[int] = None  # set by request_update(): main() exits with it after serve_forever()
         self.sessions: dict = {}
         self.lock = threading.Lock()
         self.fetcher = Fetcher(args)
@@ -1523,7 +1534,42 @@ class App:
                 "device": self.device,
                 "compute_type": self.compute_type,
             }
-        return {"ok": True, "version": VERSION, **state, "language": self.args.language}
+        return {"ok": True, "version": VERSION, **state, "language": self.args.language,
+                "launcher": self.update_blocker() is None}
+
+    def update_blocker(self) -> Optional[str]:
+        """Why POST /update would achieve nothing, or None when run.cmd / run.sh would act on the exit.
+
+        Only the launchers run update.py after an exit with EXIT_UPDATE; they say so through
+        SHISUKO_LAUNCHER. Under Docker, Nix or a plain `python server.py` the exit would just end
+        the server, and with --no-update the launcher restarts it without updating. A launcher
+        from before the variable that updated itself but was never restarted has no code-4 branch
+        either (run.sh parsed its loop before the update), so its server is rightly refused too.
+        """
+        if os.environ.get("SHISUKO_LAUNCHER") != "1":
+            return ("the server was not started by run.cmd / run.sh, or by an older launcher that has not been "
+                    "restarted since it was updated, so nothing would update it; restart it by hand")
+        if getattr(self.args, "no_update", False):
+            return "the server was started with --no-update; restart it without the flag to update"
+        if os.environ.get("SHISUKO_NO_UPDATE", "").strip() not in ("", "0"):
+            # The same rule as update.skipped(): the launcher runs update.py under this very
+            # environment, so the exit would only restart the server, without a word from update.py.
+            return "the server was started with SHISUKO_NO_UPDATE set; restart it without the variable to update"
+        return None
+
+    def request_update(self) -> tuple:
+        """(ok, error) for POST /update: mark the process to end with EXIT_UPDATE, or say why not.
+
+        The caller stops the HTTP server afterwards; main() then exits with exit_code and the
+        launcher runs update.py. The server never spawns update.py itself: the update may replace
+        server.py and the launcher, and only the launcher's loop knows how to survive that.
+        """
+        error = self.update_blocker()
+        if error is not None:
+            return False, error
+        with self.lock:
+            self.exit_code = EXIT_UPDATE
+        return True, None
 
     def request_model(self, name) -> None:
         """Remember the model the client wants; the transcriber switches to it between windows."""
@@ -1897,6 +1943,31 @@ def origin_allowed(origin: Optional[str]) -> bool:
     return parts.scheme in ("http", "https") and (parts.hostname or "") in LOOPBACK_HOSTS
 
 
+def update_origin_allowed(origin: Optional[str]) -> bool:
+    """Who may POST /update: the extension itself and non-browser clients (no Origin header).
+
+    Narrower than origin_allowed() on purpose. A page on a loopback host may drive downloads and
+    transcription like the extension does, but ending the server and making the launcher run
+    git and pip is a capability nothing but the popup has a use for; a local dev server or
+    notebook carrying a third-party script must not get it.
+    """
+    return origin is None or origin.startswith(EXTENSION_ORIGIN_PREFIXES)
+
+
+SHUTDOWN_DELAY = 0.5  # seconds between the answer to POST /update and the end of serve_forever()
+
+
+def stop_server_later(httpd, delay: float = SHUTDOWN_DELAY) -> None:
+    """Stop `httpd` from a helper thread once the answer under way has left the socket.
+
+    shutdown() blocks until serve_forever() has returned, so the handler thread that answered
+    POST /update cannot call it; a short wait keeps the client from seeing the connection drop
+    before its 200 arrives. main() takes over after serve_forever().
+    """
+    time.sleep(delay)
+    httpd.shutdown()
+
+
 class Handler(BaseHTTPRequestHandler):
     app: App = None  # type: ignore[assignment]
     protocol_version = "HTTP/1.1"
@@ -1995,10 +2066,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self) -> None:  # noqa: N802
-        if not self._origin_ok():
+        path = self.path.split("?", 1)[0]
+        if not self._origin_ok() or (path == "/update" and not update_origin_allowed(self.headers.get("Origin"))):
             self._reject_origin()
             return
-        path = self.path.split("?", 1)[0]
         try:
             length = int(self.headers.get("Content-Length") or 0)
             if length > 65536:
@@ -2012,6 +2083,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("body must be an object")
         except Exception:  # noqa: BLE001
             self._json(400, {"ok": False, "error": "invalid JSON body"})
+            return
+        if path == "/update":
+            self._update()
             return
         if path != "/sync":
             self._json(404, {"ok": False, "error": "not found"})
@@ -2035,6 +2109,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             log.exception("sync failed")
             self._json(500, {"ok": False, "error": str(exc)})
+
+    def _update(self) -> None:
+        """POST /update: end the process with EXIT_UPDATE so the launcher updates and restarts it."""
+        ok, error = self.app.request_update()
+        if not ok:
+            self._json(409, {"ok": False, "error": error})
+            return
+        log.info("Update requested: exiting with code %d so the launcher runs update.py and starts the server again", EXIT_UPDATE)
+        self._json(200, {"ok": True, "restarting": True, "version": VERSION})
+        # self.server is the ThreadingHTTPServer serving this request (BaseRequestHandler sets it).
+        threading.Thread(target=stop_server_later, args=(self.server,), daemon=True, name="stop-server").start()
 
 
 # --------------------------------------------------------------------------- startup
@@ -2344,7 +2429,7 @@ def parse_args(argv=None):
     p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--check", action="store_true", help="print environment diagnostics and exit")
-    p.add_argument("--no-update", action="store_true", help="accepted for run.cmd / run.sh, which skip their update check (server/update.py) when it is given")
+    p.add_argument("--no-update", action="store_true", help="start without looking for a newer version first (run.cmd / run.sh skip server/update.py) and refuse the popup's Update button (POST /update answers 409), since the launcher would restart the server without updating")
     return p.parse_args(argv)
 
 
@@ -2390,6 +2475,10 @@ def main() -> None:
         log.info("Shutting down")
     finally:
         server.server_close()
+    if app.exit_code is not None:
+        # POST /update: the launcher reads EXIT_UPDATE as "run update.py, then start again". Every
+        # worker is a daemon thread, so the interpreter does not wait for a window to finish.
+        sys.exit(app.exit_code)
 
 
 if __name__ == "__main__":

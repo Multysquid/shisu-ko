@@ -297,12 +297,19 @@ def test_launch_on_windows_runs_the_launcher_from_a_path_cmd_would_split(tmp_pat
     import time
 
     monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)  # a `.\\` path needs no lookup anyway
+    # Every launch happens before any window closes: Windows Terminal, the default console host
+    # on Windows 11, loses a console handed to it while it is closing its last tab (the process
+    # never runs, about one `start` in eight when the previous stub exits at the same moment),
+    # so the stubs keep their window open a few seconds and the markers are checked afterwards.
+    markers = []
     for name in ("R&D space", "shisu-ko (1)", "plain"):
         root = tmp_path / name
         (root / "server").mkdir(parents=True)
-        marker = root / "server" / "marker.txt"
-        (root / "server" / "run.cmd").write_bytes(b'@echo off\r\necho ran> "%~dp0marker.txt"\r\nexit\r\n')
+        (root / "server" / "run.cmd").write_bytes(
+            b'@echo off\r\necho ran> "%~dp0marker.txt"\r\nping -n 6 127.0.0.1 > nul\r\nexit\r\n')
         assert nh.launch(root)["started"] is True
+        markers.append((name, root / "server" / "marker.txt"))
+    for name, marker in markers:
         for _ in range(100):
             if marker.exists():
                 break

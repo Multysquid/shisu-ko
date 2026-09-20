@@ -43,10 +43,25 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   `background.js`, `content.js` and `popup.js`. To add a setting, add it there and add the popup
   input with the same id; `addon/tests/settings.test.js` enforces both.
 - The server listens on `127.0.0.1:8790`. Port 8765 belongs to AnkiConnect; never use it.
-- The server never exposes anything beyond `/health`, `/sync`, `/clip`, `/sessions`; it binds to
-  localhost, validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`, and answers browser requests
-  only from the extension's own origin or from pages on loopback hosts (`origin_allowed()`), so
-  arbitrary websites cannot drive downloads and transcription.
+- The server never exposes anything beyond `/health`, `/sync`, `/clip`, `/sessions` and
+  `POST /update`; it binds to localhost, validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`,
+  and answers browser requests only from the extension's own origin or from pages on loopback
+  hosts (`origin_allowed()`), so arbitrary websites cannot drive downloads and transcription.
+  `/update` is narrower (`update_origin_allowed()`: the extension's origin or no `Origin` header
+  at all, never a page, since ending the server and making the launcher run git and pip is a
+  capability only the popup has a use for) and answers 409 `{ok: false, error}` unless the
+  server was started by `run.cmd` / `run.sh` (`SHISUKO_LAUNCHER=1`) without `--no-update` and
+  without `SHISUKO_NO_UPDATE` (`App.update_blocker()`); otherwise it answers
+  `{ok: true, restarting: true, version}` and the process exits with `EXIT_UPDATE` (4). The
+  server never spawns `update.py` and never downloads a release itself; the launcher does.
+- The add-on never installs itself: no `update_url` in the manifest, no `.xpi` download or
+  install (`addon/tests/settings.test.js` enforces the manifest); its updates come from
+  addons.mozilla.org. Its one remote request is the anonymous `GET` of
+  `https://api.github.com/repos/Multysquid/shisu-ko/releases/latest` in `fetchLatestRelease()`,
+  never with a token, cookie or identifier, and there is no second remote endpoint;
+  `notifications` stays a required permission (the start-up check notifies with no popup open
+  to ask for a grant). The privacy policy, description and reviewer notes in `docs/amo/` state
+  exactly this, so a change here changes them too.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`.
   It never takes a path, a program or an argument from a message: the only thing it can run is
   the checkout's own `server/run.cmd` / `server/run.sh` (root = the parent of the folder the
@@ -333,7 +348,11 @@ while the first still loads; a `/health` answer through `apiRequest()` forgets t
 the host's own `{ok: false, error}` passes through. The popup keeps `already` and the host's
 `starting` (as `loading`) for the hint at the deadline: `START_ELSEWHERE_HINT` when the launcher
 saw a server answering that the popup cannot reach, else `startNotUpHint(log)`. Badge texts:
-`Checking server`, `Server offline`, `Starting server`, `Loading model`, `Server online`.
+`Checking server`, `Server offline`, `Starting server`, `Updating server`, `Loading model`,
+`Server online`. A start and an update exclude each other: `requestStart()` refuses while
+`pendingUpdate()` holds a record (`UPDATE_RUNNING_HINT`), `startStatus()` carries that record
+as `updating` so a reopened popup hides the button before its first paint, and the popup
+disables Update while `START_BUSY` and hides Start while `UPDATE_BUSY`.
 
 Tests: `server/tests/test_native_host.py` (framing, `handle()` for every shape with `launch()`
 never called, `serve()`, `launch()` with a recorded `Popen` on both platforms, the lock against
@@ -356,14 +375,142 @@ and unpacks the release zip over the folder, staging each file next to its targe
 `os.replace()`-ing it, without deleting anything. Both paths reinstall `requirements.txt` into
 the running interpreter when it changed (only inside a venv) and point out a changed
 `addon/manifest.json` version. It always exits 0: the server must start even when the update
-fails. `--no-update` or `SHISUKO_NO_UPDATE=1` skips it; `server.py` accepts `--no-update` as a
-no-op so the launchers can pass all arguments through.
+fails. `--no-update` or `SHISUKO_NO_UPDATE=1` skips it; `server.py` accepts `--no-update` too
+(`args.no_update`) so the launchers can pass all arguments through, and reads it, like the
+variable, as a reason to refuse `POST /update`.
+
+The launchers also run the update on demand, for the popup's Update button: `run.cmd` /
+`run.sh` set `SHISUKO_LAUNCHER=1` for the server they start, `POST /update` then marks
+`App.exit_code = EXIT_UPDATE` (4), answers, and `stop_server_later()` calls `httpd.shutdown()`
+from a helper thread after `SHUTDOWN_DELAY` (0.5 s, so the answer leaves the socket;
+`shutdown()` blocks until `serve_forever()` returns, so the handler thread cannot call it),
+and `main()` runs `server_close()` and then `sys.exit(app.exit_code)`; every worker is a daemon
+thread, so nothing waits for a window. Exit code 4 means "run `update.py`, then start again":
+`run.cmd` has `if "%CODE%"=="4" goto update` after the 0 and 2 branches, `run.sh`
+`[ "$code" -eq 4 ] && { update.py "$@"; native_host.py --register; continue; }` (the register
+call restores the wrapper's mode bits, which the zip update drops). Codes 0 and 2 keep their
+meaning, every other code keeps the 5 s restart.
 
 The update can replace the launcher that is running it. cmd.exe reads batch files incrementally,
 so in `run.cmd` the update call and `goto loop` must stay on one line and the `:loop` label must
 keep its name; `run.sh` keeps everything in `main()` and ends with `main "$@"; exit` for the same
-reason. `server/tests/test_update.py` drives the real git against a bare repository in a temp
-directory and feeds a locally built zip in place of the GitHub download.
+reason. The code-4 path adds two rules. The `:update` label sits directly above that one-line
+update call, so `goto update` lands on it: the lines between the server's exit and `goto update`
+are read from the old file, which nothing changed since the jump to `:loop`, and the already
+parsed `goto loop` looks its label up in the new file, so no line is ever read from a stale
+offset. And `set "SHISUKO_LAUNCHER=1"` sits directly after `:loop`, not at the top: a launcher
+from before the variable that has just updated itself arrives in the new file through its own,
+already parsed `goto loop`, so only the lines after `:loop` run for it, and its server would
+otherwise refuse the button. `run.sh` cannot help itself the same way (bash parsed the old
+`main()`, which has no code-4 branch, before the update), so `export SHISUKO_LAUNCHER=1` sits
+inside `main()` before the loop and the server's 409 text names "an older launcher that has not
+been restarted since it was updated"; a restart by hand fixes it. `server/tests/test_update.py`
+drives the real git against a bare repository in a temp directory and feeds a locally built zip
+in place of the GitHub download; `server/tests/test_update_endpoint.py` covers the endpoint
+over a real socket (the variable read strictly as `"1"`, both no-update switches, the latter
+asserted equal to `update.skipped()` for nine values, the 409s, the answer followed by
+`serve_forever()` returning and `main()` raising `SystemExit(4)`, the origin rule, `GET` 404,
+the body guards) and the launcher texts (CRLF in `run.cmd`, `:update` right above the one-line
+call, the variable inside the loop, the 0/2/4/restart order, `run.sh`'s export inside `main()`).
+
+## How the update check works
+
+The add-on side of updates lives in the "updates" section of `addon/background.js` and in
+`popup.js`; the extension never installs itself (no `update_url`, no `.xpi` handling: its
+updates come from addons.mozilla.org once the listing is live, and until then the release page
+has the `.xpi`), it only tells the viewer and asks the server to update itself.
+
+- Check. `fetchLatestRelease()` gets `GITHUB_LATEST_URL`
+  (`https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, `Accept:
+  application/vnd.github+json`, `UPDATE_CHECK_TIMEOUT_MS` 10 s). No host permission: GitHub's
+  API answers cross-origin requests with `Access-Control-Allow-Origin: *`. `releaseFromApi()`
+  reads `{version, tag, url, xpi}` (tag `v0.9.0` -> `0.9.0`; `html_url`; the
+  `browser_download_url` of the `.xpi` asset or null; https only, since the popup opens `url`
+  in a tab). `checkForUpdate({force})` answers from `storage.local.updateCheck`
+  (`{checkedAt, latest, error}`) while it is fresh (`checkIsFresh()`: no error and under
+  `UPDATE_CHECK_MAX_AGE_MS`, 24 h), else fetches; one check at a time (`checkInFlight`). A
+  failure (offline, 403/429 rate limit, non-JSON, no `tag_name`) is stored as `error`, keeps the
+  last `latest`, is logged with `console.debug` and never notifies; 404 means no release yet.
+- When. `startupCheck()` on `runtime.onStartup` and `onInstalled`, but only once the profile
+  has a stored check: a profile that never opened the popup makes no request on its own, which
+  keeps `scripts/browser-smoke.mjs` (fresh Chromium profile, local fixtures) off GitHub; the
+  smoke test seeds `updateCheck: {checkedAt: Date.now(), latest: null, error: null}` beside its
+  settings. The popup's first `updateStatus` carries `check: true` (the day's check when the
+  store is stale); "Check for updates" sends `checkForUpdate` with `force: true`.
+- Decision. `parseVersion("v0.9.0") -> [0, 9, 0]` (non-numeric or missing parts are 0),
+  `compareVersions(a, b) -> -1 | 0 | 1`, and `decideUpdate({latest, serverVersion,
+  serverLauncher, extensionVersion, serverOnline})` -> `{server, extension}`. `server`:
+  `current` (latest <= version), `newer` (latest > version and `launcher: true`), `cannot`
+  (newer, `launcher: false`: Docker, Nix, a hand start, `--no-update`), `behind` (newer, no
+  launcher flag: every 0.8.0 server, so no claim about run.cmd), `unknown` (no `latest`, or a
+  server without a version such as the smoke fixture's `/health`), `offline` (no server).
+  `extension`: `newer` when latest > `browser.runtime.getManifest().version`, else `current`.
+  `serverInfo(health)` reads `version` and `launcher` from `/health`, null when missing.
+  `popup.js` keeps copies of `parseVersion`, `compareVersions`, `UPDATE_SHUTDOWN_MS` and
+  `UPDATE_WINDOW_MS`; `addon/tests/popup-copies.test.js` keeps them equal.
+- Ask. `applyBadge()` sets the toolbar badge (`action.setBadgeText` "1", `BADGE_COLOR`
+  `#5b6fb8`, never the alert red) for `newer`, `cannot`, `behind` or a newer extension and clears
+  it otherwise; `notifyNewer()` creates one system notification per release and browser session
+  (`notifiedVersion` in `storage.session`; id `shisuko-update`, "Shisu-ko <latest> is
+  available" / "The server runs <server>. Click to update it now."), only for `newer`, only from
+  the start-up check. `notifications.onClicked` runs `updateServer({watch: true})`; a request
+  that fails there gets a notification of its own (`shisuko-update-failed`, whose click does
+  nothing). Badge and notification helpers tolerate a missing API (the test sandbox, a content
+  script). The popup's banner (`#update-banner`, `renderUpdate()`) names the release and the
+  server's version with **Update** and **Not now** for `newer`, the reason and no Update button
+  for `cannot` ("was not started by run.cmd / run.sh", the one text for every blocker, since
+  `/health` carries only the flag and a `--no-update` server's 409 text is never fetched) and
+  `behind` ("cannot be updated from
+  here"), the release page link for an extension behind, and nothing for `offline` (the next
+  start updates) or after "Not now" (`updateSnoozed` = latest in `storage.session`). The
+  "Check for updates" link in the last drawer writes `#update-result` ("Newest release: 0.9.0,
+  checked 3 min ago", "No release found, …", "Update check failed: <error> (last seen: X)").
+- Update. Popup **Update** or the notification click -> `{type: "updateServer"}` ->
+  `requestUpdate()`: `/health` first (so a spent record ends, see below), refuse without a POST
+  when the server already runs >= latest, else `POST /update` through `apiRequest()`. On
+  `{ok: true, restarting: true}` the record `serverUpdate` `{requestedAt, from, to, deadline,
+  down}` (`deadline` = `UPDATE_WINDOW_MS`, 120 s: the launcher's update plus a model load) goes
+  to `storage.session` with a memory fallback (`sessionGet` / `sessionSet`), the notification is
+  cleared and the popup gets `{ok, restarting, from, to, requestedAt, deadline}`; a 409 passes
+  the server's text through as `{ok: false, error, refused: true}` (the banner shows it and
+  drops the button), unreachable is `offline: true`. Every `/health` answer through
+  `apiRequest()` passes `noteHealth()`: no answer marks the record `down`; a version >= `to` ends
+  it, recomputes the badge and notifies "Shisu-ko updated to <version>" (`shisuko-updated`);
+  the old version ends it silently once the server was seen down or `UPDATE_SHUTDOWN_MS` (10 s)
+  has passed since the request (the old server closes its port within a second), because the
+  old code back after a restart means `update.py` could not update. The notification path has
+  no popup polling, so `watchUpdate()` polls `/health` every `UPDATE_POLL_MS` (3 s) until the
+  record ends. The popup's `updateFlow` (`idle -> requesting -> updating -> done | stale |
+  failed | lost`) mirrors it: badge "Updating server" with "Restarting with <latest>…", then
+  "Updated to <version>", `stillOldHint()` ("The server restarted but still runs X; look at its
+  window: update.py said why", banner stays) or, offline at the deadline, `UPDATE_LOST_HINT`
+  with the Start button back. `refreshUpdate()` sends the popup's own `/health` answer with the
+  question and re-asks only when the server's version, launcher flag or reachability changed or
+  after an action; answers are numbered (`updateAsked`) so a slow first answer, held up by the
+  check of GitHub, cannot overwrite the verdict for the server now on screen. A reopened popup
+  resumes the flow from `startServerStatus` (`updating`) before its first paint.
+- Chrome. `browser-api.js` bridges `action.setBadgeText` / `setBadgeBackgroundColor`,
+  `notifications.create` / `clear` (with `onClicked` passed through) and `tabs.create`; the
+  endpoint is plain HTTP, so the flow is the same there.
+
+Messages: `updateStatus {health?, check?}` -> `{latest, checkedAt, error, server: {version,
+launcher} | null, decision, snoozed, updating, extensionVersion}`; `checkForUpdate {force?}` ->
+`{checkedAt, latest, error}`; `updateServer` -> as above; `snoozeUpdate {version}` -> `{ok}`.
+
+Tests: `addon/tests/background.test.js` (the version helpers and `decideUpdate`,
+`releaseFromApi`, the store and its age, every failure of the check, the start-up check with
+badge and one notification per session and its silence for `cannot` / `behind` / no server, a
+browser without the APIs, `updateStatus`, `snoozeUpdate`, the `/update` request with its record
+across an event-page restart, the `/health` polls that end it including the old version with
+and without a poll that saw the server down, the notification click and its failure
+notification, the refusal of a start during an update, the message switch);
+`addon/tests/popup.test.js` (every banner verdict, the overtaken answer, Not now, Update to
+"Updated to 0.9.0", the old version back, the deadline, a 409 in the banner, the resumed
+update from both status messages, the Start/Update exclusion, Check for updates);
+`addon/tests/browser-api.test.js` (the Chrome bridges); `addon/tests/settings.test.js`
+(`notifications` required, no `update_url`); `addon/tests/popup-copies.test.js` (the copies).
+`addon/tests/_loadBackground.js` stubs `action`, `notifications`, `runtime.onStartup` /
+`onInstalled` / `getManifest` and exposes `startup()`, `clickNotification()` and `setNow()`.
 
 ## Commands
 
@@ -443,10 +590,17 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
   without a traceback (Windows LiveKernelEvent 141). The launchers restart the server; exit code 2
   means a startup error that must not be retried. Exit code 3 asks for a restart: a broken GPU
   context, and also a failed model switch after which the previous model could not be reloaded,
-  which would leave the server running without any model.
+  which would leave the server running without any model. Exit code 4 (`EXIT_UPDATE`) asks the
+  launcher to run `update.py` before starting again; only `POST /update` produces it.
 - AnkiConnect: send requests without a `Content-Type` header (a "simple" request needs no CORS
   preflight), call `requestPermission` first, find the newest card with `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
+- `notifications` is a required permission, not an optional one: the update notification is
+  created from the start-up check, where no popup is open to ask for a grant. The GitHub check
+  needs no host permission (`Access-Control-Allow-Origin: *`), but GitHub allows sixty
+  unauthenticated API requests an hour per address, shared with everything else on the
+  connection: hence one check a day, cached in `storage.local`, and the 403/429 text that asks
+  to try again in an hour. Never add a token.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.

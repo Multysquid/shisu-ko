@@ -493,6 +493,34 @@ kbd {
   filter: brightness(1.08);
 }
 
+.banner button:disabled {
+  opacity: 0.6;
+  cursor: default;
+  filter: none;
+}
+
+/* The update notice: same shape as the alert, but nothing is broken, so it keeps the alarm red
+   for the states that earn it and reads in the page's own colours. */
+.banner.notice {
+  background: var(--chip);
+  border-bottom-color: var(--line);
+  color: var(--text);
+}
+
+.banner .actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* Text buttons beside the filled one: they decline or lead elsewhere, so they must not compete. */
+.banner .linkbtn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+}
+
 .hidden {
   display: none;
 }
@@ -555,4 +583,11 @@ summary:hover {
   flex-direction: column;
   gap: 12px;
   padding: 0 16px 16px;
+}
+
+/* The check button and its result line belong together, closer than the drawer's rows. */
+.drawer .updates {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }

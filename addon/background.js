@@ -13,6 +13,10 @@
  *     card gets them at once and still gets them after the line has gone from the screen.
  *  6. Start the server for the popup: an extension cannot spawn a process, so the request goes
  *     to the "shisuko" native host (server/native_host.py), which runs the project's launcher.
+ *  7. Updates: ask GitHub for the newest release once a day, tell the viewer (toolbar badge, one
+ *     system notification, the popup's banner) and, on request, ask the server to update itself:
+ *     POST /update makes it exit so that run.cmd / run.sh run update.py and start it again. The
+ *     extension never installs itself; its updates come from addons.mozilla.org.
  */
 
 const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
@@ -37,6 +41,7 @@ const START_WINDOW_MS = 90000;
 const START_KEY = "startServer";
 const LAUNCHER_HINT = "Run server\\setup.cmd (Windows) or bash server/setup.sh once, or start the server by hand once: run.cmd / run.sh register the launcher";
 const NATIVE_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher when the browser asks";
+const UPDATE_RUNNING_HINT = "The launcher restarts the server itself once update.py is done";
 
 // Auto-mining watcher: poll AnkiConnect for a note Yomitan has just created.
 const ANKI_POLL_THROTTLE_MS = 250;   // several tabs may poll; one request per interval is enough
@@ -120,10 +125,14 @@ async function apiRequest(path, body) {
     if (!res.ok) {
       return { ok: false, error: (data && data.error) || `HTTP ${res.status}`, data };
     }
-    if (path === "/health") forgetStart(); // the popup's poll: the server the launch waited for is up
+    if (path === "/health") {
+      forgetStart(); // the popup's poll: the server the launch waited for is up
+      await noteHealth(data);
+    }
     return { ok: true, data };
   } catch (err) {
     const timedOut = err && err.name === "AbortError";
+    if (path === "/health") await noteHealth(null);
     return { ok: false, offline: true, error: timedOut ? "Server timed out" : "Server unreachable" };
   } finally {
     clearTimeout(timer);
@@ -205,6 +214,11 @@ function startServer() {
 async function requestStart() {
   const pending = await pendingStart();
   if (pending) return pending;
+  // An update is a restart the launcher runs itself: between the old server's exit and the new
+  // one's port the host sees neither /health nor the instance lock and would launch run.cmd a
+  // second time, two update.py runs on one folder. The popup hides the button for this; a popup
+  // that has not heard of the record yet is refused here.
+  if (await pendingUpdate()) return { ok: false, error: "an update is under way", hint: UPDATE_RUNNING_HINT };
   // Looked up at call time, not at load: Firefox adds the method once the permission is granted.
   const send = browser.runtime.sendNativeMessage;
   if (typeof send !== "function") return { ok: false, error: "permission missing", hint: NATIVE_PERMISSION_HINT };
@@ -240,11 +254,450 @@ async function requestStart() {
 }
 
 // The popup's question on opening: is a start under way? With the launch's details, a reopened
-// popup resumes watching it, button disabled, where the closed one left off.
+// popup resumes watching it, button disabled, where the closed one left off. An update under
+// way travels with the answer (`updating`, its record): the popup asks this before its first
+// paint, and updateStatus, which also carries the record, may first wait ten seconds on GitHub,
+// long enough for that paint to offer a start on top of the launcher's restart.
 async function startStatus() {
   const start = startInFlight ? await startInFlight : await pendingStart();
-  if (!start || !start.ok) return { starting: false };
-  return { starting: true, already: !!start.already, loading: !!start.loading, log: start.log, deadline: start.deadline };
+  const status = !start || !start.ok ? { starting: false } : { starting: true, already: !!start.already, loading: !!start.loading, log: start.log, deadline: start.deadline };
+  const updating = await pendingUpdate();
+  if (updating) status.updating = updating;
+  return status;
+}
+
+// ------------------------------------------------------------------ updates
+
+// The newest release comes from GitHub's REST API, which answers cross-origin requests with
+// Access-Control-Allow-Origin: *, so the manifest needs no host permission for it.
+const GITHUB_LATEST_URL = "https://api.github.com/repos/Multysquid/shisu-ko/releases/latest";
+// One check a day: releases are weeks apart, and GitHub allows sixty unauthenticated requests an
+// hour per address. A check that failed does not count as one; it is tried again the next time
+// the popup opens or the browser starts, which costs one quick failure while offline.
+const UPDATE_CHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const UPDATE_CHECK_TIMEOUT_MS = 10000;
+// How long an update may take before the popup stops watching for the new server: the old one
+// exits, the launcher runs update.py (a git fetch, or a release download and unpack) and the new
+// one loads its model again, 10-40 s on a GPU and longer on a CPU. The popup owns the wait; the
+// record lives here, in storage.session like the launch record, so a reopened popup resumes it
+// and a restarted event page still knows about it.
+const UPDATE_WINDOW_MS = 120000;
+// The old server closes its port within a second of answering /update, so the old version seen
+// this long after the request is the restarted server, whether or not a poll caught it down: the
+// popup that asked closes with any click outside it, and nobody polls while it is closed. popup.js
+// keeps a copy for its own verdict (addon/tests/popup-copies.test.js keeps the two equal).
+const UPDATE_SHUTDOWN_MS = 10000;
+// The notification path has no popup polling /health for it; the background polls at this pace
+// itself, until the record ends or the window passes.
+const UPDATE_POLL_MS = 3000;
+const UPDATE_CHECK_KEY = "updateCheck"; // storage.local: {checkedAt, latest, error}
+const UPDATE_KEY = "serverUpdate"; // storage.session: {requestedAt, from, to, deadline, down}
+const SNOOZE_KEY = "updateSnoozed"; // storage.session: the version "Not now" was clicked for
+const NOTIFIED_KEY = "notifiedVersion"; // storage.session: the version the notification was shown for
+const UPDATE_NOTIFICATION = "shisuko-update";
+const UPDATED_NOTIFICATION = "shisuko-updated";
+const UPDATE_FAILED_NOTIFICATION = "shisuko-update-failed"; // its own id: a click on it must not post again
+// The badge is a nudge, not an alarm: the popup's accent, dulled, and never the alert red.
+const BADGE_COLOR = "#5b6fb8";
+
+// storage.session with a memory fallback: a browser without the area keeps the value for the
+// life of the event page, which is what the launch record does with `lastStart` above.
+const sessionMemory = {};
+
+async function sessionGet(key) {
+  const area = sessionArea();
+  if (area) {
+    try {
+      const stored = (await area.get(key))[key];
+      return stored === undefined ? null : stored;
+    } catch (err) {
+      /* memory keeps what this event page saw */
+    }
+  }
+  return Object.hasOwn(sessionMemory, key) ? sessionMemory[key] : null;
+}
+
+async function sessionSet(key, value) {
+  sessionMemory[key] = value;
+  const area = sessionArea();
+  if (!area) return;
+  try {
+    await area.set({ [key]: value });
+  } catch (err) {
+    /* memory keeps it for as long as this event page lives */
+  }
+}
+
+// "0.9.0" or "v0.9.0" as three numbers; a missing or unreadable part counts as 0, so a tag with
+// a suffix still compares by what is in front of it and garbage sorts below every release.
+function parseVersion(text) {
+  const parts = String(text || "").trim().replace(/^v/i, "").split(".");
+  return [0, 1, 2].map((i) => {
+    const n = parseInt(parts[i], 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  });
+}
+
+function compareVersions(a, b) {
+  const va = parseVersion(a);
+  const vb = parseVersion(b);
+  for (let i = 0; i < 3; i++) {
+    if (va[i] !== vb[i]) return va[i] < vb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+// The release GitHub's answer describes, or null when it names none. Only https URLs are kept:
+// the popup opens the release page in a tab, and a page from an API answer is still a page.
+function releaseFromApi(json) {
+  if (!json || typeof json !== "object" || typeof json.tag_name !== "string" || !json.tag_name.trim()) return null;
+  const tag = json.tag_name.trim();
+  const https = (value) => (typeof value === "string" && /^https:\/\//i.test(value) ? value : null);
+  const assets = Array.isArray(json.assets) ? json.assets : [];
+  const xpi = assets.find((asset) => asset && typeof asset.name === "string" && asset.name.toLowerCase().endsWith(".xpi"));
+  return { version: tag.replace(/^v/i, ""), tag, url: https(json.html_url), xpi: xpi ? https(xpi.browser_download_url) : null };
+}
+
+// What the newest release means for the two halves. The server can only be updated through
+// /update when its launcher runs update.py after the exit (`launcher` in /health); one started
+// by Docker, Nix or by hand says false. A server from before the flag (every 0.8.0, the first
+// this extension meets) says nothing: when its version is behind it is "behind", a badge and a
+// banner that name the release but make no claim about run.cmd, since the flag would be the
+// only ground for one. A server without even a version, the smoke fixture, is "unknown": no
+// banner and no guess. `serverOnline` tells that apart from no server at all.
+function decideUpdate(input) {
+  const { latest, serverVersion, serverLauncher, extensionVersion: extension, serverOnline } = input || {};
+  const newest = latest && typeof latest.version === "string" && latest.version ? latest.version : null;
+  const decision = { server: "unknown", extension: "current" };
+  if (!newest) return decision;
+  if (typeof extension === "string" && extension && compareVersions(newest, extension) > 0) decision.extension = "newer";
+  if (typeof serverVersion === "string" && serverVersion) {
+    if (compareVersions(newest, serverVersion) <= 0) decision.server = "current";
+    else if (serverLauncher === true) decision.server = "newer";
+    else if (serverLauncher === false) decision.server = "cannot";
+    else decision.server = "behind";
+  } else {
+    decision.server = serverOnline ? "unknown" : "offline";
+  }
+  return decision;
+}
+
+// What /health says about the server for the update question: null without a server, and a
+// null field for whatever an older server does not report.
+function serverInfo(health) {
+  if (!health || typeof health !== "object") return null;
+  return {
+    version: typeof health.version === "string" && health.version ? health.version : null,
+    launcher: typeof health.launcher === "boolean" ? health.launcher : null,
+  };
+}
+
+function extensionVersion() {
+  try {
+    const manifest = browser.runtime.getManifest();
+    return manifest && typeof manifest.version === "string" ? manifest.version : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function readUpdateCheck() {
+  try {
+    const stored = (await browser.storage.local.get(UPDATE_CHECK_KEY))[UPDATE_CHECK_KEY];
+    return stored && typeof stored === "object" ? stored : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function checkIsFresh(check) {
+  return !!check && !check.error && typeof check.checkedAt === "number" && Date.now() - check.checkedAt < UPDATE_CHECK_MAX_AGE_MS;
+}
+
+// {latest} or {error}, never a throw: a failed check is a line under the popup's button and a
+// console.debug, never a notification. Nobody asked, and being offline is not news.
+async function fetchLatestRelease() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
+  try {
+    const res = await fetch(GITHUB_LATEST_URL, { headers: { Accept: "application/vnd.github+json" }, signal: controller.signal });
+    if (res.status === 404) return { latest: null }; // no release published yet
+    if (res.status === 403 || res.status === 429) return { error: "GitHub's rate limit is reached, try again in an hour" };
+    if (!res.ok) return { error: `GitHub answered HTTP ${res.status}` };
+    let json;
+    try {
+      json = await res.json();
+    } catch (err) {
+      return { error: "GitHub returned a non-JSON response" };
+    }
+    const latest = releaseFromApi(json);
+    return latest ? { latest } : { error: "GitHub's answer names no release" };
+  } catch (err) {
+    return { error: err && err.name === "AbortError" ? "GitHub did not answer in time" : "could not reach GitHub" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+let checkInFlight = null; // the check under way, shared by the popup and the start-up listener
+
+// The stored check when it is fresh, else a new one: {checkedAt, latest, error}. A failure keeps
+// the last release seen, so the banner still knows what is out there.
+function checkForUpdate(opts) {
+  if (!checkInFlight) {
+    checkInFlight = runCheck(!!(opts && opts.force)).finally(() => {
+      checkInFlight = null;
+    });
+  }
+  return checkInFlight;
+}
+
+async function runCheck(force) {
+  const cached = await readUpdateCheck();
+  if (!force && checkIsFresh(cached)) return cached;
+  const check = { checkedAt: Date.now(), latest: cached && cached.latest ? cached.latest : null, error: null };
+  const verdict = await fetchLatestRelease();
+  if (verdict.error) {
+    check.error = verdict.error;
+    console.debug("Shisu-ko: update check failed:", verdict.error);
+  } else {
+    check.latest = verdict.latest;
+  }
+  try {
+    await browser.storage.local.set({ [UPDATE_CHECK_KEY]: check });
+  } catch (err) {
+    /* the answer still goes out; the next opening checks again */
+  }
+  return check;
+}
+
+// The toolbar badge and the notifications are nudges the popup does not need, so a browser (or
+// the test sandbox) without the API loses nothing; the guards keep every path from throwing.
+async function setBadge(on) {
+  const api = browser.action;
+  if (!api || typeof api.setBadgeText !== "function") return;
+  try {
+    if (on && typeof api.setBadgeBackgroundColor === "function") await api.setBadgeBackgroundColor({ color: BADGE_COLOR });
+    await api.setBadgeText({ text: on ? "1" : "" });
+  } catch (err) {
+    /* no badge on this browser */
+  }
+}
+
+// The badge follows the versions alone: a release newer than the server, whether or not the
+// server can do anything about it, or newer than the extension.
+function applyBadge(decision) {
+  return setBadge(["newer", "cannot", "behind"].includes(decision.server) || decision.extension === "newer");
+}
+
+async function notify(id, title, message) {
+  const api = browser.notifications;
+  if (!api || typeof api.create !== "function") return false;
+  try {
+    await api.create(id, { type: "basic", iconUrl: browser.runtime.getURL("icons/icon-128.png"), title, message });
+    return true;
+  } catch (err) {
+    console.debug("Shisu-ko: notification failed:", err);
+    return false;
+  }
+}
+
+async function clearNotification(id) {
+  const api = browser.notifications;
+  if (!api || typeof api.clear !== "function") return;
+  try {
+    await api.clear(id);
+  } catch (err) {
+    /* already gone */
+  }
+}
+
+// One notification per release and browser session: the version it was shown for sits in
+// storage.session, which the browser clears when it closes, so the next session asks once more.
+async function notifyNewer(latest, serverVersion) {
+  if ((await sessionGet(NOTIFIED_KEY)) === latest) return false;
+  await sessionSet(NOTIFIED_KEY, latest);
+  return notify(UPDATE_NOTIFICATION, `Shisu-ko ${latest} is available`, `The server runs ${serverVersion}. Click to update it now.`);
+}
+
+let lastUpdate; // the update under way; undefined until storage.session has been read once
+
+// The update under way, or null once its window has passed. The background is the only writer,
+// so storage is read once per event page and memory serves the popup's poll from there.
+async function pendingUpdate() {
+  if (lastUpdate === undefined) {
+    const stored = await sessionGet(UPDATE_KEY);
+    lastUpdate = stored && typeof stored === "object" ? stored : null;
+  }
+  return lastUpdate && typeof lastUpdate.deadline === "number" && Date.now() < lastUpdate.deadline ? lastUpdate : null;
+}
+
+async function rememberUpdate(record) {
+  lastUpdate = record;
+  await sessionSet(UPDATE_KEY, record);
+}
+
+// Every /health answer passes here: the popup's poll is how the background follows an update it
+// requested. Seeing the server down tells a restart apart from the old server still answering
+// (it closes its port within a second of the answer), and so does the time since the request
+// (UPDATE_SHUTDOWN_MS) when no poll ran while it was down; the new version ends the record, and
+// the old version after a restart means update.py could not update, so the banner is back and
+// the next request is posted rather than answered from a record of a restart that is over.
+async function noteHealth(data) {
+  try {
+    const record = await pendingUpdate();
+    if (!record) return;
+    if (!data) {
+      if (!record.down) await rememberUpdate(Object.assign({}, record, { down: true }));
+      return;
+    }
+    const server = serverInfo(data);
+    if (!server || !server.version) return;
+    const updated = record.to ? compareVersions(server.version, record.to) >= 0 : server.version !== record.from;
+    if (updated) {
+      await rememberUpdate(null);
+      const check = await readUpdateCheck();
+      await applyBadge(decideUpdate({ latest: check && check.latest, serverVersion: server.version, serverLauncher: server.launcher, extensionVersion: extensionVersion(), serverOnline: true }));
+      await notify(UPDATED_NOTIFICATION, `Shisu-ko updated to ${server.version}`, "The server restarted with the new version.");
+    } else if (record.down || Date.now() - record.requestedAt >= UPDATE_SHUTDOWN_MS) {
+      await rememberUpdate(null);
+    }
+  } catch (err) {
+    console.debug("Shisu-ko: could not follow the update:", err);
+  }
+}
+
+// The popup's question: what is newest, what the server runs, and what follows from the two.
+// The popup hands over the /health answer it already has (`health`, null while offline) so the
+// server is not asked twice; a caller without one gets a /health call here. `check` asks for a
+// check when the stored one is a day old (the popup opening); otherwise the store is read.
+async function updateStatus(msg) {
+  const check = (msg && msg.check ? await checkForUpdate() : await readUpdateCheck()) || { checkedAt: null, latest: null, error: null };
+  let health;
+  if (msg && Object.hasOwn(msg, "health")) {
+    health = msg.health && typeof msg.health === "object" ? msg.health : null;
+  } else {
+    const res = await apiRequest("/health");
+    health = res.ok && res.data && typeof res.data === "object" ? res.data : null;
+  }
+  const server = serverInfo(health);
+  const extension = extensionVersion();
+  const decision = decideUpdate({
+    latest: check.latest,
+    serverVersion: server ? server.version : null,
+    serverLauncher: server ? server.launcher : null,
+    extensionVersion: extension,
+    serverOnline: !!server,
+  });
+  await applyBadge(decision);
+  const snoozed = await sessionGet(SNOOZE_KEY);
+  return {
+    latest: check.latest || null,
+    checkedAt: typeof check.checkedAt === "number" ? check.checkedAt : null,
+    error: typeof check.error === "string" && check.error ? check.error : null,
+    server,
+    decision,
+    snoozed: typeof snoozed === "string" ? snoozed : null,
+    updating: await pendingUpdate(),
+    extensionVersion: extension,
+  };
+}
+
+async function snoozeUpdate(version) {
+  if (typeof version !== "string" || !version) return { ok: false, error: "No version to snooze" };
+  await sessionSet(SNOOZE_KEY, version);
+  return { ok: true };
+}
+
+let updateInFlight = null; // the request under way, shared by the popup and the notification
+
+// Ask the server to update itself, once: overlapping requests share one answer, and a request
+// while an update is under way is answered from its record. Resolves {ok: true, restarting: true,
+// from, to, requestedAt, deadline} or {ok: false, error, refused, offline}; it never rejects.
+// `refused` marks the server's own verdict (409: not started by the launcher, or --no-update).
+function updateServer(opts) {
+  if (!updateInFlight) {
+    updateInFlight = requestUpdate().finally(() => {
+      updateInFlight = null;
+    });
+    if (opts && opts.watch) {
+      updateInFlight.then((res) => {
+        if (res.ok && !res.already) return watchUpdate();
+        return undefined;
+      }).catch(() => {});
+    }
+  }
+  return updateInFlight;
+}
+
+async function requestUpdate() {
+  // /health first: its answer passes through noteHealth(), which ends a record whose restart is
+  // over (the old version back, or the new one up), so the pending check below sees the truth.
+  const healthRes = await apiRequest("/health");
+  const pending = await pendingUpdate();
+  if (pending) return { ok: true, restarting: true, already: true, from: pending.from, to: pending.to, requestedAt: pending.requestedAt, deadline: pending.deadline };
+  const check = await readUpdateCheck();
+  const to = check && check.latest && typeof check.latest.version === "string" ? check.latest.version : null;
+  const server = serverInfo(healthRes.ok ? healthRes.data : null);
+  const from = server ? server.version : null;
+  // The notification can be clicked long after the server was updated another way.
+  if (from && to && compareVersions(from, to) >= 0) return { ok: false, error: `the server already runs ${from}` };
+  const res = await apiRequest("/update", {});
+  if (!res.ok) {
+    return { ok: false, error: res.error || "the server refused", refused: !res.offline && !!(res.data && res.data.error), offline: !!res.offline };
+  }
+  if (!res.data || res.data.restarting !== true) return { ok: false, error: "the server gave no answer" };
+  const requestedAt = Date.now();
+  const record = { requestedAt, from, to, deadline: requestedAt + UPDATE_WINDOW_MS, down: false };
+  await rememberUpdate(record);
+  await clearNotification(UPDATE_NOTIFICATION);
+  return { ok: true, restarting: true, from, to, requestedAt, deadline: record.deadline };
+}
+
+// Poll /health for an update nobody watches from a popup; noteHealth() ends the record. Best
+// effort: the browser may end an idle event page first, and the next popup catches up.
+async function watchUpdate() {
+  for (let i = 0; i < UPDATE_WINDOW_MS / UPDATE_POLL_MS; i++) {
+    await sleep(UPDATE_POLL_MS);
+    if (!(await pendingUpdate())) return;
+    await apiRequest("/health");
+  }
+}
+
+// The browser starting, or the extension installed or updated: check (from the store when it is
+// fresh), set the badge, and say so once when the server could update itself right now. A
+// profile that has never checked is left alone: its first check is the popup's, which every
+// viewer opens to set the server up, and a fresh profile then makes no request on its own. That
+// keeps scripts/browser-smoke.mjs, which loads the built extension into a fresh Chromium profile
+// with local fixtures only, off api.github.com at install and start; the popup it opens honours a
+// stored check (`updateCheck` with a fresh `checkedAt`), which the test can seed with its settings.
+async function startupCheck() {
+  try {
+    if (!(await readUpdateCheck())) return;
+    const status = await updateStatus({ check: true });
+    if (status.decision.server === "newer" && status.latest && status.server) {
+      await notifyNewer(status.latest.version, status.server.version);
+    }
+  } catch (err) {
+    console.debug("Shisu-ko: update check at start failed:", err);
+  }
+}
+
+for (const event of [browser.runtime.onStartup, browser.runtime.onInstalled]) {
+  if (event && typeof event.addListener === "function") event.addListener(() => startupCheck());
+}
+
+if (browser.notifications && browser.notifications.onClicked && typeof browser.notifications.onClicked.addListener === "function") {
+  browser.notifications.onClicked.addListener((id) => {
+    if (id !== UPDATE_NOTIFICATION) return undefined;
+    clearNotification(id);
+    // The click asked for something and has no popup to answer in, so a request that did not
+    // get through says so here: the notification would otherwise just vanish as if it had
+    // worked. Checks stay silent; this is the one path the viewer set off.
+    return updateServer({ watch: true })
+      .then((res) => (res.ok ? undefined : notify(UPDATE_FAILED_NOTIFICATION, "Shisu-ko could not update the server", String(res.error || "the server gave no answer"))))
+      .catch(() => {});
+  });
 }
 
 // ------------------------------------------------------------------ mining helpers
@@ -805,6 +1258,14 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       return startServer();
     case "startServerStatus":
       return startStatus();
+    case "updateStatus":
+      return updateStatus(msg);
+    case "checkForUpdate":
+      return checkForUpdate({ force: !!msg.force });
+    case "updateServer":
+      return updateServer();
+    case "snoozeUpdate":
+      return snoozeUpdate(msg.version);
     default:
       return undefined;
   }

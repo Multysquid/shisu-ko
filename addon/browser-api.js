@@ -48,8 +48,8 @@
     browser.storage = Object.create(chromeApi.storage);
     browser.storage.local = Object.create(chromeApi.storage.local);
     for (const name of ["get", "set"]) browser.storage.local[name] = promiseMethod(chromeApi.storage.local, name);
-    // The launch record of the "Start server" button lives here; background.js does without the
-    // area when the browser has none.
+    // The launch record of the "Start server" button and the update records live here;
+    // background.js does without the area when the browser has none.
     if (chromeApi.storage.session) {
       browser.storage.session = Object.create(chromeApi.storage.session);
       for (const name of ["get", "set"]) browser.storage.session[name] = promiseMethod(chromeApi.storage.session, name);
@@ -58,7 +58,18 @@
   }
   if (chromeApi.tabs) {
     browser.tabs = Object.create(chromeApi.tabs);
-    for (const name of ["query", "reload", "sendMessage"]) browser.tabs[name] = promiseMethod(chromeApi.tabs, name);
+    for (const name of ["query", "reload", "sendMessage", "create"]) browser.tabs[name] = promiseMethod(chromeApi.tabs, name);
+  }
+  // The update nudges: the toolbar badge and the system notification. Only where Chrome offers
+  // them (the background and the popup); background.js does without either.
+  if (chromeApi.action) {
+    browser.action = Object.create(chromeApi.action);
+    for (const name of ["setBadgeText", "setBadgeBackgroundColor"]) browser.action[name] = promiseMethod(chromeApi.action, name);
+  }
+  if (chromeApi.notifications) {
+    browser.notifications = Object.create(chromeApi.notifications);
+    for (const name of ["create", "clear"]) browser.notifications[name] = promiseMethod(chromeApi.notifications, name);
+    browser.notifications.onClicked = chromeApi.notifications.onClicked;
   }
   if (chromeApi.permissions) {
     browser.permissions = Object.create(chromeApi.permissions);

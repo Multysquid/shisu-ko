@@ -50,13 +50,34 @@ function notifyingStorage(storage, listeners) {
   };
 }
 
+const MANIFEST_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8")).version;
+
 function loadBackground(overrides = {}) {
   const source = fs.readFileSync(SOURCE_PATH, "utf8");
   const storage = overrides.storage || makeMemoryStorage();
   // storage.session outlives an event page but not the browser; a test hands the same store to a
   // second loadBackground to play a restarted page, or null for a browser without the area.
   const session = overrides.session === null ? undefined : overrides.session || makeMemoryStorage();
-  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [] };
+  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [], onNotificationClicked: [] };
+  // What the update nudges did: the badge calls and the notifications, in order. A test passes
+  // null for `action` or `notifications` to play a browser (or a service worker) without the API.
+  const badge = [];
+  const notifications = [];
+  const action = overrides.action === null ? undefined : {
+    setBadgeText: async (details) => badge.push(["text", details.text]),
+    setBadgeBackgroundColor: async (details) => badge.push(["color", details.color]),
+  };
+  const notificationsApi = overrides.notifications === null ? undefined : {
+    create: async (id, options) => {
+      notifications.push({ id, ...options });
+      return id;
+    },
+    clear: async (id) => {
+      notifications.push({ id, cleared: true });
+      return true;
+    },
+    onClicked: { addListener: (fn) => listeners.onNotificationClicked.push(fn) },
+  };
 
   const sandbox = {
     console,
@@ -85,8 +106,11 @@ function loadBackground(overrides = {}) {
         onChanged: { addListener: () => {}, removeListener: () => {} },
       },
       runtime: {
-        getURL: () => overrides.runtimeURL || "moz-extension://test/",
+        getURL: (path = "") => (overrides.runtimeURL || "moz-extension://test/") + path,
+        getManifest: () => ({ version: overrides.extensionVersion || MANIFEST_VERSION }),
         onMessage: { addListener: (fn) => listeners.onMessage.push(fn) },
+        onStartup: { addListener: (fn) => listeners.onStartup.push(fn) },
+        onInstalled: { addListener: (fn) => listeners.onInstalled.push(fn) },
         // Absent unless a test supplies one: that is what Firefox shows a background page whose
         // nativeMessaging permission was never granted.
         sendNativeMessage: overrides.sendNativeMessage,
@@ -99,6 +123,8 @@ function loadBackground(overrides = {}) {
         sendMessage: async () => {},
         onRemoved: { addListener: (fn) => listeners.onTabRemoved.push(fn) },
       },
+      action,
+      notifications: notificationsApi,
     },
   };
   sandbox.globalThis = sandbox;
@@ -118,6 +144,8 @@ function loadBackground(overrides = {}) {
     "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
       " globalThis.NATIVE_TIMEOUT_MS = NATIVE_TIMEOUT_MS; globalThis.LAUNCHER_HINT = LAUNCHER_HINT;" +
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
+      " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
+      " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
       " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
@@ -137,7 +165,22 @@ function loadBackground(overrides = {}) {
     for (const fn of listeners.onTabRemoved.slice()) fn(tabId, {});
   }
 
-  return { sandbox, storage, session, listeners, dispatch, closeTab };
+  // The browser starting (or the extension installed): every listener runs, and the promise
+  // settles when each has done its work, which the listeners return.
+  function startup(installed) {
+    const fns = installed ? listeners.onInstalled : listeners.onStartup;
+    return Promise.all(fns.slice().map((fn) => fn(installed ? { reason: "update" } : undefined)));
+  }
+
+  function clickNotification(id) {
+    return Promise.all(listeners.onNotificationClicked.slice().map((fn) => fn(id)));
+  }
+
+  // The clock as background.js reads it (Date.now in the context, which is the sandbox's own
+  // realm): a test moves it to play a restart that took longer than a poll interval.
+  const setNow = new vm.Script("(at) => { Date.now = () => at; }", { filename: SOURCE_PATH }).runInContext(sandbox);
+
+  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, startup, clickNotification, setNow };
 }
 
 module.exports = { loadBackground, makeMemoryStorage };
