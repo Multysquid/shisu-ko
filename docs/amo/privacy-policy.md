@@ -8,6 +8,8 @@ To the Shisu-ko server on your computer (http://127.0.0.1:8790 by default; the a
 
 To Anki on your computer, through the AnkiConnect add-on (http://127.0.0.1:8765 by default; the address is a setting), only if you mine sentences and keep the default "Anki" target: a screenshot of the current video frame, an MP3 or WAV clip of the sentence, and the subtitle text, written into the fields of the note you just created. To find that note the extension asks Anki for the ids of notes added today. If you choose the "Downloads" target instead, the screenshot and clip are saved into the Downloads/shisu-ko-mining folder of your computer and nothing is sent to Anki.
 
+To a helper program on your computer, only when you click the Start server button in the popup, and only after Firefox has asked you for permission to exchange messages with it: a request to start the companion server. The helper is part of the same project, installed by the server's setup; it receives nothing else from the extension and starts nothing but that server. The extension remembers such a request for the browser session, so that reopening the popup does not start a second server: the record (the helper's answer and a time) is ignored after 90 seconds, cleared once the server answers or the next request replaces it, and gone when the browser session ends; it is never written to disk.
+
 To youtube.com: nothing beyond what the page itself does. The extension reads the player's playback state on the page in order to place the subtitles; it does not modify your YouTube account, comments or history.
 
 The extension never contacts the developer or any other remote service, loads no remote code, and contains no analytics, telemetry or advertising.
@@ -28,4 +30,4 @@ The extension collects no personal data, so there is nothing to sell, share or p
 
 Changes to this policy are published with the extension's release notes and on the project page, https://github.com/Multysquid/shisu-ko. Questions: https://github.com/Multysquid/shisu-ko/issues.
 
-Last updated: 19 September 2026.
+Last updated: 20 September 2026.

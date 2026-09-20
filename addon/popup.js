@@ -15,6 +15,35 @@ const MODEL_HINT = "Applies while a video plays. A model not downloaded yet is f
 const MODEL_NAME_HINT = "Use a model size such as large-v3 or a Hugging Face repo id such as owner/name";
 // A model load takes seconds to minutes; while the popup is open its status line follows along.
 const HEALTH_REFRESH_MS = 2000;
+const OFFLINE_HINT = "start server/run.cmd or docker/up.cmd";
+
+// The "Start server" button. The server answers /health only once its model is loaded, and a
+// cold start reads up to 3 GB of weights from disk: 10-40 s on a GPU, longer on a CPU, after the
+// launcher's own venv check, and a first use downloads them before that. The background owns the
+// launch and its 90 s window (START_WINDOW_MS there) and hands the popup the deadline; after it
+// the viewer is sent to the log instead of watching a badge that never changes, and told that the
+// server may still be on its way, so a second start waits for a look at the log. The launcher
+// names the log it opened (SHISUKO_HOME moves it); without one (Windows, where the server has a
+// window, or a launch the launcher did not make) the hint names the usual places.
+function startNotUpHint(log) {
+  const where = typeof log === "string" && log ? log : "its window (Windows) or ~/.shisu-ko/server.log";
+  return `No answer from the server after 90 s: look at ${where} before starting it again; a first use downloads the model, which takes minutes`;
+}
+const START_NOT_UP_HINT = startNotUpHint(null);
+// The launcher checks 127.0.0.1:8790 itself; when it saw a server there and this popup sees none,
+// the two are looking at different addresses.
+const START_ELSEWHERE_HINT = "The launcher finds a server on 127.0.0.1:8790, but the server URL below does not answer; check it under Anki, clips and server";
+const START_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher to start the server from here";
+// The launcher is registered for Firefox alone (native_host.py writes the Mozilla host manifest;
+// Chrome wants its own, under its own key, naming the installed extension's id), so on Chrome the
+// button could only ever answer "launcher not registered" with a hint that cannot help there.
+const START_AVAILABLE = (() => {
+  try {
+    return /^moz-extension:/.test(browser.runtime.getURL(""));
+  } catch (err) {
+    return false;
+  }
+})();
 
 // The subtitle font, as content.js builds it (FONT_FAMILY_RE, SUB_FONTS, fontStack there): the
 // popup cannot import the content script, so the sample keeps a copy. Keep the two in step.
@@ -34,6 +63,18 @@ let saveTimer = null;
 let serverCheckPending = null;
 let health = null; // the last /health answer, null while the server is unreachable
 let healthInFlight = false;
+
+// The start flow, one step at a time: idle -> requesting (the permission prompt is up) -> starting
+// (the launcher was asked) -> waiting (it answered; /health is polled until the server does or the
+// deadline passes) -> idle once the server is online, or failed with the reason on the detail line
+// and the button back. Only the click handler moves it forward; the health refresh ends it. The
+// launch itself is the background's: this document dies with a click outside the popup, and the
+// next one picks the flow up at "waiting" from there (resumeStart) rather than at "idle" with a
+// button that would start a second server.
+// `already` and `loading` are the launcher's account of the server it found: one that answers
+// /health, or one that holds its instance lock while its model loads; `log` is the file it opened.
+const startFlow = { state: "idle", deadline: 0, already: false, loading: false, log: null, detail: "" };
+const START_BUSY = new Set(["requesting", "starting", "waiting"]);
 
 function readField(el) {
   if (el.type === "checkbox") return el.checked;
@@ -226,15 +267,55 @@ function onChange(ev) {
 
 // The status line answers the popup's first question: can it transcribe right now? The badge word
 // and its dot carry the state, the detail line the evidence (which model, which device) or the fix.
+// The server's answer outranks the start flow: online is online, whoever started it.
+function renderStatus() {
+  const badge = document.getElementById("server-status");
+  const detail = document.getElementById("server-detail");
+  const button = document.getElementById("start-server");
+  const launched = startFlow.state === "starting" || startFlow.state === "waiting";
+  let word;
+  let cls;
+  let evidence;
+  if (health && health.model_loading) {
+    word = "Loading model";
+    cls = "badge";
+    evidence = String(health.model_loading);
+  } else if (health) {
+    word = "Server online";
+    cls = "badge ok";
+    evidence = `${health.model} · ${health.device} · ${health.compute_type}`;
+  } else if (launched) {
+    word = "Starting server";
+    cls = "badge";
+    if (startFlow.state === "starting") evidence = "";
+    else if (startFlow.loading) evidence = "still loading by the launcher's account, waiting for it to answer";
+    else if (startFlow.already) evidence = "already running by the launcher's account, waiting for it to answer";
+    else evidence = "launched, waiting for it to answer";
+  } else {
+    word = "Server offline";
+    cls = "badge bad";
+    evidence = startFlow.state === "failed" ? startFlow.detail : OFFLINE_HINT;
+  }
+  setText(badge, word);
+  if (badge.className !== cls) badge.className = cls;
+  setText(detail, evidence);
+  // The button is the fix for one state only. It stays in place, disabled, while a start is under
+  // way, so the line does not jump and a second click cannot launch a second server.
+  const busy = START_BUSY.has(startFlow.state);
+  button.classList.toggle("hidden", !!health || !START_AVAILABLE);
+  if (button.disabled !== busy) button.disabled = busy;
+  setText(button, launched ? "Starting…" : "Start server");
+  renderModelField();
+}
+
 // Only the first check announces itself; the refreshes behind it change the text in place.
 async function checkServer(first) {
   if (healthInFlight) return;
-  const badge = document.getElementById("server-status");
-  const detail = document.getElementById("server-detail");
   if (first) {
+    const badge = document.getElementById("server-status");
     setText(badge, "Checking server");
     badge.className = "badge";
-    setText(detail, "");
+    setText(document.getElementById("server-detail"), "");
   }
   healthInFlight = true;
   let res;
@@ -244,26 +325,74 @@ async function checkServer(first) {
     healthInFlight = false;
   }
   health = res && res.ok && res.data ? res.data : null;
-  let word;
-  let cls;
-  let evidence;
-  if (!health) {
-    word = "Server offline";
-    cls = "badge bad";
-    evidence = "start server/run.cmd or docker/up.cmd";
-  } else if (health.model_loading) {
-    word = "Loading model";
-    cls = "badge";
-    evidence = String(health.model_loading);
-  } else {
-    word = "Server online";
-    cls = "badge ok";
-    evidence = `${health.model} · ${health.device} · ${health.compute_type}`;
+  // The start flow ends here, one way or the other: the server answered, or it had its 90 s.
+  // A start still in the click handler's hands (requesting, starting) is left to it.
+  if (health) {
+    if (startFlow.state === "waiting" || startFlow.state === "failed") startFlow.state = "idle";
+  } else if (startFlow.state === "waiting" && Date.now() >= startFlow.deadline) {
+    // A server the launcher saw answering is a server at another address; one it saw loading is
+    // as slow as one this popup launched, and gets the same advice.
+    failStart(startFlow.already && !startFlow.loading ? START_ELSEWHERE_HINT : startNotUpHint(startFlow.log));
   }
-  setText(badge, word);
-  if (badge.className !== cls) badge.className = cls;
-  setText(detail, evidence);
-  renderModelField();
+  renderStatus();
+}
+
+function failStart(detail) {
+  startFlow.state = "failed";
+  startFlow.detail = detail;
+  renderStatus();
+}
+
+// Never throws and never prompts twice: a granted permission answers true without a prompt.
+function requestNativeMessaging() {
+  try {
+    return Promise.resolve(browser.permissions.request({ permissions: ["nativeMessaging"] })).catch(() => false);
+  } catch (err) {
+    return Promise.resolve(false);
+  }
+}
+
+// The click on "Start server". The permission request is issued before anything is awaited: it
+// needs the user gesture, which the first await spends. The background then talks to the native
+// host; the popup only watches /health from there on.
+async function startServerFromPopup() {
+  if (START_BUSY.has(startFlow.state)) return;
+  const request = requestNativeMessaging();
+  startFlow.state = "requesting";
+  renderStatus();
+  const granted = await request;
+  if (!granted) {
+    failStart(START_PERMISSION_HINT);
+    return;
+  }
+  startFlow.state = "starting";
+  renderStatus();
+  const res = await browser.runtime.sendMessage({ type: "startServer" }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+  if (!res || typeof res !== "object" || !res.ok) {
+    const error = res && typeof res.error === "string" && res.error ? res.error : "the launcher gave no answer";
+    failStart(res && typeof res.hint === "string" && res.hint ? `${error}. ${res.hint}` : error);
+    return;
+  }
+  watchStart(res);
+  checkServer(false); // a server that was already up answers now, not two seconds from now
+}
+
+// Follow a launch the background reported, its answer to the click or the one it had under way
+// when the popup opened: /health is polled until the server answers or the deadline passes.
+function watchStart(res) {
+  startFlow.state = "waiting";
+  startFlow.already = !!res.already;
+  startFlow.loading = !!res.loading;
+  startFlow.log = typeof res.log === "string" && res.log ? res.log : null;
+  // The deadline is the background's; without one the wait ends at the next refresh, not never.
+  startFlow.deadline = Number.isFinite(res.deadline) ? res.deadline : Date.now();
+  renderStatus();
+}
+
+// A start requested from an earlier popup document may still be under way; the background says.
+async function resumeStart() {
+  const status = await browser.runtime.sendMessage({ type: "startServerStatus" }).catch(() => null);
+  if (status && typeof status === "object" && status.starting) watchStart(status);
 }
 
 // Reloading the open YouTube tabs is what actually injects the content script; a freshly granted
@@ -316,8 +445,11 @@ async function init() {
   }
   // The name hint answers while typing, before the change event saves anything.
   document.getElementById("model").addEventListener("input", renderModelHint);
+  document.getElementById("start-server").addEventListener("click", startServerFromPopup);
   renderModelHint();
-  checkServer(true);
+  await resumeStart();
+  // A resumed start has already painted its badge; "Checking server" is for a popup that knows nothing.
+  checkServer(startFlow.state === "idle");
   setInterval(() => checkServer(false), HEALTH_REFRESH_MS);
 }
 

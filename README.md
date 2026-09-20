@@ -35,7 +35,8 @@ audio from YouTube and the one-time model download.
   CTranslate2 model, such as `kotoba-tech/kotoba-whisper-v2.0-faster` (Japanese-specialised,
   about 6x faster) or a small CPU model. `--model` only sets the default.
 - **Native, Nix or Docker.** A one-time setup script on Windows, Linux and macOS, a Nix flake,
-  or a container with GPU support. All of them share the same model folder.
+  or a container with GPU support. All of them share the same model folder. When the native
+  server is not running, a button in the popup starts it (Firefox).
 
 ## Requirements
 
@@ -61,6 +62,31 @@ yt-dlp and the CUDA runtime libraries; nothing else on the system is touched. Th
 downloads the Whisper large-v3 model (about 3 GB) into `~/.shisu-ko/models`. The server is ready
 when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
 restarts itself if it ever crashes.
+
+From then on the toolbar popup can start it for you: while the server is offline, the status
+line in the popup's header shows a **Start server** button. The first click asks Firefox for
+permission to "exchange messages with programs other than Firefox"; allow it, and the button
+launches `server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background
+with its output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
+The button passes no options: the server starts with its defaults (large-v3, the GPU when there
+is one, no cookies), exactly as a bare `run.cmd` / `run.sh` start would. The popup's model
+field switches the model once that default one is up; anything else you usually append to
+`run.cmd` / `run.sh` (`--device cpu`, `--cookies-from-browser`, `--js-runtime`, ...) needs a start
+by hand, see [Server options](#server-options). Firefox only for now: Chrome wants the installed
+extension's id in the launcher's manifest. Docker and Nix users start the server as before.
+
+Setup registers that launcher with Firefox, and so does every `run.cmd` / `run.sh` start. An
+existing install therefore gets the button after one or two starts by hand: the start that
+updates Shisu-ko to a version with the button still runs the old launcher, so it is the start
+after the update that registers; running `setup.cmd` / `setup.sh` once is the sure way, and
+`run.cmd --check` says whether the launcher is registered. To take the registration away again,
+for example before deleting the checkout or if Firefox should not be able to start anything, run
+`~/.shisu-ko/venv/Scripts/python server/native_host.py --unregister` (`venv/bin/python` on
+Linux/macOS; any Python 3 works, the host is standard library only). It removes
+`~/.shisu-ko/native-messaging/shisuko.json` and the `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko`
+registry key on Windows, `~/.mozilla/native-messaging-hosts/shisuko.json` on Linux and
+`~/Library/Application Support/Mozilla/NativeMessagingHosts/shisuko.json` on macOS; delete
+those by hand if the checkout is already gone. `--status` shows the current state.
 
 Every start first looks for a newer Shisu-ko: a git clone is fast-forwarded to the branch it
 tracks, a folder downloaded as a zip is replaced with the newest release, changed Python
@@ -209,8 +235,11 @@ DVR disabled cannot be followed, since the server needs the numbered audio segme
 
 The switch in the header is the master switch. Off means nothing happens on YouTube pages: no
 overlay, no requests to the server, no Anki watching and no key handling, until it is switched
-on again (Alt+Shift+S flips it too). The same page opens as the add-on's preferences under
-Add-ons and themes > Shisu-ko.
+on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
+answers, and with which model and device; while it does not answer, a **Start server** button
+on that line launches it with the server's default options (Firefox, see
+[Start the server](#1-start-the-server)); the model field below takes effect once it is up. The
+same page opens as the add-on's preferences under Add-ons and themes > Shisu-ko.
 
 | Setting | Meaning |
 |---|---|
@@ -301,6 +330,9 @@ cues are kept beside it and come back the moment you switch back.
 ## Server options
 
 Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `compose.yaml`.
+The popup's **Start server** button runs `run.cmd` / `run.sh` without any of them, so it always
+starts the defaults below (the model can still be switched from the popup afterwards); a server
+that needs `--device cpu`, cookies or another option is started by hand.
 
 | Option | Effect |
 |---|---|
@@ -319,7 +351,7 @@ Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `c
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
 | `--allow-remote-ejs` | Lets yt-dlp fetch updated YouTube challenge-solver scripts from GitHub |
-| `--check` | Print environment diagnostics and exit |
+| `--check` | Print environment diagnostics (CUDA, yt-dlp's JavaScript runtime, downloaded models, whether the popup's Start button has its launcher registered) and exit |
 | `--no-update` | Start without looking for a newer version of Shisu-ko first (`run.cmd` / `run.sh`) |
 
 Endpoints, for anyone building on the server: `GET /health` (`model`, `default_model`,
@@ -371,7 +403,11 @@ The extension does not change between native and Docker; both listen on `127.0.0
 |---|---|
 | No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
-| Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`. Check the server URL in the popup. |
+| Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
+| **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
+| **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
+| **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads large-v3 (3 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
+| Server says "Another server is already starting or running on port 8790 (it holds ~/.shisu-ko/server-8790.lock). Stop it first." and stops (exit code 2) | A second server was started while one is loading or running: `run.cmd` double-clicked twice, or a start by hand while a server the popup launched is still in its update check (the **Start server** button itself looks at the lock first and reports a loading server as already starting). Close the window and let the first one finish; it holds the lock until it exits, and the file needs no cleaning up. If no server is running and the message persists, a stale `server.py` process still holds it; end that process (Task Manager, `pkill -f server.py`). |
 | First start sits at "Loading Whisper model" for a long time | The 3 GB download runs at your connection speed. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
 | "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
 | "Shisu-ko: model X: unknown model size" or "… was not found on Hugging Face" | The name in the popup's Transcription model field is not a faster-whisper size or an existing `owner/name` repo. Fix the name there; the previous model keeps running meanwhile. |
@@ -389,7 +425,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Mining says the card has none of the fields | Set the image/audio field names in the popup to the fields of your note type. |
 | No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |
 
-`run.cmd --check` prints diagnostics; `GET http://127.0.0.1:8790/sessions` lists active sessions.
+`run.cmd --check` prints diagnostics, including whether the Start button's launcher is registered;
+`GET http://127.0.0.1:8790/sessions` lists active sessions.
 
 ## Limitations
 
@@ -408,14 +445,16 @@ Planned: a distilled, smaller Japanese model that could eventually run in the br
 ```
 addon/                Firefox extension (Manifest V3, plain JS, no build step)
   content.js          overlay, sync loop, hover-pause, transcript, live clock, mining trigger
-  background.js       server proxy, settings, AnkiConnect watching, Downloads handling
+  background.js       server proxy, settings, AnkiConnect watching, Downloads handling, server start
   settings.js         the one place settings and their defaults are declared
-  popup.*             settings UI, also the add-on's preferences page
-  tests/              Node tests for background.js and the pure helpers of content.js
+  popup.*             settings UI with the server status and Start button, also the preferences page
+  tests/              Node tests for background.js, popup.js and the pure helpers of content.js
 server/
   server.py           HTTP server: yt-dlp + faster-whisper + live follower + clip cutting
   setup.cmd/.sh       one-time environment setup     run.cmd/.sh   start (with auto-restart)
   update.py           self-update run first by run.cmd/.sh: git fast-forward or newest release
+  native_host.py      native-messaging host behind the popup's Start server button (stdlib only);
+                      native-host.cmd/.sh wrap it for Firefox; --register writes the host manifest
   tests/              pytest suite                   tools/        cue statistics, re-transcription
 docker/               Windows wrappers for docker compose and the WSL engine installer
 docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing)
@@ -439,7 +478,10 @@ Checks:
   of the postponed annotations).
 - Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
   runs both test suites; `nix build .#addon` produces the extension zip.
-- Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`.
+- Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`,
+  the instance lock `server-8790.lock` (one per port, held while a server runs), `server.log`
+  (the output of a server the popup started, Linux/macOS) and, on Windows, the launcher's host
+  manifest `native-messaging/shisuko.json`.
 
 Tests cover the pure logic on both sides, need no GPU, network or Firefox, and run in CI on
 every push and pull request via [`.github/workflows/tests.yml`](.github/workflows/tests.yml):
@@ -462,13 +504,20 @@ gates, the preview decode, the live-stream buffer and follower (driven by a fake
 clock), fetch retries, the origin policy, session tokens and the on-disk cue cache.
 `test_model_switch.py` drives a model switch with a fake faster-whisper: name validation and
 aliases, the download beside the working model, the swap and session restart, every failure path
-and cooldown, the per-model cache files and what `/health` and `/sync` report. The extension
+and cooldown, the per-model cache files and what `/health` and `/sync` report.
+`test_native_host.py` drives the native host behind the Start button: the message framing, the
+two commands and every malformed request, the launch on each platform with a recorded `Popen`,
+the instance lock shared with `server.py`, registration into a temporary home with a fake
+registry, the host over a real pipe, and the wrapper and launcher scripts. The extension
 suite runs `background.js` and the helpers of `content.js` in a Node `vm` sandbox that stands in
 for the WebExtension APIs: settings storage, the server, AnkiConnect and Downloads proxying,
 sentence mining, the live clock and the master switch. `content.test.js` also covers the model
 name sent with every sync, the restart on a new session token, the model status and error
 messages and the font stack; `popup-copies.test.js` keeps the popup's copies of the font and
-model-name rules equal to those in `content.js` and `server.py`.
+model-name rules equal to those in `content.js` and `server.py`. `background.test.js` covers
+the `startServer` message: the native host's answers, the timeout, the mapping of the browser's
+errors to hints, and the launch record that outlives the event page; `popup.test.js` runs the
+popup's start flow against a fake document, from the button to the 90 s deadline and its hints.
 
 ## Acknowledgements
 

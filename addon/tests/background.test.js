@@ -979,3 +979,204 @@ test("base64ToBlob decodes the bytes and keeps the mime type", async () => {
   assert.equal(blob.type, "audio/mpeg");
   assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [0, 255, 65]);
 });
+
+// ------------------------------------------------------------------ startServer (native host)
+
+// The native host answers one message and exits; the stub records what it was asked.
+function nativeHost(answer) {
+  const calls = [];
+  const sendNativeMessage = async (application, message) => {
+    calls.push({ application, message });
+    if (answer instanceof Error) throw answer;
+    return typeof answer === "function" ? answer() : answer;
+  };
+  return { calls, sendNativeMessage };
+}
+
+// A launch's answer carries the deadline of its window (START_WINDOW_MS from the moment the host
+// answered); the launch itself is compared without it.
+function launched(res, expected) {
+  assert.ok(Number.isFinite(res.deadline) && res.deadline > Date.now() + 80000 && res.deadline <= Date.now() + 90000, `deadline ${res.deadline}`);
+  const { deadline, ...rest } = plain(res);
+  assert.deepEqual(rest, expected);
+}
+
+test("startServer asks the shisuko host to start and resolves its answer", async () => {
+  const host = nativeHost({ ok: true, started: true, log: null });
+  const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  assert.equal(sandbox.START_WINDOW_MS, 90000);
+  launched(res, { ok: true, started: true, already: false, loading: false, log: null });
+  assert.deepEqual(plain(host.calls), [{ application: "shisuko", message: { cmd: "start" } }]);
+});
+
+test("startServer treats an already running server as started, with the log path when there is one", async () => {
+  const host = nativeHost({ ok: true, already: true, log: "/home/x/.shisu-ko/server.log" });
+  const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  launched(res, { ok: true, started: false, already: true, loading: false, log: "/home/x/.shisu-ko/server.log" });
+});
+
+// The host's `starting`: /health is silent but server.py holds its instance lock, so a server is
+// loading its model (minutes on a first use). The popup must wait for it as for its own launch,
+// not take it for a server at another address; `loading` here, since `starting` is the name of
+// startStatus's own answer.
+test("startServer passes the host's 'starting' on as 'loading'", async () => {
+  const host = nativeHost({ ok: true, already: true, starting: true });
+  const { sandbox, dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  launched(res, { ok: true, started: false, already: true, loading: true, log: null });
+  const status = await dispatch({ type: "startServerStatus" });
+  assert.deepEqual(plain(status), { starting: true, already: true, loading: true, log: null, deadline: res.deadline });
+});
+
+test("startServer maps Firefox's missing-host error to 'launcher not registered' with the setup hint", async () => {
+  const host = nativeHost(new Error("No such native application shisuko"));
+  const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "launcher not registered");
+  assert.equal(res.hint, sandbox.LAUNCHER_HINT);
+  assert.match(res.hint, /setup\.cmd/);
+  assert.match(res.hint, /setup\.sh/);
+});
+
+test("startServer maps Chrome's two registration errors the same way", async () => {
+  for (const text of ["Specified native messaging host not found.", "Access to the specified native messaging host is forbidden."]) {
+    const host = nativeHost(new Error(text));
+    const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+    const res = await sandbox.startServer();
+    assert.equal(res.error, "launcher not registered", text);
+    assert.equal(res.hint, sandbox.LAUNCHER_HINT);
+  }
+});
+
+test("startServer reports a missing nativeMessaging permission instead of throwing", async () => {
+  const { sandbox } = loadBackground(); // no sendNativeMessage at all: the permission was never granted
+  const res = await sandbox.startServer();
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "permission missing");
+  const denied = nativeHost(new Error("Access to this API is denied: the nativeMessaging permission is missing"));
+  const other = loadBackground({ sendNativeMessage: denied.sendNativeMessage });
+  assert.equal((await other.sandbox.startServer()).error, "permission missing");
+});
+
+test("startServer passes the host's own refusal through", async () => {
+  const host = nativeHost({ ok: false, error: "run.cmd is missing" });
+  const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  assert.deepEqual(plain(res), { ok: false, error: "run.cmd is missing" });
+});
+
+test("startServer gives up on a host that never answers", async () => {
+  const host = nativeHost(() => new Promise(() => {}));
+  // The deadline timer fires at once, but the delay it was given is kept: the 15 s the popup's
+  // 90 s is built on, and a slip to 15 ms would fail every click before the host's Python is up.
+  const delays = [];
+  const setTimeout = (fn, ms) => { delays.push(ms); fn(); return 0; };
+  const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage, setTimeout });
+  assert.equal(sandbox.NATIVE_TIMEOUT_MS, 15000);
+  const res = await sandbox.startServer();
+  assert.deepEqual(plain(res), { ok: false, error: "the launcher did not answer" });
+  assert.deepEqual(delays, [sandbox.NATIVE_TIMEOUT_MS]);
+});
+
+test("startServer refuses an answer that is not an object", async () => {
+  const host = nativeHost(() => "yes");
+  const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  assert.deepEqual(plain(res), { ok: false, error: "the launcher gave no answer" });
+});
+
+test("a startServer message from the popup reaches the native host", async () => {
+  const host = nativeHost({ ok: true, started: true });
+  const { dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await dispatch({ type: "startServer" });
+  launched(res, { ok: true, started: true, already: false, loading: false, log: null });
+  assert.equal(host.calls.length, 1);
+});
+
+// The popup document dies with every click outside it. A reopened one asks whether a start is
+// under way and must be told so for as long as the server can still be loading: the host only
+// checks /health, which a loading server does not answer, so a second request would start a
+// second server.
+test("a second startServer request while the launch is under way is answered without the host", async () => {
+  const host = nativeHost({ ok: true, started: true, log: "/home/x/.shisu-ko/server.log" });
+  const { sandbox, dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const first = await sandbox.startServer();
+  const again = await dispatch({ type: "startServer" });
+  assert.deepEqual(plain(again), plain(first));
+  assert.equal(host.calls.length, 1);
+  const status = await dispatch({ type: "startServerStatus" });
+  assert.deepEqual(plain(status), { starting: true, already: false, loading: false, log: "/home/x/.shisu-ko/server.log", deadline: first.deadline });
+});
+
+test("startServerStatus reports no launch when none was requested or the last one failed", async () => {
+  const { dispatch } = loadBackground();
+  assert.deepEqual(plain(await dispatch({ type: "startServerStatus" })), { starting: false });
+  const host = nativeHost({ ok: false, error: "run.cmd is missing" });
+  const failed = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  await failed.sandbox.startServer();
+  assert.deepEqual(plain(await failed.dispatch({ type: "startServerStatus" })), { starting: false });
+  // Nothing to answer from: the next request goes to the host again.
+  await failed.sandbox.startServer();
+  assert.equal(host.calls.length, 2);
+});
+
+test("the launch outlives the event page: a restarted background answers from storage.session", async () => {
+  const host = nativeHost({ ok: true, started: true });
+  const first = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await first.sandbox.startServer();
+  const restarted = loadBackground({ sendNativeMessage: host.sendNativeMessage, session: first.session });
+  const status = await restarted.dispatch({ type: "startServerStatus" });
+  assert.deepEqual(plain(status), { starting: true, already: false, loading: false, log: null, deadline: res.deadline });
+  assert.deepEqual(plain(await restarted.sandbox.startServer()), plain(res));
+  assert.equal(host.calls.length, 1);
+});
+
+test("a launch is remembered in memory alone on a browser without storage.session", async () => {
+  const host = nativeHost({ ok: true, started: true });
+  const { sandbox, dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage, session: null });
+  const res = await sandbox.startServer();
+  assert.deepEqual(plain(await sandbox.startServer()), plain(res));
+  assert.equal(host.calls.length, 1);
+  assert.equal((await dispatch({ type: "startServerStatus" })).starting, true);
+});
+
+test("once the launch's window has passed the host is asked again", async () => {
+  const host = nativeHost({ ok: true, started: true });
+  const { sandbox, session } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  await session.set({ startServer: { ...plain(res), deadline: Date.now() - 1 } });
+  assert.deepEqual(plain(await sandbox.startStatus()), { starting: false });
+  await sandbox.startServer();
+  assert.equal(host.calls.length, 2);
+});
+
+test("a server that answers /health ends the launch, so the next request reaches the host", async () => {
+  const host = nativeHost({ ok: true, started: true });
+  const fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ model: "large-v3" }) });
+  const { sandbox, session } = loadBackground({ sendNativeMessage: host.sendNativeMessage, fetch });
+  await sandbox.startServer();
+  assert.equal((await sandbox.apiRequest("/health")).ok, true);
+  assert.deepEqual(plain(await sandbox.startStatus()), { starting: false });
+  assert.equal((await session.get("startServer")).startServer, null);
+  await sandbox.startServer();
+  assert.equal(host.calls.length, 2);
+});
+
+test("requests that overlap share the host's one answer", async () => {
+  let answer = null;
+  const host = nativeHost(() => new Promise((resolve) => { answer = resolve; }));
+  const { sandbox, dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const one = sandbox.startServer();
+  const two = dispatch({ type: "startServer" });
+  const status = dispatch({ type: "startServerStatus" }); // waits for the verdict too
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(host.calls.length, 1);
+  answer({ ok: true, started: true });
+  const [a, b] = await Promise.all([one, two]);
+  assert.deepEqual(plain(a), plain(b));
+  assert.equal((await status).starting, true);
+  assert.equal(host.calls.length, 1);
+});

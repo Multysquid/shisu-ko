@@ -7,6 +7,8 @@ plain data in, data out, as called out in the README's Development section.
 """
 from __future__ import annotations
 
+import errno
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -304,3 +306,63 @@ def test_app_cache_ignores_a_cache_without_the_current_format(tmp_path, monkeypa
     assert reloaded.title == "Old"  # the title survives, as it does for a model change
     assert reloaded.cues == []
     assert reloaded.covered == []
+
+
+# --------------------------------------------------------------------------- instance lock
+
+def test_instance_lock_keeps_a_second_server_off_the_port_before_the_model_loads(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "APP_DIR", tmp_path / "data")
+    monkeypatch.setattr(server, "INSTANCE_LOCK", None)
+    path = server.instance_lock_path(8790)
+    assert path == tmp_path / "data" / "server-8790.lock"
+    assert server.hold_instance_lock(8790) is True
+    try:
+        assert server.INSTANCE_LOCK is not None and not server.INSTANCE_LOCK.closed
+        assert server.try_lock(path) is None, "held: a second server stops here, exit code 2 in main()"
+        other = server.try_lock(server.instance_lock_path(8791))
+        assert other is not None, "another port is another server, e.g. a test instance"
+        other.close()
+    finally:
+        server.INSTANCE_LOCK.close()
+    again = server.try_lock(path)
+    assert again is not None, "released with the file, however the process ends"
+    again.close()
+
+
+def test_instance_lock_never_stops_the_server_when_the_file_is_unusable(tmp_path, monkeypatch, caplog):
+    (tmp_path / "data").write_text("")  # a file where the data directory should be
+    monkeypatch.setattr(server, "APP_DIR", tmp_path / "data")
+    monkeypatch.setattr(server, "INSTANCE_LOCK", None)
+    with caplog.at_level("WARNING", logger="shisu-ko"):
+        assert server.hold_instance_lock(8790) is True
+    assert server.INSTANCE_LOCK is None
+    assert "instance lock" in caplog.text
+
+
+def lock_call_raises(monkeypatch, code: int) -> None:
+    """Make the platform's non-blocking lock call fail with `code`, the file itself opening fine."""
+    def raise_(*args):
+        raise OSError(code, os.strerror(code))
+    if os.name == "nt":
+        monkeypatch.setattr(server.msvcrt, "locking", raise_)
+    else:
+        monkeypatch.setattr(server.fcntl, "flock", raise_)
+
+
+def test_instance_lock_reads_only_a_held_lock_as_held(tmp_path, monkeypatch, caplog):
+    """ENOLCK (an NFS home without a lock manager), EOPNOTSUPP, EINVAL: the file cannot be locked at all.
+
+    That is an unusable lock, not another server; reading it as held would exit 2 on every start.
+    """
+    monkeypatch.setattr(server, "APP_DIR", tmp_path / "data")
+    monkeypatch.setattr(server, "INSTANCE_LOCK", None)
+    lock_call_raises(monkeypatch, errno.ENOLCK)
+    with pytest.raises(OSError):
+        server.try_lock(server.instance_lock_path(8790))
+    with caplog.at_level("WARNING", logger="shisu-ko"):
+        assert server.hold_instance_lock(8790) is True
+    assert server.INSTANCE_LOCK is None
+    assert "instance lock" in caplog.text
+    lock_call_raises(monkeypatch, errno.EACCES if os.name == "nt" else errno.EWOULDBLOCK)
+    assert server.try_lock(server.instance_lock_path(8790)) is None, "what a held lock raises"
+    assert server.hold_instance_lock(8790) is False

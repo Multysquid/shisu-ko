@@ -39,10 +39,21 @@
   browser.runtime = Object.create(chromeApi.runtime);
   browser.runtime.sendMessage = promiseMethod(chromeApi.runtime, "sendMessage");
   browser.runtime.onMessage = { addListener: (fn) => chromeApi.runtime.onMessage.addListener(bridge(fn)) };
+  // Only where Chrome offers it (the background, with the nativeMessaging permission in reach);
+  // background.js treats a missing method as the permission not granted.
+  if (typeof chromeApi.runtime.sendNativeMessage === "function") {
+    browser.runtime.sendNativeMessage = promiseMethod(chromeApi.runtime, "sendNativeMessage");
+  }
   if (chromeApi.storage && chromeApi.storage.local) {
     browser.storage = Object.create(chromeApi.storage);
     browser.storage.local = Object.create(chromeApi.storage.local);
     for (const name of ["get", "set"]) browser.storage.local[name] = promiseMethod(chromeApi.storage.local, name);
+    // The launch record of the "Start server" button lives here; background.js does without the
+    // area when the browser has none.
+    if (chromeApi.storage.session) {
+      browser.storage.session = Object.create(chromeApi.storage.session);
+      for (const name of ["get", "set"]) browser.storage.session[name] = promiseMethod(chromeApi.storage.session, name);
+    }
     browser.storage.onChanged = chromeApi.storage.onChanged;
   }
   if (chromeApi.tabs) {

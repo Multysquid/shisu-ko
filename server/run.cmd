@@ -17,6 +17,9 @@ if not exist "%VENV%\Scripts\python.exe" (
 REM Look for a newer version (git fast-forward, or the newest release for a downloaded folder)
 REM and install it. That can replace this very file, and cmd reads batch files as it goes: the
 REM jump to :loop shares the update's line, so everything after it is read from the new file.
+REM Before that, register the native-messaging host behind the extension's "Start server"
+REM button (cheap, idempotent), so a checkout that never re-ran setup.cmd gets the button too.
+"%VENV%\Scripts\python.exe" "%~dp0native_host.py" --register
 "%VENV%\Scripts\python.exe" "%~dp0update.py" %* & goto loop
 
 :loop

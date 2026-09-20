@@ -11,3 +11,4 @@ Since 0.3:
 - A subtitle font can be any font installed on the computer; the popup previews it and says whether the name was found.
 - Mined files are saved through object URLs, which fixes the Downloads fallback in current Firefox versions.
 - The manifest links to the project page.
+- 0.8.0: a **Start server** button in the popup. While the server is offline, one click starts it, with the server's default options, through a small launcher that the server's setup registers with Firefox (every start of the server registers it too, from the first start after the update to 0.8.0); Firefox asks once for permission to exchange messages with it.

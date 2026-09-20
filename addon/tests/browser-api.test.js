@@ -16,11 +16,15 @@ function loadChrome() {
       lastError: null,
       getURL: () => "chrome-extension://test/",
       sendMessage(msg, callback) { calls.push(["sendMessage", msg]); callback({ echoed: msg }); },
+      sendNativeMessage(application, msg, callback) { calls.push(["sendNativeMessage", application, msg]); callback({ ok: true, started: true }); },
       onMessage: { addListener(fn) { listeners.push(fn); } },
     },
     storage: { local: {
       get(key, callback) { callback({ [key]: 1 }); },
       set(value, callback) { callback(); },
+    }, session: {
+      get(key, callback) { calls.push(["session.get", key]); callback({ [key]: 2 }); },
+      set(value, callback) { calls.push(["session.set", value]); callback(); },
     }, onChanged: {} },
     tabs: { query(q, callback) { callback([{ id: 7, q }]); }, reload(id, callback) { callback(); }, sendMessage(id, msg, callback) { callback({ id, msg }); } },
     permissions: { contains(_, callback) { callback(true); }, request(_, callback) { callback(false); } },
@@ -76,6 +80,20 @@ test("Chrome callback APIs become promises", async () => {
   assert.equal(await browser.downloads.download({ url: "data:x" }), 12);
 });
 
+test("Chrome storage.session is bridged like storage.local, and only where it exists", async () => {
+  const { browser, chrome, calls } = loadChrome();
+  assert.deepEqual(await browser.storage.session.get("startServer"), { startServer: 2 });
+  assert.equal(await browser.storage.session.set({ startServer: null }), undefined);
+  assert.deepEqual(calls.slice(-2), [["session.get", "startServer"], ["session.set", { startServer: null }]]);
+  delete chrome.storage.session;
+  const sandbox = { chrome, console, Promise, globalThis: null };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source).runInContext(sandbox);
+  assert.equal(sandbox.browser.storage.session, undefined);
+  assert.equal(typeof sandbox.browser.storage.local.get, "function");
+});
+
 test("Chrome runtime.lastError rejects the promise", async () => {
   const { browser, chrome } = loadChrome();
   chrome.runtime.sendMessage = (_msg, callback) => {
@@ -113,4 +131,28 @@ test("runtime message bridge handles synchronous replies and throws", async () =
   });
   assert.deepEqual(await send({ type: "sync" }), { ok: true });
   assert.equal(JSON.stringify(await send({ type: "throw" })), JSON.stringify({ ok: false, error: "bad sync" }));
+});
+
+test("Chrome sendNativeMessage is bridged to a promise, with lastError as a rejection", async () => {
+  const { browser, chrome, calls } = loadChrome();
+  assert.deepEqual(await browser.runtime.sendNativeMessage("shisuko", { cmd: "start" }), { ok: true, started: true });
+  assert.deepEqual(calls.at(-1), ["sendNativeMessage", "shisuko", { cmd: "start" }]);
+  chrome.runtime.sendNativeMessage = (_app, _msg, callback) => {
+    chrome.runtime.lastError = { message: "Specified native messaging host not found." };
+    callback();
+    chrome.runtime.lastError = null;
+  };
+  // The bridge reads the chrome method at call time, so the swapped stub is what the wrapper runs.
+  await assert.rejects(browser.runtime.sendNativeMessage("shisuko", { cmd: "start" }), /not found/);
+});
+
+test("a Chrome runtime without sendNativeMessage gets no wrapper for it", () => {
+  const { chrome } = loadChrome();
+  delete chrome.runtime.sendNativeMessage;
+  const sandbox = { chrome, console, Promise, globalThis: null };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source).runInContext(sandbox);
+  assert.equal(typeof sandbox.browser.runtime.sendNativeMessage, "undefined");
+  assert.equal(typeof sandbox.browser.permissions.request, "function");
 });

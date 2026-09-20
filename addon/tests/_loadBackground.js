@@ -53,6 +53,9 @@ function notifyingStorage(storage, listeners) {
 function loadBackground(overrides = {}) {
   const source = fs.readFileSync(SOURCE_PATH, "utf8");
   const storage = overrides.storage || makeMemoryStorage();
+  // storage.session outlives an event page but not the browser; a test hands the same store to a
+  // second loadBackground to play a restarted page, or null for a browser without the area.
+  const session = overrides.session === null ? undefined : overrides.session || makeMemoryStorage();
   const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [] };
 
   const sandbox = {
@@ -74,6 +77,7 @@ function loadBackground(overrides = {}) {
     browser: {
       storage: {
         local: notifyingStorage(storage, listeners),
+        session,
         onChanged: { addListener: (fn) => listeners.onChanged.push(fn) },
       },
       downloads: {
@@ -83,6 +87,9 @@ function loadBackground(overrides = {}) {
       runtime: {
         getURL: () => overrides.runtimeURL || "moz-extension://test/",
         onMessage: { addListener: (fn) => listeners.onMessage.push(fn) },
+        // Absent unless a test supplies one: that is what Firefox shows a background page whose
+        // nativeMessaging permission was never granted.
+        sendNativeMessage: overrides.sendNativeMessage,
       },
       commands: {
         onCommand: { addListener: (fn) => listeners.onCommand.push(fn) },
@@ -109,6 +116,8 @@ function loadBackground(overrides = {}) {
   // copy them onto globalThis for the test harness to read.
   new vm.Script(
     "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
+      " globalThis.NATIVE_TIMEOUT_MS = NATIVE_TIMEOUT_MS; globalThis.LAUNCHER_HINT = LAUNCHER_HINT;" +
+      " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
       " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
@@ -128,7 +137,7 @@ function loadBackground(overrides = {}) {
     for (const fn of listeners.onTabRemoved.slice()) fn(tabId, {});
   }
 
-  return { sandbox, storage, listeners, dispatch, closeTab };
+  return { sandbox, storage, session, listeners, dispatch, closeTab };
 }
 
 module.exports = { loadBackground, makeMemoryStorage };

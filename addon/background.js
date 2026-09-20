@@ -11,11 +11,32 @@
  *     material without the viewer pressing anything.
  *  5. Pre-mine: hold the screenshot and the audio clip of the sentences that just played, so a
  *     card gets them at once and still gets them after the line has gone from the screen.
+ *  6. Start the server for the popup: an extension cannot spawn a process, so the request goes
+ *     to the "shisuko" native host (server/native_host.py), which runs the project's launcher.
  */
 
 const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
 
 const REQUEST_TIMEOUT_MS = 10000;
+
+// The native host answers at once (it only spawns run.cmd / run.sh and reports), but
+// sendNativeMessage has no timeout and no AbortSignal: a host that hangs, or a Python that takes
+// its time on a cold disk, would leave the popup on "Starting…" for good. 15 s is well past a
+// Python start-up and well short of the popup's own 90 s patience.
+const NATIVE_TIMEOUT_MS = 15000;
+const NATIVE_HOST = "shisuko";
+// A launch is remembered for as long as the popup waits for the server. The popup document dies
+// with every click outside it, and a reopened one must not offer a second start while the first
+// is still loading its model, which is the whole time /health stays silent (server.py binds the
+// port after load_model()): a second run.cmd would load a second model onto the same GPU. 90 s is
+// past any healthy start (10-40 s on a GPU after the launcher's venv check, longer on a CPU);
+// after it the popup shows the log hint and the button again, since a launch that failed has to
+// be retried somehow. The record goes to storage.session as well as memory: Firefox ends an idle
+// event page after 30 s, and a model load takes longer than that.
+const START_WINDOW_MS = 90000;
+const START_KEY = "startServer";
+const LAUNCHER_HINT = "Run server\\setup.cmd (Windows) or bash server/setup.sh once, or start the server by hand once: run.cmd / run.sh register the launcher";
+const NATIVE_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher when the browser asks";
 
 // Auto-mining watcher: poll AnkiConnect for a note Yomitan has just created.
 const ANKI_POLL_THROTTLE_MS = 250;   // several tabs may poll; one request per interval is enough
@@ -99,6 +120,7 @@ async function apiRequest(path, body) {
     if (!res.ok) {
       return { ok: false, error: (data && data.error) || `HTTP ${res.status}`, data };
     }
+    if (path === "/health") forgetStart(); // the popup's poll: the server the launch waited for is up
     return { ok: true, data };
   } catch (err) {
     const timedOut = err && err.name === "AbortError";
@@ -106,6 +128,123 @@ async function apiRequest(path, body) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ------------------------------------------------------------------ starting the server
+
+// What the browser says when the native host is not there, in a line the viewer can act on.
+// Firefox says "No such native application shisuko" whether the host manifest is missing or does
+// not list this extension; Chrome splits that into "Specified native messaging host not found."
+// and "Access to the specified native messaging host is forbidden." Anything about permission
+// means the optional nativeMessaging grant is missing.
+function nativeError(err) {
+  const text = String((err && err.message) || err || "");
+  if (/no such native application|not found|nonexistent|forbidden/i.test(text)) {
+    return { ok: false, error: "launcher not registered", hint: LAUNCHER_HINT };
+  }
+  if (/permission|denied|not available/i.test(text)) {
+    return { ok: false, error: "permission missing", hint: NATIVE_PERMISSION_HINT };
+  }
+  return { ok: false, error: text || "the launcher failed" };
+}
+
+let lastStart = null;     // the launch under way: its answer, {ok, started, already, loading, log, deadline}
+let startInFlight = null; // the host's pending answer, shared by every request until it lands
+
+function sessionArea() {
+  const area = browser.storage && browser.storage.session;
+  return area && typeof area.get === "function" && typeof area.set === "function" ? area : null;
+}
+
+// The launch under way, or null once its window has passed. Storage outranks memory: the event
+// page may have been restarted since the launch, and this page then knows nothing.
+async function pendingStart() {
+  const area = sessionArea();
+  if (area) {
+    try {
+      const stored = (await area.get(START_KEY))[START_KEY];
+      lastStart = stored && typeof stored === "object" ? stored : null;
+    } catch (err) {
+      /* memory keeps what this event page saw */
+    }
+  }
+  return lastStart && typeof lastStart.deadline === "number" && Date.now() < lastStart.deadline ? lastStart : null;
+}
+
+async function rememberStart(answer) {
+  lastStart = answer;
+  const area = sessionArea();
+  if (!area) return;
+  try {
+    await area.set({ [START_KEY]: answer });
+  } catch (err) {
+    /* memory keeps it for as long as this event page lives */
+  }
+}
+
+// A server that answers /health is what the launch was waiting for: the next request must reach
+// the host again (it will find the server running, or start it again after it was stopped).
+function forgetStart() {
+  if (lastStart) rememberStart(null);
+}
+
+// Ask the native host to start the server, once: a request while a launch is under way is answered
+// from that launch, without asking again, and requests that overlap share one answer. Resolves
+// {ok: true, started|already, loading, log, deadline} or {ok: false, error, hint}; it never rejects,
+// so the popup always has a line to show. The host's own verdict passes through untouched: it
+// knows why run.cmd could not be launched.
+function startServer() {
+  if (!startInFlight) {
+    startInFlight = requestStart().finally(() => {
+      startInFlight = null;
+    });
+  }
+  return startInFlight;
+}
+
+async function requestStart() {
+  const pending = await pendingStart();
+  if (pending) return pending;
+  // Looked up at call time, not at load: Firefox adds the method once the permission is granted.
+  const send = browser.runtime.sendNativeMessage;
+  if (typeof send !== "function") return { ok: false, error: "permission missing", hint: NATIVE_PERMISSION_HINT };
+  const timedOut = Symbol("timeout");
+  let timer = null;
+  const noAnswer = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), NATIVE_TIMEOUT_MS);
+  });
+  try {
+    const answer = await Promise.race([send.call(browser.runtime, NATIVE_HOST, { cmd: "start" }), noAnswer]);
+    if (answer === timedOut) return { ok: false, error: "the launcher did not answer" };
+    if (!answer || typeof answer !== "object") return { ok: false, error: "the launcher gave no answer" };
+    if (!answer.ok) return { ok: false, error: String(answer.error || "the launcher refused") };
+    const result = {
+      ok: true,
+      started: !!answer.started,
+      already: !!answer.already,
+      // The host's `starting`: a server launched (by an earlier click, or by hand) that holds its
+      // instance lock but does not listen yet, its model still loading or downloading. Not an
+      // `already` the popup may blame on the server URL, and not `starting`, which is the popup's
+      // word for a launch under way (startStatus below).
+      loading: !!answer.starting,
+      log: typeof answer.log === "string" && answer.log ? answer.log : null,
+      deadline: Date.now() + START_WINDOW_MS,
+    };
+    await rememberStart(result);
+    return result;
+  } catch (err) {
+    return nativeError(err);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The popup's question on opening: is a start under way? With the launch's details, a reopened
+// popup resumes watching it, button disabled, where the closed one left off.
+async function startStatus() {
+  const start = startInFlight ? await startInFlight : await pendingStart();
+  if (!start || !start.ok) return { starting: false };
+  return { starting: true, already: !!start.already, loading: !!start.loading, log: start.log, deadline: start.deadline };
 }
 
 // ------------------------------------------------------------------ mining helpers
@@ -662,6 +801,10 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       return Promise.resolve({ ok: true });
     case "ankiPoll":
       return ankiPoll();
+    case "startServer":
+      return startServer();
+    case "startServerStatus":
+      return startStatus();
     default:
       return undefined;
   }

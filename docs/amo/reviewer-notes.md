@@ -60,6 +60,25 @@ The demo recording in the README shows the expected behaviour: https://github.co
 7. The switch in the popup header (Alt+Shift+S) turns everything off: no overlay, no requests to
    the server, no key handling, until it is switched on again.
 
+8. Optional, the "Start server" button: stop the server (Ctrl+C in its terminal) and open the
+   popup. The status line says "Server offline" and shows "Start server". Clicking it asks for
+   the optional nativeMessaging permission ("Exchange messages with programs other than
+   Firefox"); after "Allow", the extension asks the native-messaging host "shisuko" (registered
+   by setup.sh in step 1, ~/.mozilla/native-messaging-hosts/shisuko.json) to run server/run.sh
+   without any options, and the status line goes to "Starting server". The server therefore
+   starts with server.py's defaults (--model large-v3, --device auto), not with the
+   --model small --device cpu of step 1: on a machine without a GPU it first downloads large-v3
+   (about 3 GB) into ~/.shisu-ko/models and then loads it on the CPU, which takes minutes,
+   longer than the 90 s the popup waits. Expect the status line to fall back to "Server offline"
+   with the hint "No answer from the server after 90 s: look at /home/<user>/.shisu-ko/server.log
+   before starting it again; a first use downloads the model, which takes minutes" and the
+   button to return. Clicking it again is harmless: the host sees the server's lock file and
+   answers that it is already starting, so nothing is launched twice and the popup waits again.
+   The status line reaches "Server online" once server.log prints "Listening on
+   http://127.0.0.1:8790" (the server's output goes there when the button started it). The
+   model can then be changed in the popup's "Transcription model" field, for example to "small",
+   without restarting. Declining the permission only puts a hint on the status line.
+
 PERMISSIONS
 
 - storage: the settings (browser.storage.local).
@@ -74,6 +93,15 @@ PERMISSIONS
   script that draws the subtitles.
 - host permissions http://127.0.0.1/* and http://localhost/*: the companion server (port 8790)
   and AnkiConnect (port 8765). Both URLs are settings with these defaults.
+- nativeMessaging (optional_permissions; requested with browser.permissions.request from the
+  click on the popup's "Start server" button, which is shown only while the companion server
+  does not answer): background.js sends the one message {cmd: "start"} to the native-messaging
+  host "shisuko" with browser.runtime.sendNativeMessage. That host is server/native_host.py in
+  the same repository (Python standard library only), registered for this extension id by the
+  server's setup script, and it can do exactly one thing: start the companion server's own
+  launcher (server/run.cmd or server/run.sh next to it). It takes no path, program or argument
+  from the message, answers "unknown command" to anything else, and is never contacted by any
+  other part of the extension. Without the grant the button only shows a hint.
 
 CODE THAT MAY NEED A WORD
 
@@ -92,6 +120,11 @@ CODE THAT MAY NEED A WORD
   AnkiConnect JSON
   requests (requestPermission, findNotes, storeMediaFile, updateNoteFields, and the fields of
   the one note being filled).
+- background.js, startServer(): the only use of nativeMessaging (above). It remembers a
+  launch in browser.storage.session (the host's answer and a deadline 90 s ahead) so a reopened
+  popup does not start a second server while the first is still loading its model; the record
+  is ignored past its deadline, cleared by a /health answer, replaced by the next launch, and
+  gone with the browser session.
 - The content script never uses innerHTML or similar: youtube.com enforces Trusted Types, so
   all DOM is built with createElement/textContent.
 
