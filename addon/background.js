@@ -98,6 +98,96 @@ function normalizeBase(url, fallback) {
   return /^https?:\/\//i.test(value) ? value : fallback;
 }
 
+// ------------------------------------------------------------------ one tab at a time
+
+// The server transcribes one video per session and a second tab would fight the first for GPU,
+// bandwidth and disk. So only one tab's /sync reaches it. The right belongs to the tab the viewer
+// is watching -- the active tab of the focused window -- and otherwise stays where it is; the
+// other tabs are told to stand by and take over the moment they are looked at.
+const HOLD_TIMEOUT_MS = 12000; // two missed 5 s heartbeats: the tab left the video, was turned off or died
+// How long a focused holder keeps the right without syncing. It has to exceed the content script's
+// 5 s idle heartbeat, or a *paused* focused tab would look quiet between two heartbeats and the
+// right would flap; it has to stay well under HOLD_TIMEOUT_MS so that a focused tab which really
+// stopped syncing -- master switch off, an ad, the YouTube home page, a throttled background tab --
+// hands the right on in one heartbeat instead of twelve seconds of blank overlays elsewhere.
+const FOCUS_STALE_MS = 7000;
+
+const activeTabs = new Map(); // windowId -> the tab active in it
+const syncers = new Map();    // tabId -> { at, paused }: every tab that recently asked to sync
+let focusedWindowId = null;
+let holder = null;            // the tab allowed to talk to the server, or null
+
+function focusedTabId() {
+  if (focusedWindowId === null) return null;
+  const id = activeTabs.get(focusedWindowId);
+  return id === undefined ? null : id;
+}
+
+// Which tab may sync, given the one asking now. Pure: every input is an argument, so the rules can
+// be tested without windows, tabs or a clock.
+//
+// No tab becomes the holder unless it is the one asking; only an existing holder keeps a right it
+// already has. Naming a tab that did not ask looks tempting -- the focused tab is the one the
+// viewer wants -- but a focused tab that has stopped syncing (the master switch, an ad, the
+// YouTube home page) would then hold the right in silence and every other tab would stand by
+// until its entry aged out. A focused tab that is not the holder needs no help: its own next tick
+// takes the right through rule 1, a second later at most.
+function electSyncTab(candidate, current, focused, tabs, now) {
+  const fresh = (id, within) => {
+    const seen = tabs.get(id);
+    return !!seen && now - seen.at < within;
+  };
+  if (focused === candidate) return candidate;                          // 1. the viewer is watching the tab that is asking
+  // 2. nobody holds it, the asker already holds it, or the holder has gone quiet. Past this line
+  // `current` is a tab id with a fresh entry in `tabs`, which is what makes `held` below defined.
+  if (current === null || current === undefined || current === candidate || !fresh(current, HOLD_TIMEOUT_MS)) return candidate;
+  if (current === focused && fresh(current, FOCUS_STALE_MS)) return current; // 3. the watched tab keeps it, playing or paused
+  const held = tabs.get(current);
+  const asking = tabs.get(candidate); // the asker's entry, written just before this call; absent only in a test
+  // 4. a playing video beats a holder that is paused, or that has gone quiet since the focus
+  // window: a tab whose switch was turned off keeps reporting nothing, and the viewer should not
+  // wait out the whole hold timeout for it.
+  if (asking && !asking.paused && (held.paused || !fresh(current, FOCUS_STALE_MS))) return candidate;
+  return current;                                                       // 5. otherwise the holder keeps it
+}
+
+browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  activeTabs.set(windowId, tabId);
+});
+
+// WINDOW_ID_NONE means focus left the browser altogether. The last focused window keeps the
+// priority then: switching to another app must not hand the right to some other tab.
+//
+// Browsers fire onActivated only when the tab selection changes *inside* a window, never when
+// focus moves between windows, so a window we have not seen a selection change in has no entry
+// here -- after a browser start, after the event page restarted. Ask for its active tab, or
+// focusedTabId() answers null forever and the tab the viewer is actually watching stands by.
+browser.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === browser.windows.WINDOW_ID_NONE) return undefined;
+  focusedWindowId = windowId;
+  return browser.tabs
+    .query({ active: true, windowId })
+    .then((tabs) => {
+      for (const tab of tabs) {
+        if (typeof tab.id === "number") activeTabs.set(windowId, tab.id);
+      }
+    })
+    .catch(() => {});
+});
+
+// The event page starts after the windows already exist, so ask once for the current one.
+browser.tabs
+  .query({ active: true, lastFocusedWindow: true })
+  .then((tabs) => {
+    for (const tab of tabs) {
+      if (typeof tab.id !== "number" || typeof tab.windowId !== "number") continue;
+      activeTabs.set(tab.windowId, tab.id);
+      // A focus change that fired while this query was out knows better than its answer does.
+      if (focusedWindowId === null) focusedWindowId = tab.windowId;
+    }
+  })
+  .catch(() => {});
+
 // ------------------------------------------------------------------ Whisper server proxy
 
 async function apiRequest(path, body) {
@@ -1239,8 +1329,17 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   // Pre-mined material belongs to the tab that captured it; the popup (no tab) gets -1 and holds none.
   const tabId = sender && sender.tab && typeof sender.tab.id === "number" ? sender.tab.id : -1;
   switch (msg.type) {
-    case "api":
+    case "api": {
+      if (msg.path === "/sync" && tabId >= 0) {
+        const now = Date.now();
+        syncers.set(tabId, { at: now, paused: !!(msg.body && msg.body.paused) });
+        holder = electSyncTab(tabId, holder, focusedTabId(), syncers, now);
+        // Standing by is not an error: the tab keeps its overlay and its status line, and asks
+        // again on the next tick, which is what makes taking over immediate.
+        if (holder !== tabId) return Promise.resolve({ ok: true, data: { status: "standby" } });
+      }
       return apiRequest(msg.path, msg.body);
+    }
     case "getSettings":
       return getSettings();
     case "saveSettings":
@@ -1271,8 +1370,13 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   }
 });
 
-// A closed tab can never mine what it prepared.
-browser.tabs.onRemoved.addListener((tabId) => dropTabPremined(tabId));
+// A closed tab can never mine what it prepared, nor keep the right to sync.
+browser.tabs.onRemoved.addListener((tabId) => {
+  dropTabPremined(tabId);
+  syncers.delete(tabId);
+  for (const [windowId, id] of activeTabs) if (id === tabId) activeTabs.delete(windowId);
+  if (holder === tabId) holder = null;
+});
 
 browser.commands.onCommand.addListener(async (name) => {
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });

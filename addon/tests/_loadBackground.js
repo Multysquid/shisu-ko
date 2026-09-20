@@ -58,7 +58,8 @@ function loadBackground(overrides = {}) {
   // storage.session outlives an event page but not the browser; a test hands the same store to a
   // second loadBackground to play a restarted page, or null for a browser without the area.
   const session = overrides.session === null ? undefined : overrides.session || makeMemoryStorage();
-  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [], onNotificationClicked: [] };
+  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [], onNotificationClicked: [],
+    onTabActivated: [], onWindowFocusChanged: [] };
   // What the update nudges did: the badge calls and the notifications, in order. A test passes
   // null for `action` or `notifications` to play a browser (or a service worker) without the API.
   const badge = [];
@@ -119,9 +120,15 @@ function loadBackground(overrides = {}) {
         onCommand: { addListener: (fn) => listeners.onCommand.push(fn) },
       },
       tabs: {
-        query: async () => [],
+        // The election asks which tab a window is showing; a test supplies the answer.
+        query: overrides.tabsQuery || (async () => []),
         sendMessage: async () => {},
         onRemoved: { addListener: (fn) => listeners.onTabRemoved.push(fn) },
+        onActivated: { addListener: (fn) => listeners.onTabActivated.push(fn) },
+      },
+      windows: {
+        WINDOW_ID_NONE: -1,
+        onFocusChanged: { addListener: (fn) => listeners.onWindowFocusChanged.push(fn) },
       },
       action,
       notifications: notificationsApi,
@@ -146,7 +153,9 @@ function loadBackground(overrides = {}) {
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
       " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
       " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
-      " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;",
+      " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;" +
+      " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
+      " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
 
@@ -180,7 +189,18 @@ function loadBackground(overrides = {}) {
   // realm): a test moves it to play a restart that took longer than a poll interval.
   const setNow = new vm.Script("(at) => { Date.now = () => at; }", { filename: SOURCE_PATH }).runInContext(sandbox);
 
-  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, startup, clickNotification, setNow };
+  // Switching tabs inside a window, and moving focus between windows: the two events the
+  // election listens to. Firefox fires only the first when the tab selection changes.
+  function activateTab(tabId, windowId) {
+    for (const fn of listeners.onTabActivated.slice()) fn({ tabId, windowId });
+  }
+
+  function focusWindow(windowId) {
+    return Promise.all(listeners.onWindowFocusChanged.slice().map((fn) => fn(windowId)));
+  }
+
+  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, startup, clickNotification, setNow,
+    activateTab, focusWindow };
 }
 
 module.exports = { loadBackground, makeMemoryStorage };
