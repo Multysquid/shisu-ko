@@ -170,6 +170,12 @@ audio…" through "Decoding audio…" to "Transcribing…", and the first subtit
 seconds. From then on the server stays ahead of you. The toolbar popup holds every setting, and
 the switch in its header turns the whole extension off and on again.
 
+Only the video you are watching is transcribed. Other YouTube tabs say "subtitles are running in
+another tab" and take over the moment you click into them, so two open videos never compete for
+the GPU. A video whose speech is not in the subtitle language stops after about a minute of it
+("the speech is not in the subtitle language") and starts again by itself when the language
+comes back.
+
 | Shortcut | Action |
 |---|---|
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
@@ -358,7 +364,19 @@ and the server does the heavy lifting with
 download is still running, and transcribes a short 20-second window there so the first subtitles
 appear quickly. It then continues in 40-second windows up to 15 minutes ahead of you. A sentence
 cut at a window edge is dropped and re-transcribed at the start of the next window, so lines are
-never chopped. Seeking to an untranscribed part starts a new short window there.
+never chopped. Seeking to an untranscribed part starts a new short window there. Only the tab you
+are looking at is served: the extension elects one, and the others are answered without the server
+being asked at all.
+
+**Language.** Whisper is told which language to expect (`--language`, default Japanese), and told
+that, it will gladly turn an English talk into Japanese subtitles. So the server also asks it what
+each window's speech actually was, and once `--language-patience` seconds of speech (60 by default)
+have gone by without the subtitle language being heard, it stops transcribing that video. It keeps
+listening to every window it would have transcribed, at a tenth of the cost, and starts again the
+moment the language returns; a video that opens with an English introduction loses nothing. One
+misjudged window never costs a subtitle, because until the patience runs out every window is
+transcribed anyway. Nothing a paused video has merely listened to is recorded as transcribed, so
+a pause that was wrong costs a second listen and never a blank video.
 
 **Cues.** The server runs Silero voice activity detection on each window and drops what Whisper
 makes up over silence and music: segments without words, segments that barely overlap detected
@@ -403,6 +421,7 @@ that needs `--device cpu`, cookies or another option is started by hand.
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
 | `--max-cue-seconds 6` / `--min-cue-seconds 0.8` | Longest and shortest cue; shorter ones are extended or merged |
 | `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
+| `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop (0 = never listen for it, transcribe everything) |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
@@ -472,6 +491,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 |---|---|
 | No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
+| Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
+| Badge says "the speech is not in the subtitle language" | The server heard a minute of another language and stopped; it starts again when the subtitle language returns. For a video that really does mix languages, start the server with `--language-patience 0`. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |

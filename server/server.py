@@ -66,7 +66,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.9.1"
+VERSION = "0.10.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (sys.exit), 3 asks for a plain restart (os._exit: a broken GPU context, no model left) and
 # EXIT_UPDATE asks the launcher to run update.py first and then start the server again (POST /update).
