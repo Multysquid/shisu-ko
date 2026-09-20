@@ -1,9 +1,10 @@
 "use strict";
 
-// popup.js keeps copies of a few literals it cannot import: the font rule and the preset stacks from
-// content.js (for the sample under the font field) and the model name rule from server.py (for the
-// hint under the model field). A copy that drifts would preview one thing and apply another, so the
-// three files are read as text and the literals compared, tolerant of whitespace only. On top of
+// popup.js keeps copies of a few things it cannot import: the font rule and the preset stacks from
+// content.js (for the sample under the font field), the model name rule from server.py (for the
+// hint under the model field) and the version helpers from background.js (for judging the server
+// that comes back from an update). A copy that drifts would preview one thing and apply another,
+// so the files are read as text and the copies compared, tolerant of whitespace only. On top of
 // that, the two fontStack() copies are run side by side, and the model hint's reading of /health is
 // run against the answers the server gives.
 
@@ -60,7 +61,7 @@ function loadPopupHelpers() {
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(path.join(ADDON, "settings.js"), "utf8")).runInContext(sandbox);
   new vm.Script(POPUP, { filename: "popup.js" }).runInContext(sandbox);
-  return new vm.Script("({ fontStack, modelNameOk, modelErrorFor, setHealth: (h) => { health = h; } })").runInContext(sandbox);
+  return new vm.Script("({ fontStack, modelNameOk, modelErrorFor, UPDATE_LOST_HINT, setHealth: (h) => { health = h; } })").runInContext(sandbox);
 }
 
 test("the two fontStack copies build the same CSS value", () => {
@@ -130,4 +131,28 @@ test("the model hint takes the server's verdict under every spelling of the fail
   assert.equal(modelErrorFor("turbo"), null);
   setHealth(null);
   assert.equal(modelErrorFor("turbo"), null);
+});
+
+// The text of `function NAME(...) {` up to its closing brace at column 0.
+function jsFunction(source, name, file) {
+  const m = source.match(new RegExp(`^function ${name}\\([^)]*\\) \\{\\n[^]*?\\n\\}`, "m"));
+  assert.ok(m, `${file} defines no function ${name}`);
+  return m[0];
+}
+
+// popup.js judges the server that comes back from an update (version >= the release, or the old
+// version once the restart must be over) with copies of the background's version helpers and its
+// shutdown allowance; the two must read a version, and the clock, the same way. The hint for an
+// update that got no answer names the background's window, from a copy of that too.
+test("popup.js and background.js share the version helpers, the shutdown allowance and the update window", () => {
+  const BACKGROUND = fs.readFileSync(path.join(ADDON, "background.js"), "utf8");
+  for (const name of ["parseVersion", "compareVersions"]) {
+    assert.equal(jsFunction(POPUP, name, "popup.js"), jsFunction(BACKGROUND, name, "background.js"), name);
+  }
+  for (const name of ["UPDATE_SHUTDOWN_MS", "UPDATE_WINDOW_MS"]) {
+    assert.equal(jsConst(POPUP, name, "popup.js"), jsConst(BACKGROUND, name, "background.js"), name);
+  }
+  const seconds = Number(jsConst(BACKGROUND, "UPDATE_WINDOW_MS", "background.js")) / 1000;
+  const { UPDATE_LOST_HINT } = loadPopupHelpers();
+  assert.match(UPDATE_LOST_HINT, new RegExp(`\\b${seconds} s after the update\\b`));
 });

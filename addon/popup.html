@@ -32,6 +32,20 @@
       <button id="grant-permission" type="button">Allow on YouTube</button>
     </div>
 
+    <!-- A newer release than the server runs (or than this extension is): the background checks
+         GitHub once a day and popup.js writes the text for the case at hand (renderUpdate).
+         "Update" asks the server to update itself and restart; "Not now" hides the banner for this
+         browser session; the release page link is for the extension, which addons.mozilla.org
+         updates once the listing is live. -->
+    <div id="update-banner" class="banner notice hidden">
+      <p id="update-text"></p>
+      <div class="actions">
+        <button id="update-now" type="button">Update</button>
+        <button id="update-release" type="button" class="linkbtn hidden">Release page</button>
+        <button id="update-later" type="button" class="linkbtn">Not now</button>
+      </div>
+    </div>
+
     <section>
       <h2>Subtitles</h2>
       <label class="row check">
@@ -240,6 +254,12 @@
           <span class="lead">Shisu-ko server URL</span>
           <input type="text" id="serverUrl" spellcheck="false">
         </label>
+        <!-- The daily check, on demand; the line under it is the last result (renderUpdateResult
+             in popup.js): the newest release and when it was checked, or why the check failed. -->
+        <div class="updates">
+          <button type="button" id="check-updates" class="linkbtn">Check for updates</button>
+          <p class="hint" id="update-result"></p>
+        </div>
       </div>
     </details>
   </main>

@@ -76,6 +76,35 @@ let healthInFlight = false;
 const startFlow = { state: "idle", deadline: 0, already: false, loading: false, log: null, detail: "" };
 const START_BUSY = new Set(["requesting", "starting", "waiting"]);
 
+// The update flow, the start flow's twin: idle -> requesting (POST /update on its way) ->
+// updating (the server answered and is restarting; /health is polled until the new version
+// answers or the deadline passes) -> done, or stale (the server came back with the old version:
+// update.py could not update, and its window says why), failed (the request was refused or did
+// not get through) or lost (no answer within the window). The request and its record are the
+// background's (UPDATE_WINDOW_MS there), so a reopened popup resumes at "updating"
+// (refreshUpdate); the outcomes live in this document alone, and the banner and the status line
+// read both. `from` and `to` are the versions the request was made from and for.
+const updateFlow = { state: "idle", from: null, to: null, requestedAt: 0, deadline: 0, down: false, refused: false, detail: "", version: "" };
+const UPDATE_BUSY = new Set(["requesting", "updating"]);
+// The old server closes its port within a second of answering /update, so an old version seen
+// this long after the request is the restarted server, whether or not a poll caught it down. The
+// background judges its record by the same rule; this is its copy (popup-copies.test.js).
+const UPDATE_SHUTDOWN_MS = 10000;
+// How long the background waits for the updated server before the record ends: the deadline the
+// popup follows is the background's, this copy only names the wait in the hint (popup-copies.test.js).
+const UPDATE_WINDOW_MS = 120000;
+const UPDATE_LOST_HINT = `No answer from the server ${UPDATE_WINDOW_MS / 1000} s after the update: look at its window (Windows) or ~/.shisu-ko/server.log before starting it again; a restart loads the model again, which takes a while`;
+const RELEASES_URL = "https://github.com/Multysquid/shisu-ko/releases/latest";
+
+function stillOldHint(version) {
+  return `The server restarted but still runs ${version}; look at its window: update.py said why`;
+}
+
+let updateInfo = null; // the background's last updateStatus answer
+let updateKey = null; // the server the answer was about (version and launcher flag), or "offline"
+let updateAsked = 0; // questions asked so far: an answer overtaken by a later question is dropped
+let checkingUpdates = false; // the "Check for updates" click, until its result is in
+
 function readField(el) {
   if (el.type === "checkbox") return el.checked;
   if (el.type === "range" || el.type === "number") return Number(el.value);
@@ -267,23 +296,31 @@ function onChange(ev) {
 
 // The status line answers the popup's first question: can it transcribe right now? The badge word
 // and its dot carry the state, the detail line the evidence (which model, which device) or the fix.
-// The server's answer outranks the start flow: online is online, whoever started it.
+// The server's answer outranks the start flow: online is online, whoever started it. An update
+// under way outranks the answer: the old server still answers for a moment, and then nobody does.
 function renderStatus() {
   const badge = document.getElementById("server-status");
   const detail = document.getElementById("server-detail");
   const button = document.getElementById("start-server");
   const launched = startFlow.state === "starting" || startFlow.state === "waiting";
+  const updating = UPDATE_BUSY.has(updateFlow.state);
   let word;
   let cls;
   let evidence;
-  if (health && health.model_loading) {
+  if (updating) {
+    word = "Updating server";
+    cls = "badge";
+    evidence = `Restarting with ${updateFlow.to || "the newest release"}…`;
+  } else if (health && health.model_loading) {
     word = "Loading model";
     cls = "badge";
     evidence = String(health.model_loading);
   } else if (health) {
     word = "Server online";
     cls = "badge ok";
-    evidence = `${health.model} · ${health.device} · ${health.compute_type}`;
+    if (updateFlow.state === "done") evidence = `Updated to ${updateFlow.version}`;
+    else if (updateFlow.state === "stale") evidence = updateFlow.detail;
+    else evidence = `${health.model} · ${health.device} · ${health.compute_type}`;
   } else if (launched) {
     word = "Starting server";
     cls = "badge";
@@ -294,18 +331,22 @@ function renderStatus() {
   } else {
     word = "Server offline";
     cls = "badge bad";
-    evidence = startFlow.state === "failed" ? startFlow.detail : OFFLINE_HINT;
+    if (startFlow.state === "failed") evidence = startFlow.detail;
+    else if (updateFlow.state === "lost") evidence = updateFlow.detail;
+    else evidence = OFFLINE_HINT;
   }
   setText(badge, word);
   if (badge.className !== cls) badge.className = cls;
   setText(detail, evidence);
   // The button is the fix for one state only. It stays in place, disabled, while a start is under
-  // way, so the line does not jump and a second click cannot launch a second server.
+  // way, so the line does not jump and a second click cannot launch a second server. An update
+  // hides it: the launcher restarts the server itself, and a start on top would race it.
   const busy = START_BUSY.has(startFlow.state);
-  button.classList.toggle("hidden", !!health || !START_AVAILABLE);
+  button.classList.toggle("hidden", !!health || !START_AVAILABLE || updating);
   if (button.disabled !== busy) button.disabled = busy;
   setText(button, launched ? "Starting…" : "Start server");
   renderModelField();
+  renderUpdate();
 }
 
 // Only the first check announces itself; the refreshes behind it change the text in place.
@@ -334,7 +375,35 @@ async function checkServer(first) {
     // as slow as one this popup launched, and gets the same advice.
     failStart(startFlow.already && !startFlow.loading ? START_ELSEWHERE_HINT : startNotUpHint(startFlow.log));
   }
+  if (updateFlow.state === "updating") judgeUpdate();
   renderStatus();
+  // The banner follows behind: the background's answer may wait on a check of GitHub, and the
+  // status line must not.
+  refreshUpdate(false).then(renderStatus);
+}
+
+// Where an update under way stands after this /health answer. The new version ends it; the old
+// version ends it too, once the server has been seen down or has had the time to close its port,
+// since a restart that brought the old code back means update.py could not update.
+function judgeUpdate() {
+  const now = Date.now();
+  if (!health) {
+    updateFlow.down = true;
+    if (now >= updateFlow.deadline) {
+      updateFlow.state = "lost";
+      updateFlow.detail = UPDATE_LOST_HINT;
+    }
+    return;
+  }
+  const version = typeof health.version === "string" ? health.version : "";
+  const updated = !!version && (updateFlow.to ? compareVersions(version, updateFlow.to) >= 0 : version !== updateFlow.from);
+  if (updated) {
+    updateFlow.state = "done";
+    updateFlow.version = version;
+  } else if (updateFlow.down || now - updateFlow.requestedAt >= UPDATE_SHUTDOWN_MS || now >= updateFlow.deadline) {
+    updateFlow.state = "stale";
+    updateFlow.detail = stillOldHint(version || updateFlow.from || "the old version");
+  }
 }
 
 function failStart(detail) {
@@ -356,7 +425,7 @@ function requestNativeMessaging() {
 // needs the user gesture, which the first await spends. The background then talks to the native
 // host; the popup only watches /health from there on.
 async function startServerFromPopup() {
-  if (START_BUSY.has(startFlow.state)) return;
+  if (START_BUSY.has(startFlow.state) || UPDATE_BUSY.has(updateFlow.state)) return;
   const request = requestNativeMessaging();
   startFlow.state = "requesting";
   renderStatus();
@@ -390,9 +459,216 @@ function watchStart(res) {
 }
 
 // A start requested from an earlier popup document may still be under way; the background says.
+// So may an update, and it is picked up here rather than from the first updateStatus answer,
+// which may wait ten seconds on GitHub: the first paint must not offer a start on top of it.
 async function resumeStart() {
   const status = await browser.runtime.sendMessage({ type: "startServerStatus" }).catch(() => null);
-  if (status && typeof status === "object" && status.starting) watchStart(status);
+  if (!status || typeof status !== "object") return;
+  if (status.starting) watchStart(status);
+  if (status.updating && typeof status.updating === "object") watchUpdate(status.updating);
+}
+
+// ------------------------------------------------------------------ updates
+
+// The version helpers of background.js, copied: the popup cannot import the background, and it
+// judges the server that comes back from an update by the same rule (addon/tests/popup-copies.test.js
+// keeps the two in step).
+function parseVersion(text) {
+  const parts = String(text || "").trim().replace(/^v/i, "").split(".");
+  return [0, 1, 2].map((i) => {
+    const n = parseInt(parts[i], 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  });
+}
+
+function compareVersions(a, b) {
+  const va = parseVersion(a);
+  const vb = parseVersion(b);
+  for (let i = 0; i < 3; i++) {
+    if (va[i] !== vb[i]) return va[i] < vb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+// "checked 3 min ago": the result line says how old the check is, in the coarsest unit that
+// still says something.
+function relativeTime(at, now = Date.now()) {
+  const seconds = Math.max(0, Math.round((now - at) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
+function latestVersion() {
+  const latest = updateInfo && updateInfo.latest;
+  return latest && typeof latest.version === "string" && latest.version ? latest.version : "";
+}
+
+// Ask the background what the newest release means for the server this popup sees. The /health
+// answer travels with the question, so the server is not asked twice; and the question is only
+// asked when that answer changed (version, launcher flag, online or not) or after something this
+// popup did, since the verdict changes with nothing else. The first question of a popup document
+// also asks for the day's check of GitHub (the background decides whether one is due). The
+// background's record of an update under way is picked up here: a reopened popup resumes it.
+// Answers can cross: the first question may wait ten seconds on GitHub while the server comes
+// online and a second one, answered from the store at once, has already put the banner up; the
+// first answer then lands with "offline" and would take it down, so only the latest question's
+// answer counts, and the questions are numbered for that.
+async function refreshUpdate(force) {
+  const key = health ? `${health.version}|${health.launcher}` : "offline";
+  const first = updateKey === null;
+  if (!force && key === updateKey) return;
+  updateKey = key;
+  const asked = ++updateAsked;
+  const status = await browser.runtime.sendMessage({ type: "updateStatus", health, check: first }).catch(() => null);
+  if (asked !== updateAsked) return;
+  if (!status || typeof status !== "object" || !status.decision || typeof status.decision !== "object") return;
+  updateInfo = status;
+  if (status.updating && typeof status.updating === "object" && updateFlow.state === "idle") watchUpdate(status.updating);
+}
+
+// The banner, from the background's verdict and this popup's own flow. Nothing is shown without a
+// release to name, after "Not now" for that release, or when the server can update itself at
+// its next start anyway (offline: the launcher runs update.py before every start). While an
+// update is under way the banner stays, its button muted, and goes once the new version answers.
+function renderUpdate() {
+  const banner = document.getElementById("update-banner");
+  const text = document.getElementById("update-text");
+  const update = document.getElementById("update-now");
+  const release = document.getElementById("update-release");
+  const later = document.getElementById("update-later");
+  const latest = latestVersion();
+  const decision = updateInfo && updateInfo.decision;
+  const busy = UPDATE_BUSY.has(updateFlow.state);
+  const server = (updateInfo && updateInfo.server && updateInfo.server.version) || updateFlow.from || "an older version";
+  let message = "";
+  let showUpdate = false;
+  let showRelease = false;
+  let showLater = false;
+  if (latest && decision && (busy || updateInfo.snoozed !== latest)) {
+    if (busy || decision.server === "newer") {
+      message = `Shisu-ko ${latest} is available — the server runs ${server}.`;
+      if (updateFlow.state === "failed") {
+        message += updateFlow.refused ? ` The server cannot update itself: ${updateFlow.detail}` : ` The update failed: ${updateFlow.detail}`;
+      }
+      showUpdate = !(updateFlow.state === "failed" && updateFlow.refused);
+      showLater = !busy;
+    } else if (decision.server === "cannot") {
+      message = `Shisu-ko ${latest} is available — the server runs ${server} and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand to update`;
+      showLater = true;
+    } else if (decision.server === "behind") {
+      // A server from before /update (0.8.0): its launcher, if it has one, updates it at the
+      // next start, and nothing here can tell whether it has one.
+      message = `Shisu-ko ${latest} is available — the server runs ${server}, which cannot be updated from here; restart it by hand to update (run.cmd / run.sh update it at start)`;
+      showLater = true;
+    } else if (decision.extension === "newer") {
+      message = `A newer extension (${latest}) is on the release page; Firefox installs it from addons.mozilla.org once the listing is live`;
+      showRelease = true;
+      showLater = true;
+    }
+  }
+  banner.classList.toggle("hidden", !message);
+  setText(text, message);
+  update.classList.toggle("hidden", !showUpdate);
+  release.classList.toggle("hidden", !showRelease);
+  later.classList.toggle("hidden", !showLater);
+  // One thing at a time: a start and an update both end in a server loading its model.
+  const disabled = busy || START_BUSY.has(startFlow.state);
+  if (update.disabled !== disabled) update.disabled = disabled;
+  setText(update, busy ? "Updating…" : "Update");
+  renderUpdateResult();
+}
+
+function renderUpdateResult() {
+  const line = document.getElementById("update-result");
+  const button = document.getElementById("check-updates");
+  if (button.disabled !== checkingUpdates) button.disabled = checkingUpdates;
+  const info = updateInfo;
+  if (checkingUpdates) setHint(line, "Checking…", "");
+  else if (!info || typeof info.checkedAt !== "number") setHint(line, "", "");
+  else if (info.error) setHint(line, `Update check failed: ${info.error}` + (latestVersion() ? ` (last seen: ${latestVersion()})` : ""), "warn");
+  else if (latestVersion()) setHint(line, `Newest release: ${latestVersion()}, checked ${relativeTime(info.checkedAt)}`, "");
+  else setHint(line, `No release found, checked ${relativeTime(info.checkedAt)}`, "");
+}
+
+// The click on "Update": the background posts /update; the server answers and exits, its launcher
+// runs update.py and starts it again, and this popup watches /health for the new version.
+async function updateServerFromPopup() {
+  if (UPDATE_BUSY.has(updateFlow.state) || START_BUSY.has(startFlow.state)) return;
+  const now = Date.now();
+  Object.assign(updateFlow, {
+    state: "requesting",
+    from: (updateInfo && updateInfo.server && updateInfo.server.version) || null,
+    to: latestVersion() || null,
+    requestedAt: now,
+    deadline: now,
+    down: false,
+    refused: false,
+    detail: "",
+    version: "",
+  });
+  renderStatus();
+  const res = await browser.runtime.sendMessage({ type: "updateServer" }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+  if (!res || typeof res !== "object" || !res.ok) {
+    updateFlow.state = "failed";
+    updateFlow.refused = !!(res && res.refused);
+    updateFlow.detail = res && typeof res.error === "string" && res.error ? res.error : "the server gave no answer";
+    renderStatus();
+    return;
+  }
+  watchUpdate(res);
+}
+
+// Follow an update the background reported, its answer to the click or the record it held when
+// the popup opened: /health is polled until the new version answers or the deadline passes.
+function watchUpdate(res) {
+  updateFlow.state = "updating";
+  if (typeof res.from === "string") updateFlow.from = res.from;
+  if (typeof res.to === "string") updateFlow.to = res.to;
+  updateFlow.requestedAt = Number.isFinite(res.requestedAt) ? res.requestedAt : Date.now();
+  // The deadline is the background's; without one the wait ends at the next refresh, not never.
+  updateFlow.deadline = Number.isFinite(res.deadline) ? res.deadline : Date.now();
+  updateFlow.down = !!res.down;
+  renderStatus();
+}
+
+// "Not now": the banner goes for this browser session (storage.session in the background), the
+// badge stays, and the next release asks again.
+async function snoozeUpdateFromPopup() {
+  const latest = latestVersion();
+  if (!latest) return;
+  updateInfo.snoozed = latest; // at once; the background's answer would say the same
+  renderStatus();
+  await browser.runtime.sendMessage({ type: "snoozeUpdate", version: latest }).catch(() => {});
+}
+
+// "Check for updates": a check now, whatever the age of the stored one, then the verdict again.
+async function checkForUpdatesFromPopup() {
+  if (checkingUpdates) return;
+  checkingUpdates = true;
+  renderUpdateResult();
+  try {
+    await browser.runtime.sendMessage({ type: "checkForUpdate", force: true }).catch(() => null);
+    await refreshUpdate(true);
+  } finally {
+    checkingUpdates = false;
+  }
+  renderStatus();
+}
+
+// The release page, for the extension's own package until addons.mozilla.org carries it.
+function openReleasePage() {
+  const latest = updateInfo && updateInfo.latest;
+  const url = latest && typeof latest.url === "string" && /^https:\/\//.test(latest.url) ? latest.url : RELEASES_URL;
+  try {
+    Promise.resolve(browser.tabs.create({ url })).catch(() => {});
+  } catch (err) {
+    /* no tabs API: the address is on the release page anyway */
+  }
 }
 
 // Reloading the open YouTube tabs is what actually injects the content script; a freshly granted
@@ -446,10 +722,14 @@ async function init() {
   // The name hint answers while typing, before the change event saves anything.
   document.getElementById("model").addEventListener("input", renderModelHint);
   document.getElementById("start-server").addEventListener("click", startServerFromPopup);
+  document.getElementById("update-now").addEventListener("click", updateServerFromPopup);
+  document.getElementById("update-later").addEventListener("click", snoozeUpdateFromPopup);
+  document.getElementById("update-release").addEventListener("click", openReleasePage);
+  document.getElementById("check-updates").addEventListener("click", checkForUpdatesFromPopup);
   renderModelHint();
   await resumeStart();
-  // A resumed start has already painted its badge; "Checking server" is for a popup that knows nothing.
-  checkServer(startFlow.state === "idle");
+  // A resumed start or update has already painted its badge; "Checking server" is for a popup that knows nothing.
+  checkServer(startFlow.state === "idle" && updateFlow.state === "idle");
   setInterval(() => checkServer(false), HEALTH_REFRESH_MS);
 }
 
