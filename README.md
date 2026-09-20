@@ -86,7 +86,7 @@ Temporary install (until Firefox restarts):
 3. Firefox asks for access to youtube.com the first time you open the popup; click **Allow on
    YouTube** (or right-click the toolbar icon > Always Allow on www.youtube.com).
 
-Permanent install: download the signed `shisu-ko-<version>-signed.xpi` from the
+Permanent install: download the signed `shisu_ko-<version>.xpi` from the
 [latest release](https://github.com/Multysquid/shisu-ko/releases/latest) and open it in Firefox.
 Regular Firefox only keeps signed add-ons; the release workflow signs each tagged version
 through addons.mozilla.org (unlisted channel, nobody else sees it), and `sign-addon.cmd` does
