@@ -5,30 +5,88 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Lets a branch be checked before it is merged: gh workflow run tests.yml --ref <branch>
+  workflow_dispatch:
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   server:
-    name: Server (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Server (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.12", "3.13"]
+        include:
+          # The Windows-only paths (the registry registration of the Start button's launcher,
+          # the msvcrt instance lock, the .cmd wrapper and run.cmd) are skipped everywhere else.
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Check server.py syntax
-        run: python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"
+      - name: Check the syntax of the Python entry points
+        shell: bash
+        run: |
+          for f in server/server.py server/update.py server/native_host.py; do
+            python -W error -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())" "$f"
+          done
       - name: Install test dependencies
         run: pip install -r server/requirements-test.txt
       - name: Run server tests
         run: python -m pytest server/tests -v
 
+  launchers:
+    name: Launcher scripts (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check shell syntax and the executable bits
+        run: |
+          bash -n server/run.sh server/setup.sh server/native-host.sh scripts/launcher-smoke.sh
+          for f in server/run.sh server/setup.sh server/native-host.sh scripts/launcher-smoke.sh; do
+            case "$(git ls-files -s "$f" | cut -c1-6)" in
+              100755) ;;
+              *) echo "$f is not executable in git"; exit 1 ;;
+            esac
+          done
+      - name: Register and unregister the Start button's launcher in a scratch profile
+        run: |
+          export HOME="$(mktemp -d)"
+          python server/native_host.py --status
+          python server/native_host.py --register --verbose
+          test -f "$HOME/.mozilla/native-messaging-hosts/shisuko.json"
+          python - <<'EOF'
+          import json, os
+          m = json.load(open(os.path.expanduser("~/.mozilla/native-messaging-hosts/shisuko.json")))
+          assert m["name"] == "shisuko" and m["type"] == "stdio", m
+          assert m["allowed_extensions"] == ["shisu-ko@multysquid.github.io"], m
+          assert m["path"].endswith("/server/native-host.sh") and os.access(m["path"], os.X_OK), m
+          EOF
+          python server/native_host.py --status | grep -q "registered at"
+          python server/native_host.py --unregister --verbose
+          test ! -f "$HOME/.mozilla/native-messaging-hosts/shisuko.json"
+      - name: Drive the real run.sh through register, update, exit code 4 and restart
+        run: bash scripts/launcher-smoke.sh
+
   addon:
     name: Extension (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node-version: ["22", "24"]
     steps:
