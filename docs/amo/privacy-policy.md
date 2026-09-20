@@ -10,9 +10,11 @@ To Anki on your computer, through the AnkiConnect add-on (http://127.0.0.1:8765 
 
 To a helper program on your computer, only when you click the Start server button in the popup, and only after Firefox has asked you for permission to exchange messages with it: a request to start the companion server. The helper is part of the same project, installed by the server's setup; it receives nothing else from the extension and starts nothing but that server. The extension remembers such a request for the browser session, so that reopening the popup does not start a second server: the record (the helper's answer and a time) is ignored after 90 seconds, cleared once the server answers or the next request replaces it, and gone when the browser session ends; it is never written to disk.
 
+To GitHub (https://api.github.com), where the project is published: a request for the newest release of Shisu-ko, so that the extension can tell you when the server you are running is out of date and, if you ask, have the server update itself. The request is made when Firefox starts, when the extension is installed or updated, or when the popup opens, if the last check is more than a day old or did not succeed (while you are offline, each of those occasions tries once more), and whenever you click "Check for updates" in the popup; it is anonymous and contains nothing about you, your browser or the videos you watch. GitHub sees it like any visit to a web page (your IP address and the browser's user agent), and GitHub's own privacy statement applies to that. The answer (the release's version and tag, its page address, the download address of the extension package on that page and the time of the check) is stored in the extension's storage on your computer. The extension never downloads or installs anything from that answer; the update button only asks the server on your computer to update itself, which it does through its own launcher.
+
 To youtube.com: nothing beyond what the page itself does. The extension reads the player's playback state on the page in order to place the subtitles; it does not modify your YouTube account, comments or history.
 
-The extension never contacts the developer or any other remote service, loads no remote code, and contains no analytics, telemetry or advertising.
+Apart from that release check, the extension never contacts the developer or any other remote service; it loads no remote code and contains no analytics, telemetry or advertising.
 
 **What the companion server does on the network**
 
@@ -20,7 +22,7 @@ The server is a separate program from the same project, under your control. When
 
 **What the extension stores**
 
-Your settings (subtitle style and font, transcription model, shortcuts behaviour, server and Anki addresses, Anki field names) are stored in Firefox's extension storage on your computer and nowhere else. Uninstalling the extension removes them. The extension keeps no history of the videos you watched.
+Your settings (subtitle style and font, transcription model, shortcuts behaviour, server and Anki addresses, Anki field names) and the result of the last release check (the newest version and tag, its page address, the download address of the extension package, when it was checked, or why the check failed) are stored in Firefox's extension storage on your computer and nowhere else. Uninstalling the extension removes them. For the browser session only, the extension also remembers which release it has notified you about, which one you clicked "Not now" for, and an update of the server that is under way. The extension keeps no history of the videos you watched.
 
 **Children, sale and sharing of data**
 

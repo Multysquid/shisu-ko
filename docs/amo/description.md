@@ -1,4 +1,4 @@
-Shisu-ko shows live Japanese subtitles on YouTube in Firefox. A small server on your own computer transcribes the video's audio with OpenAI's Whisper a little ahead of where you are watching, and the extension draws the result over the player as ordinary page text. Nothing is sent to anyone: the server runs on your machine, and its only network traffic is fetching the video's audio from YouTube and the one-time model download.
+Shisu-ko shows live Japanese subtitles on YouTube in Firefox. A small server on your own computer transcribes the video's audio with OpenAI's Whisper a little ahead of where you are watching, and the extension draws the result over the player as ordinary page text. Nothing about you is sent to anyone: the server runs on your machine, and the only network traffic is the video's audio from YouTube, the one-time model download and a look at GitHub for a newer release, by the server's launcher before each start and by the extension once a day (see Privacy below).
 
 **What you get**
 
@@ -9,6 +9,7 @@ Shisu-ko shows live Japanese subtitles on YouTube in Firefox. A small server on 
 - **Your hardware, your model.** Whisper large-v3 by default on an NVIDIA GPU; the popup switches to the Japanese-specialised kotoba-whisper (about 6x faster), to a small model on the CPU or to any other faster-whisper model, without restarting the server.
 - **Your fonts.** The subtitle font is a preset (gothic, rounded, mincho) or any font installed on your computer, with position, colour, box and outline adjustable.
 - **A Start button for the server.** When the server is not running, the popup starts it for you; Firefox asks once for permission to talk to the small launcher that the server's setup registers.
+- **Updates without leaving the browser.** The popup tells you when a newer release is out, and one click makes the server update itself and restart; the extension itself is updated by Firefox from this listing.
 
 **You need the companion server**
 
@@ -29,6 +30,6 @@ Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScri
 
 **Privacy**
 
-The extension talks only to the server on your own computer and, if you use mining, to Anki on your own computer. It has no account, no analytics and no remote code. The privacy policy on this page lists exactly what is exchanged with those two programs.
+The extension talks to the server on your own computer and, if you use mining, to Anki on your own computer. Its one remote request is an anonymous look at GitHub for the newest release, once a day (a check that failed, offline for instance, is tried again the next time the popup opens) and when you click Check for updates. It has no account, no analytics and no remote code. The privacy policy on this page lists exactly what is exchanged with those programs.
 
 Shisu-ko is free software under the MIT license. Source code, setup guide, server options and troubleshooting: https://github.com/Multysquid/shisu-ko
