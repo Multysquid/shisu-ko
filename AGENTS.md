@@ -14,6 +14,8 @@ plus sentence audio into the newest Anki card via AnkiConnect.
 addon/        Firefox source extension, Manifest V3, plain JS; directly loadable without a build
               (match.js is shared by background.js and content.js; loaded before both)
 server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
+              native_host.py: the native-messaging host behind the popup's "Start server" button
+              (stdlib only); native-host.cmd / native-host.sh wrap it, Firefox runs the wrapper
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
 flake.nix        Nix package/app/dev shell for the server and the extension build
@@ -45,6 +47,14 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   localhost, validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`, and answers browser requests
   only from the extension's own origin or from pages on loopback hosts (`origin_allowed()`), so
   arbitrary websites cannot drive downloads and transcription.
+- The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`.
+  It never takes a path, a program or an argument from a message: the only thing it can run is
+  the checkout's own `server/run.cmd` / `server/run.sh` (root = the parent of the folder the
+  host file lives in), and it registers only under the user's own profile
+  (`HKCU\Software\Mozilla\NativeMessagingHosts`, `~/.mozilla/native-messaging-hosts`,
+  `~/Library/Application Support/Mozilla/NativeMessagingHosts`), never system-wide.
+  `nativeMessaging` stays in `optional_permissions`, requested by the popup's click handler
+  before its first `await` and by nothing else; the button is not a setting.
 - A model name from a client (`model` in `/sync`) must match `MODEL_NAME_RE`
   (`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$`) and contain no `..`;
   anything else is answered with `MODEL_NAME_HINT` and never stored. A valid name is reduced to
@@ -59,11 +69,15 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   (read through `wrappedJSObject`, Firefox only), never on `video.currentTime`, which restarts at
   an arbitrary point on every page load. Every place the content script reads or seeks the
   playhead goes through `playhead()` / `seekPlayhead()`.
-- Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`.
-  Cue caches are only reused when model (compared canonically) and language match. The loaded
-  model's cues are `cache/<video_id>.cues.json`; when another model takes the file over,
-  `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json` (slug: the
-  canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
+- Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`,
+  plus what the Start button brought: `server-<port>.lock` (`hold_instance_lock()` /
+  `try_lock()`, held from before the model load until the server exits), `server.log` (the POSIX
+  `launch()` appends the launched server's output there) and, on Windows only, the host manifest
+  `native-messaging/shisuko.json` (`manifest_path()`; Linux and macOS keep it under Mozilla's
+  own directories). Cue caches are only reused when model (compared canonically) and language
+  match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
+  file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
+  (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
   `load_cache()` brings them back from there after a switch back.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
@@ -251,6 +265,86 @@ held clip is used when its parameters still match the ones computed now (same st
 format to the millisecond), else the clip is fetched with the usual four tries and stored. Mining
 does not remove an entry: two words from one line make two cards.
 
+## How the Start server button works
+
+A WebExtension cannot spawn a process, so the popup's button goes through native messaging:
+`background.js` sends `{cmd: "start"}` to the native host `shisuko`, and the host,
+`server/native_host.py`, runs the checkout's own launcher. Firefox only: `register()` writes the
+Mozilla host manifest, Chrome's would have to name the installed extension's id under its own
+key, so `popup.js` hides the button unless `browser.runtime.getURL("")` is `moz-extension:`
+(`START_AVAILABLE`). The host is stdlib only, so the wrapper can fall back to the system Python
+before setup ran, and it never imports `server.py` (`VERSION` is read from it with a regex).
+
+Protocol (Firefox's: 4-byte little-endian length, UTF-8 JSON, one request per message, answered
+in order until stdin closes; `read_message()` / `write_message()`, `serve()`, `handle()`):
+`{"cmd": "status"}` -> `{ok, running, version, root}`, `running` being a `/health` answer within
+1.5 s (`server_running()`); `{"cmd": "start"}` -> `{ok: true, already: true}` for a running
+server, `{ok: true, already: true, starting: true}` for one that holds the instance lock but
+does not answer yet (its model is loading; `server_starting()`), else `launch()` and
+`{ok: true, started: true, log}` (`log` null on Windows, the path of `~/.shisu-ko/server.log`
+elsewhere) or `{ok: false, error}` in one line. Anything else, a request with extra keys
+included, is `{ok: false, error: "unknown command"}`; a frame over 1 MiB is answered and ends
+the host. The instance lock is `APP_DIR/server-<port>.lock`: `server.py` takes it in
+`hold_instance_lock()` before `load_model()` and holds it until the process ends, a second
+server exits 2. `try_lock()` exists in both files (`msvcrt.locking` / `fcntl.flock`); only
+`LOCK_HELD_ERRNOS` mean "held", a filesystem that cannot lock at all counts as no lock.
+`launch()` on Windows runs `cmd.exe /c start "Shisu-ko server" .\run.cmd` with `cwd=server/`
+(cmd.exe splits a full path holding `&` or `(` even when quoted), `DETACHED_PROCESS |
+CREATE_NEW_PROCESS_GROUP` and first `CREATE_BREAKAWAY_FROM_JOB`, retrying without it on
+`PermissionError`; on POSIX `bash run.sh` with `start_new_session=True` and stdout/stderr
+appended to the log (bash, not the file itself: a zip install has no mode bits). The browser
+starts the host with arguments of its own (Firefox: manifest path and extension id); `main()`
+serves whenever no action flag is given and stdin is not a terminal.
+
+Registration (`native_host.py --register | --unregister | --status [--verbose]`, exit 0 on
+success, quiet unless `--verbose`): the manifest `{name: "shisuko", description, path:
+<wrapper>, type: "stdio", allowed_extensions: ["shisu-ko@multysquid.github.io"]}` goes to
+`%USERPROFILE%\.shisu-ko\native-messaging\shisuko.json` (`SHISUKO_HOME` respected) plus the
+default value of `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko` on Windows, to
+`~/.mozilla/native-messaging-hosts/shisuko.json` on Linux and to
+`~/Library/Application Support/Mozilla/NativeMessagingHosts/shisuko.json` on macOS. The
+wrapper is `server/native-host.cmd` (CRLF) or `server/native-host.sh` (LF, mode 755;
+`register()` restores the bit a zip install drops): the venv's Python, else the system one, on
+`native_host.py`. `setup.cmd` / `setup.sh` register and then run `--check`, which reports it;
+`run.cmd` / `run.sh` register on every start, so an install that never re-ran setup gets the
+button after a manual start, with one exception: the start that updates an older checkout to
+this version does not register, because the old launcher is what runs (`run.cmd`'s old
+`update.py ... & goto loop` jumps to `:loop` in the new file, below the register line; `run.sh`'s
+already-parsed old `main()` has no register call), so it is the start after the update, or
+setup, that registers. In `run.cmd` the call sits on its own line before the
+`update.py ... & goto loop` line; in `run.sh` after the update, which rewrites the wrapper.
+`launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
+defaults (`--model large-v3`, `--device auto`), and the popup's model setting only takes effect
+after that default model is loaded.
+`run_check()` in `server.py` loads `native_host.py` by path and prints `status_text()`.
+
+Extension side: the popup's flow is `startFlow.state`, `idle -> requesting -> starting ->
+waiting -> idle` once `/health` answers, or `failed` with the reason on the detail line and the
+button back; the permission request is issued in the click handler before its first `await`
+(it needs the user gesture). The background owns the launch (`startServer()`): one
+`sendNativeMessage` at a time (`startInFlight`), raced against `NATIVE_TIMEOUT_MS` (15 s), the
+answer recorded with a `deadline` of `START_WINDOW_MS` (90 s, past any healthy model load) in
+memory and in `browser.storage.session` (Firefox ends an idle event page after 30 s), so a
+reopened popup resumes at "waiting" (`startServerStatus`) instead of offering a second start
+while the first still loads; a `/health` answer through `apiRequest()` forgets the record.
+`nativeError()` maps the browser's exceptions: "No such native application" / "not found" /
+"forbidden" -> `launcher not registered` with `LAUNCHER_HINT`; permission wording, or no
+`sendNativeMessage` at all -> `permission missing`; timeout -> `the launcher did not answer`;
+the host's own `{ok: false, error}` passes through. The popup keeps `already` and the host's
+`starting` (as `loading`) for the hint at the deadline: `START_ELSEWHERE_HINT` when the launcher
+saw a server answering that the popup cannot reach, else `startNotUpHint(log)`. Badge texts:
+`Checking server`, `Server offline`, `Starting server`, `Loading model`, `Server online`.
+
+Tests: `server/tests/test_native_host.py` (framing, `handle()` for every shape with `launch()`
+never called, `serve()`, `launch()` with a recorded `Popen` on both platforms, the lock against
+`server.py`'s, registration into a temp home with a fake `winreg` on every platform, `main()`,
+the host over a real pipe, the wrapper run the way Firefox runs it, the launchers' register
+lines); `server/tests/test_server.py` for `hold_instance_lock()`; `addon/tests/background.test.js`
+(the message, the error mapping, the timeout, the record across an event-page restart);
+`addon/tests/popup.test.js` (the flow against a fake document: resume, both deadline hints,
+Chrome hiding the button, one host request per click); `addon/tests/browser-api.test.js` for
+the Chrome bridge of `sendNativeMessage` and `storage.session`.
+
 ## How the update step works
 
 `server/update.py` (stdlib only) runs first in `run.cmd` / `run.sh`, never in Docker or Nix. In a
@@ -279,7 +373,10 @@ because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build 
 `nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
 Native server (Windows): `server\setup.cmd` once, then `server\run.cmd [options]`.
 Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
-Diagnostics: `server\run.cmd --check`.
+Diagnostics: `server\run.cmd --check` (also says whether the Start button's launcher is registered).
+Start-button launcher, with the venv's Python (`run.cmd` / `setup.cmd` and their `.sh` twins do
+this themselves): `~/.shisu-ko/venv/Scripts/python server/native_host.py --register --verbose`
+(`venv/bin/python` on Linux/macOS), `--status`, `--unregister`.
 
 Docker: `docker\up.cmd`, `docker\logs.cmd`, `docker\down.cmd` (or `docker compose up -d` etc.).
 `up.cmd` keeps a minimized "Shisu-ko WSL keep-alive" window open when Docker Engine runs inside
@@ -353,6 +450,13 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.
+- Firefox runs a `.cmd` native host through `cmd.exe /s /c "<host> <manifest path> <extension id>"`.
+  stdout is the protocol, so the wrapper must not `echo`, `pause` or print anything (`@echo off`
+  first), and the host has to accept those two arguments. Firefox keeps the host in a job
+  object: a child that does not `CREATE_BREAKAWAY_FROM_JOB` dies with the host. And cmd.exe
+  splits a quoted path holding `&`, `(` or `^`: name the launcher relative to `cwd`.
+- `scripts/browser-smoke.mjs` waits for `#server-status` to read exactly `Server offline` and
+  then `Server online`; keep those badge texts.
 - `browser.downloads.download()` refuses `data:` URLs ("Access denied for URL data:...", thrown
   synchronously before any promise exists): an extension may not load a URL that inherits its
   principal. Build a `Blob`, pass `URL.createObjectURL()` from the background page, revoke it later.
