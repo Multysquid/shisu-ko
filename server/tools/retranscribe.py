@@ -6,6 +6,9 @@ is what the live server would produce for the same video. Writes <video_id>.new.
 <video_id>.speech.json into the output directory, and prints how many segments each gate dropped.
 
     python server/tools/retranscribe.py 2q3XN2rYEGE --out /tmp/new
+
+--model follows the server's own default: the model chosen at setup (~/.shisu-ko/config.json),
+else large-v3, so a measurement without the flag runs the model the server runs.
 """
 from __future__ import annotations
 
@@ -43,7 +46,7 @@ def parse_args(argv=None):
     p.add_argument("video_ids", nargs="+")
     p.add_argument("--out", required=True, help="directory for the new cue and speech files")
     p.add_argument("--cache", default=str(server.CACHE_DIR), help="directory holding <video_id>.<ext> audio")
-    p.add_argument("--model", default="large-v3")
+    p.add_argument("--model", default=None, help="Whisper model (default: the model chosen at setup (config.json), else large-v3)")
     p.add_argument("--device", default="auto")
     p.add_argument("--compute-type", default="auto")
     p.add_argument("--language", default="ja")
@@ -62,7 +65,7 @@ def parse_args(argv=None):
     args.client_timeout = 0.0
     args.idle_minutes = 10 ** 6
     args.retry_after = 10 ** 6
-    return args
+    return server.resolve_default_model(args)
 
 
 def audio_path(cache: Path, video_id: str):

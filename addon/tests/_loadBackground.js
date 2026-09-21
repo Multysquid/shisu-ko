@@ -12,6 +12,7 @@ const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
 const MATCH_PATH = path.join(__dirname, "..", "match.js");
+const WORDS_PATH = path.join(__dirname, "..", "words.js");
 const SOURCE_PATH = path.join(__dirname, "..", "background.js");
 
 function makeMemoryStorage(initial) {
@@ -142,6 +143,8 @@ function loadBackground(overrides = {}) {
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
   // match.js sits between them in the manifest too: background.js reads SHISUKO_MATCH at load time.
   new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
+  // words.js follows match.js in the manifest: the deck index reads notes through SHISUKO_WORDS.
+  new vm.Script(fs.readFileSync(WORDS_PATH, "utf8"), { filename: WORDS_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
   // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, sleep) live in the global
   // *lexical* environment, not as globalThis properties, but that environment is shared across
@@ -157,6 +160,8 @@ function loadBackground(overrides = {}) {
       " globalThis.CLIP_TIMEOUT_MS = CLIP_TIMEOUT_MS; globalThis.ANKI_REQUEST_TIMEOUT_MS = ANKI_REQUEST_TIMEOUT_MS;" +
       " globalThis.ANKI_PERMISSION_TIMEOUT_MS = ANKI_PERMISSION_TIMEOUT_MS; globalThis.ANKI_PERMISSION_RETRY_MS = ANKI_PERMISSION_RETRY_MS;" +
       " globalThis.ANKI_REPORT_MIN_CHARS = ANKI_REPORT_MIN_CHARS;" +
+      " globalThis.CARD_STATUS_TTL_MS = CARD_STATUS_TTL_MS; globalThis.DECK_SEEN_KEY = DECK_SEEN_KEY;" +
+      " globalThis.DECK_NOTES_KEY = DECK_NOTES_KEY;" +
       " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
       " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",

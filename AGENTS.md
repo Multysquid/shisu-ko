@@ -12,7 +12,8 @@ plus sentence audio into the newest Anki card via AnkiConnect.
 
 ```
 addon/        Firefox source extension, Manifest V3, plain JS; directly loadable without a build
-              (match.js is shared by background.js and content.js; loaded before both)
+              (match.js and words.js are shared by background.js and content.js; loaded before
+              both, in that order)
 server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
               native_host.py: the native-messaging host behind the popup's "Start server" button
               (stdlib only); native-host.cmd / native-host.sh wrap it, Firefox runs the wrapper
@@ -26,7 +27,11 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
 ## Invariants (do not break these)
 
 - Subtitles must stay ordinary DOM text (`textContent`), never canvas, never `<track>` cues,
-  never shadow DOM. Yomitan and other popup dictionaries depend on it.
+  never shadow DOM. Yomitan and other popup dictionaries depend on it. The one markup allowed
+  inside a cue's text is the word colours' inline `<span class="shisuko-word">` holding a text
+  node, with `data-status` and `data-pitch` and nothing else (`renderText()` in `content.js`
+  is the one writer, on the subtitle and in the transcript alike); no other element, attribute
+  or wrapper goes into a line.
 - Never use `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `eval` or `script.src` in the content
   script. youtube.com enforces Trusted Types; only `textContent`/`createElement` style DOM code works.
 - Settings are untrusted input before they reach CSS: every style value goes through a sanitiser
@@ -80,8 +85,10 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
 - `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S).
   Off must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption
   hiding, no arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so
-  Alt+Shift+M would still find one). Only the toggle command itself keeps working: the command
-  listener in `content.js` returns for every other command while `enabled` is false.
+  Alt+Shift+M would still find one), no `cardStatus` asks for the word colours' deck index
+  (`wordColoursOn()` in `content.js` includes `enabled`, and the poll runs from `syncTick()`),
+  so no request reaches Anki from a YouTube tab. Only the toggle command itself keeps working:
+  the command listener in `content.js` returns for every other command while `enabled` is false.
 - The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on
   it, so its handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`,
   the transcript's close button) act only on trusted events (`ev.isTrusted`): a synthetic click
@@ -93,7 +100,15 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   an arbitrary point on every page load. Every place the content script reads or seeks the
   playhead goes through `playhead()` / `seekPlayhead()`.
 - Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`,
-  plus what the Start button brought: `server-<port>.lock` (`hold_instance_lock()` /
+  `config.json` (`{"model": ...}`, written by `server.py --download-model NAME` at setup through
+  `write_config()` (a merge; a None value drops its key): before the download for a size from
+  faster-whisper's table, so that the choice outlives a failed or interrupted download and the
+  first start fetches that model rather than the built-in default, after it for a repo id, which
+  may be a typo or a PyTorch checkpoint; read by `parse_args()` (`resolve_default_model()`:
+  `--model`, else the config's model, else `DEFAULT_MODEL` large-v3; `read_config()` never
+  raises and ignores anything but a JSON object); Docker and Nix pass `--model` and never read
+  it), plus what the Start
+  button brought: `server-<port>.lock` (`hold_instance_lock()` /
   `try_lock()`, held from before the model load until the server exits), `server.log` (the POSIX
   `launch()` appends the launched server's output there) and, on Windows only, the host manifest
   `native-messaging/shisuko.json` (`manifest_path()`; Linux and macOS keep it under Mozilla's
@@ -116,8 +131,8 @@ began, so the next window re-transcribes it whole. These functions are pure; tes
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
 
 Cue building (`docs/subtitle-quality.md` is the rationale): the server runs Silero VAD itself on each
-window (`speech_intervals()`, min speech 250 ms, min silence 300 ms) and passes the same options to
-faster-whisper. Segments go through gates before becoming cues: no words, VAD overlap under 0.5,
+window (`detect_speech()`, with `VAD_PARAMS`: min speech 250 ms, min silence 300 ms) and passes the
+same options to faster-whisper. Segments go through gates before becoming cues: no words, VAD overlap under 0.5,
 faster-whisper's own word-anomaly score, repetition loops, and a gated phrase blocklist.
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
@@ -177,12 +192,13 @@ the live cues and changes the session token so the client starts over on the vid
 The popup's `model` setting names the Whisper model the server should run; `--model` is only the
 default. The content script sends it with every `/sync` (`modelForSync()`, trimmed, empty for the
 default), and `App.request_model()` stores the wish: an empty name becomes the operator's
-`--model` (not validated, it may be a folder), an invalid name is not stored (`model_state()`
-answers that request with `MODEL_NAME_HINT`), a valid one is stored as its canonical alias
-(`canonical_model_name()`, built lazily from `faster_whisper.utils._MODELS`: alias -> repo id ->
-first alias, so `large` and `Systran/faster-whisper-large-v3` are `large-v3`), and a name that
-failed less than `--retry-after` seconds ago is ignored (`in_cooldown()`), since the client
-re-sends the setting every second.
+`--model` (that is `--model`, else the model chosen at setup in `config.json`, else large-v3,
+resolved once in `parse_args()`; not validated, it may be a folder), an invalid name is not
+stored (`model_state()` answers that request with `MODEL_NAME_HINT`), a valid one is stored as
+its canonical alias (`canonical_model_name()`, built lazily from `faster_whisper.utils._MODELS`:
+alias -> repo id -> first alias, so `large` and `Systran/faster-whisper-large-v3` are
+`large-v3`), and a name that failed less than `--retry-after` seconds ago is ignored
+(`in_cooldown()`), since the client re-sends the setting every second.
 
 `Transcriber.run()` calls `App.switch_model_if_wanted()` before every window, so the swap never
 runs while a window is being transcribed. It is a small state machine over `wanted_model`,
@@ -238,17 +254,26 @@ prepare and swap, every failure path and the cooldown, the per-model cache files
 endpoints. `addon/tests/content.test.js` covers the model name in `/sync`, the restart on a new
 session token, the status texts and `fontStack()`; `addon/tests/popup-copies.test.js` keeps the
 popup's copies of `FONT_FAMILY_RE`, the preset stacks and `MODEL_NAME_RE` equal to the originals
-and the model hint in step with the `/health` shape.
+and the model hint in step with the `/health` shape. `server/tests/test_setup_model.py` covers
+`config.json`, the `--model` default, `--download-model` (with `faster_whisper` and
+`huggingface_hub` faked in `sys.modules`; the interrupt through a replaced `wait_for_thread()`
+and `os._exit()`), `run_check()` against stand-ins for `ctranslate2`, `yt_dlp` and `winreg` (no
+GPU driver and no registry in the suite) and the text of `setup.cmd` / `setup.sh`.
+
 ## One tab at a time
 
 Only one YouTube tab's `/sync` reaches the server. `background.js` elects it in `electSyncTab()`
-(pure, tested in `addon/tests/tabs.test.js`). The rules, in order: the tab the viewer is watching
-wins if it is the one asking; else the asker takes it when nobody holds it or the holder has been
-quiet for `HOLD_TIMEOUT_MS` (12 s, two missed idle heartbeats); else a holder that is the watched
-tab keeps it, playing or paused; else a playing asker beats a paused holder; else the holder keeps
-it. The election never names a tab that did not ask — a focused tab claims the right on its own
-next tick — because parking it on a tab that has stopped asking blanks every other tab until the
-entry ages out.
+(pure, tested in `addon/tests/tabs.test.js`). Two clocks: `HOLD_TIMEOUT_MS` (12 s, two missed
+idle heartbeats) and `FOCUS_STALE_MS` (7 s: more than one 5 s idle heartbeat, so a paused focused
+tab does not flap between two of them, and well under the hold timeout, so a focused tab whose
+switch was turned off or that left for the home page hands the right on in one heartbeat). The
+rules, in order: the tab the viewer is watching wins if it is the one asking; else the asker takes
+it when nobody holds it or the holder has been quiet for `HOLD_TIMEOUT_MS`; else a holder that is
+the watched tab keeps it, playing or paused, as long as it synced within `FOCUS_STALE_MS`; else a
+playing asker beats a holder that is paused or that has been quiet longer than `FOCUS_STALE_MS`,
+watched or not; else the holder keeps it. The election never names a tab that did not ask — a
+focused tab claims the right on its own next tick — because parking it on a tab that has stopped
+asking blanks every other tab until the entry ages out.
 
 Which tab is being watched comes from `tabs.onActivated` plus `windows.onFocusChanged`, and the
 focus listener must ask `tabs.query({active: true, windowId})` itself: browsers fire
@@ -258,8 +283,10 @@ re-selected would otherwise stay unknown and its video starve in standby.
 A refused tab gets `{status: "standby"}` from the background without a server call. The content
 script treats that as "this tab is not the one talking to the server" and nothing more: it leaves
 `offline`, the server status, the cues and `since` untouched, so a tab that stands by and comes
-back keeps its subtitles, and it stops pre-mining and polling Anki, which is what kept `/clip`
-reaching the server from a tab the election had refused. Every other answer clears the flag, a
+back keeps its subtitles, and it stops pre-mining and polling Anki for new cards, which is what
+kept `/clip` reaching the server from a tab the election had refused (the word colours'
+`cardStatus` ask keeps going: the index is the deck's, served from the background's one cache,
+and never reaches the server, see "How word colours work"). Every other answer clears the flag, a
 refusal by the server (`{ok: false, error, data}`, a 4xx/5xx) or unreachable included: the
 background answers standby only with `ok: true`, so any other answer means the election let the
 request through, and a flag left by the last refused tick would hide the server's error behind
@@ -278,8 +305,11 @@ styled as an error.
 anything: the content script asks once per sync tick (`ankiPollAllowed()`: `autoMine` on with
 `mineTarget` `anki`, which is `autoAnkiMining()`; a visible tab, no ad, not already mining, not
 standing by for another tab (`state.standby`, see "One tab at a time"), and not idle, meaning
-two minutes after a plain pause or, during a hover pause, two minutes after the pointer was last
-seen over the subtitle or the player, `hoverSeenAt`) and the background answers
+two minutes after a plain pause (`PAUSE_POLL_IDLE_MS`) or, during a hover pause, two minutes
+after the pointer was last seen over the subtitle or the player, `hoverSeenAt`, after which a
+hover pause still polls at a slow heartbeat, `PAUSE_POLL_SLOW_MS` (5 s), since a viewer reading
+the popup, whose pointer the page cannot see, must not lose the card they make to a gap the
+background no longer trusts its baseline across) and the background answers
 with the id of a note Yomitan has just created, plus what that note says (`notesInfo`: its
 sentence field and its word field, `ankiWordField` or the field with `order` 0).
 Four rules keep it from touching the wrong card.
@@ -297,14 +327,26 @@ Four rules keep it from touching the wrong card.
 - No downloads fallback. `mineCue` with `auto: true` never falls back to the Downloads folder: a
   failure the viewer did not ask for must not scatter files.
 
+Right after a successful `updateNoteFields`, `addToAnki()` calls `rememberDeck(url, noteId)`
+without awaiting it (see "How word colours work"): the mine's answer never waits for it, and its
+failure is a `console.debug` line.
+
 Polls are throttled to one request per 250 ms (several tabs poll the same background), and the
 `requestPermission` handshake is retried at most once a minute after the viewer clicked No:
-`ankiPermission()` sets `permissionAskAt` a minute ahead before the request, because the polls
-landing while Anki's dialog is up must not queue dialogs of their own, and pulls it back to
-`ANKI_PERMISSION_RETRY_MS` (5 s) when no verdict came, so Anki not running is not a minute of
-"denied" (the poll answers `offline: true` meanwhile). Poll errors are logged with
-`console.debug`, never toasted. A `notesInfo` that fails still reports the id, with `note:
-null`, and the content script falls back to the cue at the playhead.
+`ankiPermission(url)` shares one request in flight (`ankiWatch.permissionPending`), so every
+caller arriving while Anki's dialog is up (the poll, a tab's `cardStatus` ask, the popup's
+`ankiDecks`) awaits the same answer rather than queueing a dialog of its own, and it sets
+`permissionAskAt` a minute ahead (`ANKI_PERMISSION_RECHECK_MS`) before the request, so an
+answered request, granted or denied, is not repeated within the minute. A request Anki never
+answered (closed, not installed) is no refusal: it puts `permissionAskAt` back to 0, rejects for
+every waiting caller and is recorded in `ankiWatch.permissionFailed = {at, err}`; `ankiPoll()`,
+a timer, rethrows that failure for `ANKI_PERMISSION_RETRY_MS` (5 s) instead of knocking again
+(the poll answers `offline: true` meanwhile), so Anki not running is not a minute of "denied"
+and a started one is noticed within seconds, while a tab's `cardStatus` ask and the popup's
+`ankiDecks` (a viewer's own action) ask at once, and any answered request clears the failure
+for the poll. Poll errors are logged with `console.debug`, never toasted. A `notesInfo` that
+fails still reports the id, with `note: null`, and the content script falls back to the cue at
+the playhead.
 
 The baseline is shared between tabs, so a note found by one tab's poll goes on a ledger
 (`ankiWatch.reports`, kept for `ANKI_REPORT_WINDOW_MS`, 60 s) and `replayReport()` answers it,
@@ -317,8 +359,10 @@ other tab, a second mine for it waits for the first and writes only when that on
 (else it answers `{ok: true, warning: true}` and "attached in another tab"), and a mine that
 wrote nothing (a mismatch, no clip) gives the note back: the finder is mid-mine for seconds
 when the other tab's tick lands, and two writes would leave the card with the later tab's frame
-and clip. Only a note with a sentence goes on the ledger: one with a word alone, or one
-`notesInfo` could not read, goes to the tab that found it, as before.
+and clip. Only a note with a sentence of at least `ANKI_REPORT_MIN_CHARS` (6) normalised
+characters goes on the ledger: one with a word alone, one `notesInfo` could not read, or one
+whose few-character sentence is in the lines of every video, goes to the tab that found it, as
+before.
 
 Every request on the mining path has a deadline, because the content script holds
 `state.mining` until the `mine` message resolves: `fetchClip()` aborts each attempt after
@@ -332,8 +376,8 @@ puts around its own `<b>`.
 
 ### Matching a card to its subtitle (`addon/match.js`)
 
-`SHISUKO_MATCH` is a plain script loaded between `settings.js` and the two scripts that use it, in
-both `background.scripts` and `content_scripts[0].js`.
+`SHISUKO_MATCH` is a plain script loaded after `settings.js` and, with `words.js` behind it,
+before the two scripts that use it, in both `background.scripts` and `content_scripts[0].js`.
 
 - `normalize(text)` removes ruby readings first (`RUBY`: an `<rt>` or `<rp>` up to the next end
   tag; Yomitan's `{sentence-furigana}` and `{furigana}` write `<ruby>食<rt>た</rt></ruby>べる`,
@@ -394,6 +438,328 @@ held clip is used when its parameters still match the ones computed now (same st
 format to the millisecond), else the clip is fetched with the usual four tries and stored. Mining
 does not remove an entry: two words from one line make two cards.
 
+## How word colours work
+
+Two opt-in colourings of the words of a line, both off by default: `cardStatus` colours a word by
+the state of its Anki card (`data-status`: `learned` green, `learning` yellow, `suspended`
+orange, `new` red; colours as custom properties on `.shisuko-root` in `content.css`), `pitchAccent`
+draws an overline in the colour of its pitch accent pattern (`data-pitch`: `heiban` blue,
+`atamadaka` red, `nakadaka` orange, `odaka` green). `cardStatusDeck` names the deck (empty is
+automatic: the deck the last mined card went to; nothing mined and nothing chosen means no deck,
+so a collection is never searched by guesswork), `ankiPitchField` the note field holding the
+pitch (empty: found by name). `addon/words.js` (`SHISUKO_WORDS`, a plain frozen object like
+`SHISUKO_MATCH`, loaded between `match.js` and the two scripts in both `background.scripts` and
+`content_scripts[0].js`, and by `service-worker.js`) is shared: the background turns one deck's
+notes into `[word, status, pitch]` entries, the content script builds an index from them and
+marks the words of every line. Everything in words.js is pure, without DOM.
+
+### words.js
+
+- Fields. `plainText(html)` strips `<rt>`/`<rp>` with their content, turns `<br>` and the end of
+  `p`/`div`/`li`/`tr` into line breaks, strips every other tag (`TAGS` = `/<[^<>]*>/`: a tag never
+  runs across a `<`, so an unclosed `<` costs its length, not its square), decodes the six
+  entities of `match.js` and collapses whitespace. `plainWord(html)` takes the first non-empty
+  line, without bracket furigana (` 食[た]べる` -> `食べる`). `readingOf(html)` is the `<rt>` texts
+  of a ruby, the brackets of the furigana or the field itself, and `""` unless what is left is
+  kana (ー and ・ allowed). Bounds, since a field is third-party content: `stripMarkup()` and
+  `parsePitch()` read at most `MAX_FIELD_HTML_LEN` (16,000) characters of the raw value,
+  `plainWord()` at most `MAX_WORD_FIELD_LEN` (320) of a line (the index drops words over
+  `MAX_WORD_LEN`, 40), `readingOf()` answers `""` for a raw field over `MAX_READING_FIELD_LEN`
+  (1,000). `moraCount(kana)` counts every kana and ー, not the small ゃゅょぁぃぅぇぉヮゎ.
+- `parsePitch(text, reading, word)` -> category or null, in this order: a category name in the
+  plain text, the first by position (`heiban|平板|atamadaka|頭高|nakadaka|中高|odaka|尾高`,
+  case-insensitive: Yomitan's `{pitch-accent-categories}`; its `kifuku` for verbs and adjectives
+  is no category, so no overbar rather than a wrong one); else a position `n`: the `{pitch-accents}`
+  markup (`drawnPitch()`: one `display:inline-block` span per mora holding a `border-color:` line
+  span, the drop after the mora whose line has `border-right-width`; the first `<li>` of a list
+  counts; a nasal mora's extra inline-block span is not a mora, the line spans are counted), else
+  the first `[n]` of the plain text (`{pitch-accent-positions}`, a list's first), else a plain
+  text of digits alone, else `ꜜ` in the plain text (n = the moras before it), else a raw value
+  without any tag that is kana-only (n = 0); else null. Then 0 -> heiban, 1 -> atamadaka, else
+  `n === m` -> odaka, otherwise nakadaka, with `m` the drawn mora count, else `moraCount()` of the
+  pitch text without ꜜ when kana-only, else of `reading`, else of `word`, else unknown (nakadaka).
+- `pitchOf(fields, settings)`: `fields` is `notesInfo`'s `{name: {value, order}}`. The candidates
+  are the field `ankiPitchField` names (trimmed, when present), else every field whose name
+  matches `/pitch|accent|アクセント/i` in `order`; the first whose value `parsePitch()` reads
+  decides (a `{pitch-accent-graphs}` SVG before a position field does not hide it). The reading is
+  the lowest-order field other than the candidate matching `/reading|furigana|読み|よみ/i` and not
+  `/sentence|文/i` (`SentenceFurigana` holds the sentence's kana, whose mora count would make every
+  odaka word nakadaka), through `readingOf()`; the word is `ankiWordField`, else order 0, through
+  `plainWord()`. Null without a candidate or a readable value.
+- `statusOf(sets, noteId)` over the sets of the five searches below: not in `unsuspended` ->
+  `suspended` when in `suspended`, else null (not in the deck); in `new` -> `new`; in `learning`
+  -> `learning`; in `review` -> `learned`; else `learning` (an Anki before 2.1.44, or a set a
+  search left out). `mergeStatus(a, b)` for two notes of one word: the least progress wins
+  (`new` < `learning` < `learned`), `suspended` only when both are, null the identity.
+- `buildIndex(entries)`: words trimmed; empty, over `MAX_WORD_LEN` or in `PARTICLES` dropped
+  (case, binding, adverbial, conjunctive and sentence-final particles, Yomitan's fusions such as
+  のは, への, かも, and the copula and auxiliaries a learner mines: だ, です, ます, ない, たい, ん,
+  じゃ, もん …: a card for one would paint every line); duplicates merged (`mergeStatus`, the
+  first non-null pitch). Returns a frozen `{size, exact, stems, heads, maxLen, maxStemLen}`:
+  `exact` Map word -> `{word, status, pitch, bounded}` (`bounded` for a word without kanji or
+  katakana, which must end at a word boundary, else ある is found in あるいは); `stems` Map stem ->
+  `[{entry, kind}]` from `stemOf()`, only for words holding a kanji or katakana (a kana-only verb
+  matches exactly only): `する` with length >= 3 -> kind `suru`; else, with length >= 2, a last
+  `い` -> `i-adj`, `る` -> `ru` (ichidan or godan, unknown), one of うくぐすつぬぶむ -> that kana;
+  anything else has no stem. `heads` is the set of first characters, so a position whose
+  character starts no word costs nothing.
+- `wordStarts(text)`: the indices where a word may begin, `Intl.Segmenter("ja", {granularity:
+  "word"})` segment starts (the instance cached) plus 0; every index without a segmenter or on
+  any error; it never throws. ICU keeps a compound in one segment (日本語, あるいは, 見せかけ).
+- `markWords(text, index, starts)` -> runs `[{text, status, pitch}]` covering the text in order,
+  unmatched characters joined into one run with nulls. Left to right; only a position in `starts`
+  (an iterable, `wordStarts(text)` by default) whose character is in `heads` is tried; after a
+  match `i` jumps to its end (no overlaps). `matchAt()` takes the longest span, the exact word on
+  a tie: exact words longest first (`bounded` ones must end at a boundary or the end of the text,
+  the others anywhere `endsWord()` admits: the end, a boundary, or not right before a kanji,
+  katakana or ー, so 関 is not coloured in 関係, 飲み not in 飲み物, while 見た ends before 犬 and
+  電話 before 番号); then every stem length from `maxStemLen` down, `continuationEnd()` giving the
+  furthest end `endsWord()` admits. Its rules:
+  - The bare stem counts for `suru` (勉強 in 勉強が) and for `ru` when the stem ends in an i-row or
+    e-row kana (`IE_ROW`) at a boundary (the ichidan 連用形 is the noun: 食べ in 食べに行く, 助け,
+    考え, 流れ); a stem ending in a kanji (走, 見) or the a-row (当た, 変わ: a godan verb, whose noun
+    is its り piece, found through the tables) is no form, and nothing ends inside a compound ICU
+    holds together (見せ in 見せかけ, 当た in 当たり前).
+  - Otherwise a first piece from `FIRST_PIECES[kind]` must follow (`suru`: する し さ せ す すれ;
+    `i-adj`: い く かっ けれ さ そう くて くない ければ; `ru`: る た て ない … られ させ よう れば ろ よ
+    ず ん ら り れ っ なかっ なけれ, the ichidan stem being the 連用形; the godan rows わいうえおっ,
+    かきくけこいっ, がぎぐげごい, さしすせそ, たちつてとっ, なにぬねのん, ばびぶべぼん, まみむめもん),
+    so 走 in 走者 is not 走る. 行く's い is skipped (`text[pos - 1] === "行"`): its 音便 is っ alone,
+    and 行い, 行います, 行いたい are 行う's.
+  - `tailEnds()` then consumes up to `MAX_TAILS` (5) pieces of `TAIL_PIECES` (た て で だ ない …
+    ます まし ませ ん たい … れる られる せる させる ば う よう ろ る い けれ ず ちゃ じゃ てる でる てい
+    でい いる いた いて います いない ましょ でし でしょ です たら だら たり だり ても でも ながら なさい
+    まい とく どく いか いき いく いけ いこ いっ いただく いただき いただけ いただい いただこ いただか っ
+    ー), every split tried (泳いでいる is で + いる, not でい + る), each piece checked against the
+    one before it by `firstRole()` (a godan first piece by its row `a`/`i`/`u`/`e`/`o` or `onbin`,
+    a す verb's し as `shi`, the adjective's い as `adj`, a する verb's さ/せ/す as `suru:さ` etc.,
+    a る verb's っ as `onbin`, any other piece by its text): `AFTER` lists what a single-kana tail
+    and the いる/いく/いただく pieces may follow (だ after ん and not る: 食べるんだ, 食べる + だけ; た
+    after 音便, まし, て and the ichidan-like stems, not after い, so た after いる's stem is the
+    tail いた; う after the o-row, よ, ろ, ましょ …; よう only after し and the ichidan-like pieces,
+    since after る, た, ない, the u-row or an adjective it is 様: 食べる + ように; ん after the forms
+    it shortens and not ちゃ: 食べてちゃ + んと); `OPEN_TAILS` are pieces a span never ends right
+    after (い, てい, でい, いか, いこ, いっ, いただい …, the a-row and o-row, ら, the 音便 kana,
+    suru:さ/せ/す, かっ, なかっ, たかっ, けれ, なけれ, まし, でし: 聞こえる and 死の恐怖 have no run
+    for 聞く / 死ぬ, 電話さえ is 電話 + さえ, 行い / 引っかかった have no run for 行く / 引く, 見たかっこいい
+    is 見た + かっこいい, 食べるけれど is 食べる + けれど); `NEXT` lists what the 音便 kana may be
+    followed by (the た/て pieces, ちゃ, じゃ, とく, どく, たら, たり, ても …: 行います has no run for
+    行く); `NOT_BEFORE` keeps a piece from ending a span where the text after it makes it another
+    word (ても/でも before ら: 食べて + もらう; たら/だら before しい しく しか しけ しさ: 食べた + らしい;
+    たく before せ さ ら: くせに, たくさん, くらい; た before くさん; いき before な: いきなり; いく before
+    ら: いくら; いた before だ: いただく, so 食べていただく is followed to its end and never cut inside).
+    The furthest valid end wins; the span is at least stem + 1 except for the two bare stems.
+  - Known gaps, listed rather than promised: 食べちゃった / 食べちゃって stop at 食べちゃ (っ is no
+    tail after ちゃ / じゃ); 食べたがる and 勉強できる are not covered; 来い, 行こ！ (the volitional
+    without う before punctuation), 行かねば / 行かぬ, 書いといて / 読んどいて (とく is a tail, とい is
+    not, and 書い alone is no form) and 書きそう / 話しそう (そう is a first piece of the ichidan and
+    adjective tables, not a tail) are not matched; 〜てもらう is 食べて + もらう (もらう is no tail,
+    unlike いただく).
+  - It stays linear-ish: Maps keyed by the substring, never a loop over the deck per position.
+- Tests: `addon/tests/words.test.js` covers every function above: the field readers and their
+  bounds (a passage, a field of `<` never closed), `moraCount`, `parsePitch` in each form and its
+  mora sources, `pitchOf` (the named field, the fallback, the sentence reading skipped, a graph
+  field before a position field), `statusOf` and `mergeStatus`, `buildIndex` (trimming, the
+  particles, the stems), `wordStarts` with Node's ICU, and the matcher rule by rule with explicit
+  `starts` sets: the examples above, the tails, `AFTER`, `OPEN_TAILS`, `NEXT`, `NOT_BEFORE`, the
+  compounds, the bare stems, the particles and auxiliaries, and a long line against a large deck.
+
+### The background index (`addon/background.js`, "word colours" section)
+
+- `deckSearch(name)` -> `"deck:NAME"` with `\`, `"`, `*`, `_` backslash-escaped inside the quotes
+  (Anki's syntax; the deck and its subdecks). `deckScope(url, deck)`: the names `current` and
+  `filtered` are keywords to Anki's search with no escape, so those two are searched as
+  `did:<id,...>` (the deck's own id and its subdecks' from `deckNamesAndIds`), null when no such
+  deck exists (an empty deck, like any other missing name: AnkiConnect answers `[]`; the popup's
+  deck list is the guard).
+- `fetchDeckIndex(url, deck, settings, signal)`: the five `findNotes` searches (`STATUS_QUERIES`,
+  each `${scope} <clause>`): `suspended` `is:suspended`, `unsuspended` `-is:suspended`, `new`
+  `is:new -is:suspended`, `learning` `is:learn -is:suspended`, `review` `is:review -is:learn
+  -is:suspended` (since Anki 2.1.44 the three go by the card's type, which a suspended card keeps).
+  The deck's ids are suspended ∪ unsuspended, sorted ascending: Anki's `findNotes` has no ORDER
+  BY (a review that moves a due reorders its answer), and the same deck must give the same
+  entries or every tab would take them in again. `notesInfo` (chunks of `NOTES_INFO_CHUNK`, 200,
+  `CARD_STATUS_TIMEOUT_MS` 20 s per request) runs only for ids not in the note cache (`notes:
+  Map<id, {word, pitch, mod}>`, kept across refreshes and mines, ids gone from the deck dropped)
+  and for known notes edited since `checkedAt`: a sixth search `${scope} edited:<days>` (days =
+  `max(2, ceil(elapsed / day) + 1)`; an Anki without it finds nothing) lists candidates and
+  `notesModTime` re-reads only those whose `mod` moved (without the action, every candidate).
+  Word = `SHISUKO_WORDS.plainWord(noteSummary(info, settings).word)` (`ankiWordField`, else
+  order 0; over `MAX_WORD_LEN` stored as `""`), pitch = `SHISUKO_WORDS.pitchOf(info.fields,
+  settings)`. Entries: one `[word, status, pitch]` per note with a word and a non-null
+  `statusOf(sets, id)`, by ascending id. A `notesInfo` chunk that fails keeps what `known` said
+  for its ids (a re-read note keeps its colour and old pitch) and is asked again on the next
+  refresh; a `TypeError` or `AbortError` fails the ask as a whole. `dropped()` (the `signal`) is
+  checked before every request and once more after the loop, so a fetch dropped during its last
+  request answers nobody. Returns `{deck, wordField, pitchField, at, fetchedAt, checkedAt,
+  entries, notes, changed}`: `at` is kept from the previous index when the entries came out the
+  same (`sameEntries`), so a tab holding them hears "unchanged"; `fetchedAt` is the clock the
+  TTL runs on; `changed` = a note read (`read > 0`) or dropped (`notes.size !== known.size`) or
+  the record restored, and decides whether the session record is written.
+- The cache: `cardIndex = {deck, wordField, pitchField, at, fetchedAt, checkedAt, entries,
+  notes}` and the fetch under way `cardIndexInFlight = {deck, wordField, pitchField, promise,
+  controller, expired}`, both named by the deck and the trimmed `ankiWordField` /
+  `ankiPitchField` they were read with; `indexFor(index, deck, settings)` compares all three and
+  is what the fresh and stale answers, the flight joining and `fetchDeckIndex`'s `previous` go
+  by. `refreshCardIndex(url, deck, settings)` joins a flight for the same deck and fields and
+  aborts one for anything else through its `AbortController` before starting anew (the walk ends
+  at its next request with an error marked `dropped`; the waiting `cardStatus` re-runs once for
+  what is set now). `dropCardIndex()` (the `browser.storage.onChanged` listener, when one of
+  `CARD_INDEX_SETTINGS` = `cardStatusDeck`, `ankiPitchField`, `ankiWordField` changed; `ankiUrl`
+  is not among them) forgets the index, moves `cardIndexGeneration` on, aborts the flight and
+  clears the session record. `expireCardIndex()` sets `fetchedAt = 0` and marks a flight
+  `expired` (its index lands expired), the notes staying. The notes also live in
+  `storage.session` under `DECK_NOTES_KEY` (`deckNotes` = `{deck, wordField, pitchField, at,
+  checkedAt, entries, notes: [[id, word, pitch, mod]]}`, `notesRecord()`), so a return to YouTube
+  after the event page ended does not read the whole deck again: `restoreNotes(deck, settings)`
+  ignores a record for another deck or other fields and hands back `at` and `entries` only with a
+  positive `at` (0 is what a tab holding nothing sends), so the stamp survives a restart when the
+  entries came out the same; the page that restored it writes it once more.
+- The deck: `rememberDeck(url, noteId)`, from `addToAnki()` after every card it filled, not
+  awaited: `findCards {query: "nid:<id>"}` -> `getDecks {cards}` -> the deck with most of them ->
+  `storage.local` `DECK_SEEN_KEY` (`ankiDeckSeen` = `{deck, at, noteId}`) and `expireCardIndex()`,
+  so the new card shows red at the next ask rather than after the TTL; errors are `console.debug`.
+  `seenDeck()` reads the record; `resolveDeck(settings)` -> `{deck, automatic}`: the trimmed
+  `cardStatusDeck`, else the seen deck (`automatic: true`), else `{deck: null, automatic: true}`.
+- `cardStatus(msg, retried)`, the handler of `{type: "cardStatus", since?}`: captures
+  `cardIndexGeneration`, then `getSettings()`; not `wordColoursOn(settings)` (`cardStatus ||
+  pitchAccent`) -> `{ok: false, reason: "off"}`; no deck -> `{ok: false, reason: "noDeck",
+  error: "No card mined yet; pick a deck in the popup"}`; `ankiPermission(url)` false -> `{ok:
+  false, reason: "denied", error}` (the shared helper: one dialog at a time, see the mining
+  section); the generation moved while the dialog was up -> once more for the settings of now;
+  an index for this deck and fields with `fetchedAt` under `CARD_STATUS_TTL_MS` (30 s) is
+  answered from memory, else `refreshCardIndex()`. The answer is `{ok: true, unchanged: true,
+  at, deck}` when `msg.since === at`, else `{ok: true, deck, automatic, at, entries}`. On a
+  failure the old index is answered with `stale: true` when it has entries, else `{ok: false,
+  reason: "offline", error: "Anki is not running or AnkiConnect is not installed"}` for a
+  `TypeError` or `reason: "error"` with the message; a `dropped` error re-runs once.
+- `ankiDecks()`, the popup's `{type: "ankiDecks"}`: `{ok: true, decks: string[] (from
+  `deckNames`, sorted), seen: string | null}` or `{ok: false, reason: "offline" | "denied" |
+  "error", error, seen}`, through `ankiPermission()` as well. The message switch routes both.
+- Tests: `addon/tests/background.test.js` (a fake AnkiConnect answering the searches by their
+  `query`, `notesInfo` per chunk, `findCards` / `getDecks`, `deckNames`, `edited:` and
+  `notesModTime`): `deckSearch`, `resolveDeck`, every `cardStatus` verdict, the five queries and
+  each status including the buried-learning fallback, the pitch from a field named `PitchAccent`
+  with `[2]` beside a `Reading` field, a merged duplicate, the fields the viewer named, the TTL
+  and "unchanged", the stamp kept when the deck came out the same, the edited note re-read, the
+  stale answer, the settings that drop the index and the ones that do not, the mine remembering
+  its deck and expiring the index, a mine whose deck cannot be told, the dropped fetch (another
+  deck asked for, the last request), a mine during a fetch, a field named while the dialog was
+  up, the session record, the failing chunk, `current` / `filtered` by id, a sentence in the word
+  field, the shared permission dialog and its failure, `ankiDecks`, the message switch, and a
+  note whose fields are a hundred kilobytes of `<` (the ask finishes under a second).
+  `_loadBackground.js` loads `words.js` between `match.js` and `background.js` and exposes
+  `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY` and `DECK_NOTES_KEY`.
+
+### The content side (`addon/content.js`, "word colours" section)
+
+- `wordColoursOn()` = `enabled && (cardStatus || pitchAccent)`. State: `wordIndex` (a
+  `buildIndex()` result), `wordIndexSerial` (moves on with every index put in `wordIndex`, a new
+  one or none: what dates a cue's look), `wordIndexAt` (the background's `at`, the `since` of the
+  next ask), `wordIndexKey` (`JSON.stringify(entries)`), `wordIndexAskedAt`, `wordIndexInFlight`,
+  `wordIndexGeneration` (times the index was started over), `wordIndexDrawn` /
+  `wordIndexDrawnSerial` (the index the last `refreshWordMarks()` ran with), and three WeakMaps:
+  `lineTexts` (transcript line -> its `.shisuko-linetext` span), `drawnKeys` (element -> the
+  `drawKey()` of what `renderText()` last drew in it), `cueLooks` (cue -> `{serial, cardStatus,
+  pitchAccent, starts, runs, key}`). Constants `WORD_INDEX_REFRESH_MS` 30 s, `WORD_INDEX_LOG_MS`
+  60 s, `WORD_INDEX_MINE_DELAY_MS` 1.5 s, `WORD_INDEX_PROBE_MAX` 64, `WORD_SETTINGS` =
+  `cardStatus`, `pitchAccent`, `cardStatusDeck`, `ankiPitchField`, `ankiWordField` (if the
+  background's `CARD_INDEX_SETTINGS` ever gains `ankiUrl`, add it here too).
+- `renderText(el, cue)` is the one writer of a cue's text, used by `setSubtitle()` for
+  `state.subText` and by `transcriptLine()` for the line's span: `lookOf(cue)` gives the runs,
+  `drawRuns()` puts them in a `DocumentFragment` and `replaceChildren()`s it: a string run is a
+  text node, a marked run `<span class="shisuko-word">` with `dataset.status` only when
+  `cardStatus` is on and the run has a status, `dataset.pitch` only when `pitchAccent` is on and
+  it has a pitch, and its text as a text node; a run with neither is joined into the plain text
+  around it. Without `wordColoursOn()` or an index, `el.textContent = cue.text`. `lookOf()`
+  answers from `cueLooks` when the entry's `serial` is `wordIndexSerial` under the same pair of
+  colours, else runs `SHISUKO_WORDS.markWords(cue.text, index, starts)` with the entry's `starts`
+  (`wordStarts(cue.text)` the first time, kept whatever the index) and records it under the serial
+  of now; a look never holds an index, so a cue drawn while the transcript was hidden pins no old
+  index. A rebuilt panel and the line on screen for a cue whose line is up ask the matcher and the
+  segmenter nothing.
+- `refreshWordMarks()`: with the last drawn index and the new one both held and the colours on,
+  `indexProbes(prev, next)` lists the words the two disagree on (present in one only, or another
+  status or pitch), each replaced by its stem where it has one (a prefix of the word and of every
+  form), `[]` when they agree, null over `WORD_INDEX_PROBE_MAX`. The active cue's text and, when
+  the transcript is shown, every line are left alone when `sameLook(el, cue, prevSerial, probes)`
+  holds (the look carries `prevSerial` with the colours of now, `drawnKeys.get(el)` is its key,
+  and the text includes no probe; the look's serial then moves on) and otherwise go through
+  `refreshText()` (a redraw only when the `drawKey()` differs), so a card reviewed in Anki costs a
+  look at each line's text and a match of the lines holding that word, and replaces neither the
+  nodes of any other line nor what Yomitan holds on them. Lines still pending (none, as a rule: a
+  shown panel renders on arrival) are put in first by `renderTranscript()`, drawn under the index
+  of now; the panel is never rebuilt for a refresh.
+- `pollWordIndex()` runs from `syncTick()` and asks only when `wordColoursOn()`, `state.video &&
+  state.videoId` (the home page and a player left behind off a watch page never ask, a settings
+  change included), the tab visible, nothing in flight and `WORD_INDEX_REFRESH_MS` past: `{type:
+  "cardStatus", since: wordIndexAt}`. A tab standing by for another (`state.standby`, see "One
+  tab at a time") asks like any other: the index is the deck's and the election is about the
+  server, which this never reaches, and the standby tab's lines stay on screen and must be
+  recoloured too. An answer from before `wordIndexGeneration` moved is thrown
+  away. `unchanged` keeps everything; a new `at` with the same key moves the stamp only; new
+  entries rebuild the index, move the serial and call `refreshWordMarks()`; `reason: "off"` drops
+  the index and takes the colours off; any other failure is a `console.debug` line at most once
+  per `WORD_INDEX_LOG_MS`, never a toast; `stale` answers count as fresh. After a successful mine
+  `mineCue()` sets `wordIndexAskedAt` so the next ask goes out `WORD_INDEX_MINE_DELAY_MS` after
+  it, once the background has expired its index.
+- The storage listener: a change to any of `WORD_SETTINGS` runs `dropWordIndex()` (index null,
+  serial and generation on, stamp, key and `askedAt` 0), then `refreshWordMarks()` (plain text
+  again at once, in place) and, with the colours on, `pollWordIndex()`. `applySettings()` never
+  rebuilds the transcript (only `state.transcriptRebuild`, set by `dropCues()` or a new panel,
+  makes `renderTranscript()` build every line anew): a panel shown again renders what arrived
+  while it was hidden (`renderTranscript()`) and then runs `refreshWordMarks()` and
+  `highlightTranscript()`, so its lines catch up in place on the index and the active line; a
+  style setting written (a slider dragged) leaves the lines and the line on screen as they are.
+  `dropCues()` leaves the index alone (it belongs to the deck, not the video).
+- Tests: `addon/tests/content.test.js`: `wordColoursOn`, `renderText` plain and with either or
+  both attributes in spans holding text nodes, `setSubtitle` / `transcriptLine` drawing through
+  it, the refresh redrawing only the changed lines, a word setting taking the colours off in
+  place, a style write leaving the lines alone, one card reviewed matching only the lines holding
+  the word or its stem (`countingWords()` wraps `markWords` / `wordStarts`; `_loadContent.js`
+  declares words.js's export with `var` for that), a hidden transcript's cue pinning nothing, the
+  poll's conditions and answers, the deck change, the overtaken answer, the mine re-ask, the
+  master switch off sending nothing, a new server session keeping the index.
+
+### The popup (`addon/popup.html` / `popup.js`)
+
+The "Word colours" section holds `#cardStatus`, the `#cardStatusDeck` select (first option value
+`""`), `#deck-hint`, `#pitchAccent` and the two legends (swatches in `popup.css`); `#ankiPitchField`
+sits in the "Anki, clips and server" drawer after the word field. `renderDeckOptions(decks,
+seen, current)` keeps the automatic entry first (`automaticDeckText(seen)`: `Automatic: <deck>`
+once Anki has been asked, `Automatic: no card mined yet` for `seen` null, and the page's own
+`Automatic: the deck of the last mined card` for `seen` undefined, before any ask or after a
+message that failed outright), then one option per name, sorted, the stored value kept as an
+option even when unlisted (a select drops a value without an option, and the setting would go
+with it at the next save); `init()` calls it before the `setField` loop. `refreshDecks()` sends
+`{type: "ankiDecks"}` (answers numbered by `decksAsked`, an overtaken one dropped; `decksOk` true
+for a listed set, false for a failure, null while an ask is out) and paints `#deck-hint` only
+while a checkbox is on: the error (warn) when not ok, `No deck named <name> in Anki` (error) for
+an unlisted manual deck, nothing for a listed one, `The last mined card's deck <seen> is no
+longer in Anki; mine a card, or choose a deck` (warn), `Looking at <seen>`, or `Automatic: no
+card mined yet — mine one, or choose a deck` (warn). Anki is asked from `init()` only when
+`cardStatus || pitchAccent` is stored on (the first ask brings up AnkiConnect's dialog, which a
+viewer who never uses the feature must not meet), from `onChange` after the debounced save when
+a checkbox was turned on or `ankiUrl` edited (`decksCheckPending = "feature"`, only when a
+feature is on in the form the save wrote) or the deck select changed (`"deck"`, always), and,
+while the newest answer failed and a feature is on, again every `DECKS_RETRY_MS` (30 s) from a
+clock `init()` sets beside the health refresh (`retryDecks()`; a good answer is never re-asked by
+the clock, and the clock, like the health poll, ticks only while the page is visible,
+`document.hidden`), because the options page (`options_ui.page` = popup.html) lives for hours.
+The save clears the hint when both features are off. A deck, a checkbox or `ankiUrl` written by
+the other copy of the form (the options page and the toolbar popup) lands through
+`onStorageChanged()`, which rebuilds the deck option from Anki's last list
+(`renderDeckOptions(decksListed, decksSeen, value)`: a select shows nothing for a value without
+an option) and asks Anki by the `onChange` rules less the save (`landed`: a deck, a feature that
+landed checked, or the URL while a feature is on; a feature landing unchecked asks nothing; both
+features off clears the hint). Tests:
+`addon/tests/popup.test.js` (the fake document's `options`, `replaceChildren`,
+`createElement("option")`): `renderDeckOptions`, every hint, the overtaken answer, `init()`
+asking only with a feature on and keeping the stored deck, the retry clock and when it stays
+quiet, the asks after a save, both features off clearing the hint, a new AnkiConnect URL, the
+word colours edited in the other copy of the form landing in the select and the hint, and Reset
+style taking a pending deck edit with it, the ask it carried following that one save.
+
 ## How the Start server button works
 
 A WebExtension cannot spawn a process, so the popup's button goes through native messaging:
@@ -443,8 +809,8 @@ already-parsed old `main()` has no register call), so it is the start after the 
 setup, that registers. In `run.cmd` the call sits on its own line before the
 `update.py ... & goto loop` line; in `run.sh` after the update, which rewrites the wrapper.
 `launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
-defaults (`--model large-v3`, `--device auto`), and the popup's model setting only takes effect
-after that default model is loaded.
+defaults (`--model` from `config.json`, else large-v3; `--device auto`), and the popup's model
+setting only takes effect after that default model is loaded.
 `run_check()` in `server.py` loads `native_host.py` by path and prints `status_text()`.
 
 Extension side: the popup's flow is `startFlow.state`, `idle -> requesting -> starting ->
@@ -643,9 +1009,24 @@ Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server w
 (`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
 because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
 `nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
-Native server (Windows): `server\setup.cmd` once, then `server\run.cmd [options]`.
+Native server (Windows): `server\setup.cmd` once (it asks for large-v3 or small and downloads it),
+then `server\run.cmd [options]`.
 Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
-Diagnostics: `server\run.cmd --check` (also says whether the Start button's launcher is registered).
+Diagnostics: `server\run.cmd --check` (also says whether the Start button's launcher is registered
+and which model a bare start runs).
+Model download with a progress bar, what setup runs after the check: `server.py --download-model
+NAME` (`run_download_model()`: validates the name like `/sync` does, resolves the alias,
+`huggingface_hub.snapshot_download()` with faster-whisper's five file patterns and its own tqdm
+bars, refuses a repo without `model.bin`, writes `config.json`; exit 0, else 2, the code the
+launchers end on instead of restarting, so `run.cmd --download-model x` cannot loop; never loads
+a model or takes the instance lock). The download runs on a daemon thread that the main thread
+joins in half-second steps (`wait_for_thread()`): a Ctrl+C inside `snapshot_download()` would
+only surface once its thread pool has finished streaming the current file (model.bin, minutes),
+and Windows delivers the signal only between waits. The interrupt prints one line and ends the
+process with `os._exit(2)`, since a normal exit would wait for that pool's worker at shutdown;
+the partial blob stays as `.incomplete` and the next download resumes it. `setup.cmd`'s pick
+line tests `errorlevel 3` before 2: `choice` answers 255 when it cannot read a key (stdin closed
+or empty), and that takes large-v3 like `setup.sh`'s EOF fallback.
 Start-button launcher, with the venv's Python (`run.cmd` / `setup.cmd` and their `.sh` twins do
 this themselves): `~/.shisu-ko/venv/Scripts/python server/native_host.py --register --verbose`
 (`venv/bin/python` on Linux/macOS), `--status`, `--unregister`.
@@ -673,8 +1054,10 @@ npm run test:browser
 it never maintains a second application copy. `npm run watch` rebuilds after edits; reload the
 unpacked extension in `chrome://extensions` and reload the YouTube tab. The build writes
 versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and development metadata.
-Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `match.js` and `background.js`
-in that order with classic `importScripts`, so settings globals retain the same behavior as Firefox.
+Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `match.js`, `words.js` and
+`background.js` in that order with classic `importScripts`, so settings globals retain the same
+behavior as Firefox; `addon/tests/settings.test.js` and `scripts/tests/build.test.mjs` hold that
+order.
 
 Server check: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`.
 
@@ -689,12 +1072,18 @@ node --test addon/tests/*.test.js
 (`sys.modules` registration before `exec_module`). `addon/tests/_loadBackground.js` runs
 `background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
-`REQUEST_TIMEOUT_MS`) need an extra script run in the same context to expose them, since they
-live in the global lexical environment rather than as globalThis properties. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting its IIFE to return its
-pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, `jumpTarget`, `fontStack`,
-`modelForSync`, ...) and the handlers that drive them (`sync`, `premineNow`, `onKeyDown`,
-`onMineClick`, `discover`, ...), the `browser.storage.onChanged` listener as `onSettingsChanged`
-and the `runtime.onMessage` listener as `onCommand`; it throws if the file's shape changes. Its
+`REQUEST_TIMEOUT_MS`, `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY`) need an extra
+script run in the same context to expose them, since they live in the global lexical environment
+rather than as globalThis properties; it loads `settings.js`, `match.js` and `words.js` first,
+like the manifest. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting
+its IIFE to return its pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, `jumpTarget`,
+`fontStack`, `modelForSync`, ...), the handlers that drive them (`sync`, `premineNow`,
+`onKeyDown`, `onMineClick`, `discover`, ...), the word-colour functions (`renderText`,
+`refreshWordMarks`, `pollWordIndex`, `wordColoursOn`, `syncTick`, `setSubtitle`,
+`transcriptLine`, `mineCue`), the `browser.storage.onChanged` listener as `onSettingsChanged`
+and the `runtime.onMessage` listener as `onCommand`; it throws if the file's shape changes. It
+declares words.js's export with `var` instead of `const`, so a test can put a counting wrapper
+in `sandbox.SHISUKO_WORDS` and see how often content.js asks the matcher. Its
 `stubElement(tag)` keeps a child list (`appendChild`, `insertBefore`, `replaceChildren`, a
 fragment that empties into its target), so a test can count the nodes a render makes and read
 the transcript panel's order back, and a stub canvas yields no blob. `addon/tests/popup.test.js`
@@ -714,6 +1103,11 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 - Windows command lines are limited to about 32 KB. Put long scripts in files instead of
   inline heredocs when running tools from a shell.
 - Hugging Face's xet transfer backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`.
+  It also sets `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the
+  library is imported: the Hub's "set a HF_TOKEN" nag arrives as an `X-HF-Warning` header that
+  huggingface_hub logs through its own bare handler and ours (twice on screen), and Windows
+  without Developer Mode gets a symlink `UserWarning` per model. Download failures still reach
+  the viewer through `friendly_model_error()`.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube. The Docker image
   ships Deno; the native setup relies on what is installed.
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;

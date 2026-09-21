@@ -47,4 +47,16 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   ankiWordField: "",
   clipPaddingMs: 200,
   clipFormat: "mp3",
+  // The note field holding Yomitan's pitch accent ({pitch-accent-categories}, {pitch-accent-positions}
+  // or {pitch-accents}); empty means the first field whose name contains "pitch" or "accent".
+  ankiPitchField: "",
+  // word colours (both off by default: they need Anki running and a deck to look at)
+  // Colour each word of a line by the state of its Anki card: green learned, yellow learning,
+  // orange suspended, red new; a word with no card keeps the text colour.
+  cardStatus: false,
+  // The deck whose cards are looked at; empty means the deck the last mined card went to.
+  cardStatusDeck: "",
+  // An overbar in the colour of the word's pitch accent pattern (blue heiban, red atamadaka,
+  // orange nakadaka, green odaka), read from the card's pitch accent field of the same deck.
+  pitchAccent: false,
 });

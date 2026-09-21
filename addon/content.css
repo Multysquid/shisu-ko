@@ -296,6 +296,67 @@
   padding: 8px;
 }
 
+/* Word colours. renderText() in content.js wraps a word that has an Anki card in an inline span
+   carrying the card's state (data-status) and pitch accent pattern (data-pitch); the rules below
+   colour the text by the one and draw an overbar by the other, on the subtitle and in the
+   transcript alike. The span changes nothing else about the text, so Yomitan scans across it. */
+.shisuko-root {
+  --shisuko-learned: #7ed957;
+  --shisuko-learning: #ffd84d;
+  --shisuko-suspended: #ffa432;
+  --shisuko-new: #ff5c5c;
+  --shisuko-heiban: #4da3ff;
+  --shisuko-atamadaka: #ff5c5c;
+  --shisuko-nakadaka: #ffa432;
+  --shisuko-odaka: #7ed957;
+}
+
+.shisuko-root .shisuko-word {
+  font: inherit;
+  color: inherit;
+  text-shadow: inherit;
+}
+
+.shisuko-root .shisuko-word[data-status="learned"] {
+  color: var(--shisuko-learned);
+}
+
+.shisuko-root .shisuko-word[data-status="learning"] {
+  color: var(--shisuko-learning);
+}
+
+.shisuko-root .shisuko-word[data-status="suspended"] {
+  color: var(--shisuko-suspended);
+}
+
+.shisuko-root .shisuko-word[data-status="new"] {
+  color: var(--shisuko-new);
+}
+
+/* The overbar: Migaku's and Yomitan's colours for the four patterns. skip-ink off keeps the bar
+   whole over glyphs that reach the top of the line. */
+.shisuko-root .shisuko-word[data-pitch] {
+  text-decoration-line: overline;
+  text-decoration-thickness: 0.12em;
+  text-decoration-skip-ink: none;
+}
+
+.shisuko-root .shisuko-word[data-pitch="heiban"] {
+  text-decoration-color: var(--shisuko-heiban);
+}
+
+.shisuko-root .shisuko-word[data-pitch="atamadaka"] {
+  text-decoration-color: var(--shisuko-atamadaka);
+}
+
+.shisuko-root .shisuko-word[data-pitch="nakadaka"] {
+  text-decoration-color: var(--shisuko-nakadaka);
+}
+
+.shisuko-root .shisuko-word[data-pitch="odaka"] {
+  text-decoration-color: var(--shisuko-odaka);
+}
+
 /* Optional: hide YouTube's own caption renderer */
 html.shisuko-hide-native .ytp-caption-window-container {
   display: none !important;

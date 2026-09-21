@@ -45,7 +45,8 @@ Screenshot captions, in order:
 4. Update `release-notes.md`, and `reviewer-notes.md` if permissions or the test steps changed.
    A changed `privacy-policy.md` is pasted into the Developer Hub by hand (the listing's **Edit**
    pages): only the first submission takes it from the file, `publish-addon.cmd` never uploads
-   it. 0.9.0 changes it (the release check against GitHub).
+   it. 0.9.0 changes it (the release check against GitHub), and so does the word colours
+   release (what is read from Anki and stored, and the model download at setup).
 5. Commit and tag (`v<version>`); the reviewer notes point to the tag. Mind that pushing the tag
    runs the release workflow, which signs that version in the *unlisted* channel, and AMO then
    refuses the same number in the listed channel: submit the listing first and tag afterwards

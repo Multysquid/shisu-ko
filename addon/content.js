@@ -52,6 +52,19 @@
   // so it must not happen on the tick that puts the line on screen.
   const PREMINE_CAPTURE_DELAY_MS = 400;
   const ANKI_POLL_LOG_MS = 60000;
+  // The deck index behind the word colours is asked for this often (the background keeps it as
+  // long, so most asks come back "unchanged"); a failing ask is logged this often.
+  const WORD_INDEX_REFRESH_MS = 30000;
+  const WORD_INDEX_LOG_MS = 60000;
+  // A card just mined must show its colour now, not after the interval. The background expires
+  // its index once Anki has told it the card's deck, two answers after the mine, so the next ask
+  // waits this long for that: an ask in between would be answered with the old index.
+  const WORD_INDEX_MINE_DELAY_MS = 1500;
+  // The settings the deck index depends on: a change to any of them starts it over.
+  const WORD_SETTINGS = ["cardStatus", "pitchAccent", "cardStatusDeck", "ankiPitchField", "ankiWordField"];
+  // A refreshed index that differs from the last in more words than this is walked line by line
+  // like a new one: matching a line again costs about as much as looking for that many words in it.
+  const WORD_INDEX_PROBE_MAX = 64;
   const HOVER_POLL_INTERVAL_MS = 300;
   const SENTENCE_MAX_GAP_S = 1.5; // cues of one segment further apart than this are not one sentence // a card is most likely to appear while a subtitle is hovered
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
@@ -137,6 +150,15 @@
     transcriptRebuild: true, // every line anew (a new panel, dropped cues); else the new cues sort in
     transcriptAppendFrom: null, // index of the first unrendered cue when only appends are pending
     lineById: new Map(), // cue id -> transcript line element, maintained on every render
+    // Transcript line -> its text span, and any element -> what renderText() last drew in it (see
+    // drawKey): a refresh leaves a line alone when it would look the same, so a card reviewed in
+    // Anki does not replace the nodes of every other line (nor what Yomitan holds on them).
+    lineTexts: new WeakMap(),
+    drawnKeys: new WeakMap(),
+    // Cue -> the runs of its text under the index and colours they were found with (lookOf), and
+    // the text's word boundaries, which no index changes: a panel rebuilt for a new session, and
+    // a line a refresh finds untouched, cost no segmentation and no matching.
+    cueLooks: new WeakMap(),
     transcriptHovered: false,
     hoverPaused: false,
     awaitingPlayerMove: false,
@@ -166,6 +188,26 @@
     ankiPollInFlight: false,
     lastAnkiPollAt: 0, // when the last Anki poll went out: the slow cadence of a long hover pause
     lastAnkiPollLog: 0,
+    // The deck's words as SHISUKO_WORDS.buildIndex() holds them, for the word colours: `at` is the
+    // background's timestamp of the entries it was built from (the `since` of the next ask), `key`
+    // a fingerprint of those entries, so an index refetched unchanged does not redraw the transcript.
+    wordIndex: null,
+    // Moves on with every index put in wordIndex (a new one or none): a cue's look is dated by
+    // this number, not by the index it was found under, so a cue drawn while the transcript was
+    // hidden (whose look no refresh visits) does not keep every index since in memory.
+    wordIndexSerial: 0,
+    wordIndexAt: 0,
+    wordIndexKey: "",
+    wordIndexAskedAt: 0,
+    wordIndexInFlight: false,
+    // Counts the times the index was started over: an ask from before a deck or field change
+    // is answered for the old deck, and that answer is thrown away.
+    wordIndexGeneration: 0,
+    // The index the text on screen was last refreshed with (refreshWordMarks), and its serial:
+    // the next refresh only looks at the lines holding a word the two indexes disagree on.
+    wordIndexDrawn: null,
+    wordIndexDrawnSerial: 0,
+    lastWordIndexLog: 0,
     resizeObserver: null,
     videoListeners: null,
     lastSeekSync: 0,
@@ -359,9 +401,27 @@
       state.modelError = null;
       state.modelLoading = null;
     }
+    // The index belongs to a deck and the fields a word and its pitch are read from; with any of
+    // them changed, or a colour switched, the lines go back to plain text now and the new deck is
+    // asked for at once (never while off, and never from a tab without a video).
+    const wordsChanged = WORD_SETTINGS.some((key) => next[key] !== state.settings[key]);
+    if (wordsChanged) dropWordIndex();
+    // The master switch decides a line's look as well (wordColoursOn). Off, nothing more is done:
+    // the lines keep their colours under the hidden root (setSubtitle(null) clears the screen,
+    // and rewriting every coloured line of a transcript nobody sees, in every tab showing one,
+    // would be work for nothing). On again, the refresh finds the lines drawn under the index it
+    // still holds and touches none of them; only what changed while off (the deck, a colour:
+    // wordsChanged dropped the index and made the lines plain) gets a new draw.
+    const enabledChanged = next.enabled !== state.settings.enabled;
     state.settings = next;
+    // No setting rebuilds the transcript (see applySettings): a style setting (a slider being
+    // dragged in the popup writes several times a second) leaves thousands of lines as they are,
+    // and refreshWordMarks() changes the look of a line where it is, from the runs of the last
+    // draw, so neither switch costs a rebuild or a match.
     applySettings();
     if (modelChanged) sync();
+    if (wordsChanged || (enabledChanged && next.enabled)) refreshWordMarks();
+    if (wordsChanged && wordColoursOn()) pollWordIndex();
   });
 
   // Settings come from storage, so every value is treated as untrusted input before it reaches CSS.
@@ -433,13 +493,18 @@
       updateFontSize();
       if (s.showTranscript) {
         // No line reads a setting (font and colours are custom properties on the root, the size a
-        // style on the panel), so a settings change never rebuilds the panel: the popup saves on
-        // every slider tick, and a rebuild is thousands of nodes in every tab showing it. What
-        // arrived while the panel was hidden is still pending, and this renders it.
+        // style on the panel; what a word's card says is drawn in place, see refreshWordMarks), so
+        // a settings change never rebuilds the panel: the popup saves on every slider tick, and a
+        // rebuild is thousands of nodes in every tab showing it. What arrived while the panel was
+        // hidden is still pending, and this renders it.
         renderTranscript();
-        // highlightTranscript() sits out while the panel is hidden: a panel just shown catches up
-        // on the line that became active meanwhile (the rebuild used to do that on the side).
-        if (shown) highlightTranscript(cueById(state.activeCueId));
+        // highlightTranscript() and refreshWordMarks() sit out while the panel is hidden: a panel
+        // just shown catches up on the line that became active meanwhile and on the deck index
+        // that changed meanwhile (the rebuild used to do both on the side).
+        if (shown) {
+          refreshWordMarks();
+          highlightTranscript(cueById(state.activeCueId));
+        }
       }
     }
     if (!s.enabled) setSubtitle(null);
@@ -740,6 +805,7 @@
     const video = state.video;
     if (!video) return;
     pollForNewCard();
+    pollWordIndex();
     const decision = {
       paused: !!video.paused,
       t: playhead(),
@@ -1064,7 +1130,7 @@
       state.subBox.classList.add("shisuko-hidden");
       state.subText.textContent = "";
     } else {
-      state.subText.textContent = cue.text;
+      renderText(state.subText, cue);
       state.subBox.classList.remove("shisuko-hidden");
       schedulePremine(cue);
     }
@@ -1220,7 +1286,8 @@
     time.title = "Jump here";
     const text = document.createElement("span");
     text.className = "shisuko-linetext";
-    text.textContent = cue.text;
+    renderText(text, cue);
+    state.lineTexts.set(line, text);
     const mine = document.createElement("button");
     mine.type = "button";
     mine.className = "shisuko-line-mine";
@@ -1317,6 +1384,242 @@
     if (!Number.isFinite(start)) return;
     seekPlayhead(start - 0.2);
     state.video.play().catch(() => {});
+  }
+
+  // ------------------------------------------------------------ word colours
+
+  // Either colour needs the deck index; neither may cost anything while the add-on is off.
+  function wordColoursOn() {
+    const s = state.settings;
+    return !!s.enabled && (!!s.cardStatus || !!s.pitchAccent);
+  }
+
+  function dropWordIndex() {
+    state.wordIndex = null;
+    state.wordIndexSerial++;
+    state.wordIndexAt = 0;
+    state.wordIndexKey = "";
+    state.wordIndexAskedAt = 0;
+    state.wordIndexGeneration++;
+  }
+
+  // How a cue's text is to be drawn now: `runs`, a string for plain text and an object for a word
+  // whose card has something to show under the settings of now (null while the whole text is
+  // plain), and `key`, its drawKey(). Found once per cue, index and pair of colours and kept in
+  // cueLooks (the text's word boundaries with it, whatever the index), so that the panel rebuilt
+  // for a style change, or a line the refresh finds untouched, asks the matcher nothing. The
+  // look names the index it was found under by its serial, never by holding it: the index of a
+  // 10k-word deck weighs a megabyte and a hidden transcript's cues are never visited again.
+  function lookOf(cue) {
+    const s = state.settings;
+    const index = state.wordIndex;
+    if (!wordColoursOn() || !index) return { runs: null, key: cue.text };
+    const cardStatus = !!s.cardStatus;
+    const pitchAccent = !!s.pitchAccent;
+    const serial = state.wordIndexSerial;
+    const known = state.cueLooks.get(cue);
+    if (known && known.serial === serial && known.cardStatus === cardStatus && known.pitchAccent === pitchAccent) return known;
+    const starts = known ? known.starts : SHISUKO_WORDS.wordStarts(cue.text);
+    const runs = [];
+    let plain = "";
+    for (const run of SHISUKO_WORDS.markWords(cue.text, index, starts)) {
+      const status = cardStatus && run.status ? run.status : null;
+      const pitch = pitchAccent && run.pitch ? run.pitch : null;
+      // A card with nothing to show here is text like any other, joined with its neighbours.
+      if (!status && !pitch) {
+        plain += run.text;
+        continue;
+      }
+      if (plain) runs.push(plain);
+      plain = "";
+      runs.push({ text: run.text, status, pitch });
+    }
+    if (plain) runs.push(plain);
+    const look = { serial, cardStatus, pitchAccent, starts, runs, key: drawKey(cue.text, runs) };
+    state.cueLooks.set(cue, look);
+    return look;
+  }
+
+  // One string per look of a line: the text and where each mark sits in it. Two draws with the
+  // same key put the same nodes in.
+  function drawKey(text, runs) {
+    let key = text;
+    if (!runs) return key;
+    let at = 0;
+    for (const run of runs) {
+      if (typeof run === "string") {
+        at += run.length;
+        continue;
+      }
+      key += `\n${at} ${run.text.length} ${run.status || ""} ${run.pitch || ""}`;
+      at += run.text.length;
+    }
+    return key;
+  }
+
+  function drawRuns(el, text, runs, key) {
+    state.drawnKeys.set(el, key);
+    if (!runs) {
+      el.textContent = text;
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const run of runs) {
+      if (typeof run === "string") {
+        frag.appendChild(document.createTextNode(run));
+        continue;
+      }
+      const span = document.createElement("span");
+      span.className = "shisuko-word";
+      if (run.status) span.dataset.status = run.status;
+      if (run.pitch) span.dataset.pitch = run.pitch;
+      span.textContent = run.text;
+      frag.appendChild(span);
+    }
+    el.replaceChildren(frag);
+  }
+
+  // The one place a cue's text goes into an element, on screen and in the transcript. The text
+  // stays DOM text nodes, which is what Yomitan scans; a word with a card sits in an inline span
+  // that carries what the card says, and content.css colours it. Nothing else is ever put in.
+  function renderText(el, cue) {
+    const look = lookOf(cue);
+    drawRuns(el, cue.text, look.runs, look.key);
+  }
+
+  // Draw the text again only where the index or the settings changed its look. Only for an
+  // element renderText() last wrote: what anything else put in is not on record.
+  function refreshText(el, cue) {
+    const look = lookOf(cue);
+    if (state.drawnKeys.get(el) === look.key) return;
+    drawRuns(el, cue.text, look.runs, look.key);
+  }
+
+  // The strings a line must hold for its runs to differ under `next` from those under `prev`: a
+  // word one index has a card for and the other not, or says something else about, or the stem
+  // it is found by (a conjugated form starts with the stem and so does the word itself, so the
+  // stem alone is looked for). Empty when the two say the same about every word; null when they
+  // differ in more words than WORD_INDEX_PROBE_MAX, where matching the lines again is no dearer.
+  function indexProbes(prev, next) {
+    const changed = new Set();
+    for (const [word, entry] of next.exact) {
+      const was = prev.exact.get(word);
+      if (!was || was.status !== entry.status || was.pitch !== entry.pitch) changed.add(word);
+    }
+    for (const word of prev.exact.keys()) if (!next.exact.has(word)) changed.add(word);
+    if (changed.size > WORD_INDEX_PROBE_MAX) return null;
+    if (!changed.size) return [];
+    const probes = new Set();
+    const stemmed = new Set();
+    for (const stems of [prev.stems, next.stems]) {
+      for (const [stem, list] of stems) {
+        for (const { entry } of list) {
+          if (!changed.has(entry.word)) continue;
+          probes.add(stem);
+          stemmed.add(entry.word);
+        }
+      }
+    }
+    for (const word of changed) if (!stemmed.has(word)) probes.add(word);
+    return [...probes];
+  }
+
+  // Whether a transcript line looks under the index of now as it already does: what it shows are
+  // the runs found under the index of serial `prevSerial` with the colours of now, and none of
+  // `probes` is in its text, so the index of now finds the same runs. Those are then on record
+  // for it too.
+  function sameLook(el, cue, prevSerial, probes) {
+    const look = state.cueLooks.get(cue);
+    const s = state.settings;
+    if (!look || look.serial !== prevSerial || look.cardStatus !== !!s.cardStatus || look.pitchAccent !== !!s.pitchAccent) return false;
+    if (state.drawnKeys.get(el) !== look.key) return false;
+    for (const probe of probes) if (cue.text.includes(probe)) return false;
+    look.serial = state.wordIndexSerial;
+    return true;
+  }
+
+  // Draw the line on screen and the transcript again with the index as it is now. The transcript
+  // is walked line by line and only the lines that would look different are touched, so nothing
+  // scrolls and the thousands of others keep their nodes; and against the index of the last
+  // refresh, a line holding none of the words the two differ on is not even matched again, so a
+  // card reviewed in Anki costs a look at each line's text. Lines still pending (none, as a rule:
+  // a shown panel renders on arrival) go in first, drawn under the index of now.
+  function refreshWordMarks() {
+    const index = state.wordIndex;
+    const prev = state.wordIndexDrawn;
+    const prevSerial = state.wordIndexDrawnSerial;
+    const probes = prev && index && wordColoursOn() ? indexProbes(prev, index) : null;
+    state.wordIndexDrawn = index;
+    state.wordIndexDrawnSerial = state.wordIndexSerial;
+    if (state.activeCueId !== null && state.subText) {
+      const cue = cueById(state.activeCueId);
+      if (cue && !(probes && sameLook(state.subText, cue, prevSerial, probes))) refreshText(state.subText, cue);
+    }
+    if (!state.settings.showTranscript || !state.transcriptList) return;
+    if (state.transcriptDirty) renderTranscript();
+    for (const cue of state.cues) {
+      const text = state.lineTexts.get(state.lineById.get(cue.id));
+      if (!text) continue;
+      if (probes && sameLook(text, cue, prevSerial, probes)) continue;
+      refreshText(text, cue);
+    }
+  }
+
+  // Ask the background for the deck's words. It runs from syncTick(), so a switched-off add-on
+  // and a hidden tab never ask, and neither does a tab without a video (a settings change asks
+  // from every tab, the home page and the player kept off a watch page included): the background
+  // answers from its cache, and "unchanged" when it still holds what this tab was last given.
+  // A tab standing by for another (state.standby) asks like any other: the index is the deck's,
+  // read from Anki through the background's one cache, and the election is about the server,
+  // which this never reaches; the standby tab keeps its lines on screen, and a card reviewed
+  // must recolour them there too, for the price of one cache lookup every half minute.
+  async function pollWordIndex() {
+    if (!wordColoursOn() || !state.video || !state.videoId || state.wordIndexInFlight) return;
+    if (document.visibilityState !== "visible") return;
+    const now = Date.now();
+    if (now - state.wordIndexAskedAt < WORD_INDEX_REFRESH_MS) return;
+    state.wordIndexAskedAt = now;
+    state.wordIndexInFlight = true;
+    const generation = state.wordIndexGeneration;
+    let res;
+    try {
+      res = await sendMessage({ type: "cardStatus", since: state.wordIndexAt });
+    } finally {
+      state.wordIndexInFlight = false;
+    }
+    // Started over while the ask was out: this answer is about the deck or the fields of before,
+    // and the next tick asks again (the stamp was reset with the index).
+    if (!res || generation !== state.wordIndexGeneration) return;
+    if (!res.ok) {
+      // Turned off since the ask: nothing may stay coloured. Anki closed or a deck gone is
+      // ordinary and gets a debug line, never a toast.
+      if (res.reason === "off") {
+        dropWordIndex();
+        refreshWordMarks();
+      } else {
+        logWordIndexError(res.error || res.reason);
+      }
+      return;
+    }
+    if (res.unchanged || !Array.isArray(res.entries)) return;
+    const at = Number(res.at) || 0;
+    if (at === state.wordIndexAt) return;
+    state.wordIndexAt = at;
+    // The background refetches the deck every half minute and stamps it anew, yet the words rarely
+    // change; a transcript of thousands of lines is only rebuilt when they did.
+    const key = JSON.stringify(res.entries);
+    if (key === state.wordIndexKey && state.wordIndex) return;
+    state.wordIndex = SHISUKO_WORDS.buildIndex(res.entries);
+    state.wordIndexSerial++;
+    state.wordIndexKey = key;
+    refreshWordMarks();
+  }
+
+  function logWordIndexError(error) {
+    const now = Date.now();
+    if (now - state.lastWordIndexLog < WORD_INDEX_LOG_MS) return;
+    state.lastWordIndexLog = now;
+    console.debug("Shisu-ko: word colours:", error || "unknown error");
   }
 
   // ------------------------------------------------------------ sentence mining
@@ -1700,8 +2003,12 @@
         noteId: opts.noteId,
         auto: !!opts.auto,
       });
-      if (result && result.ok) showToast(result.message || "Mined", result.warning ? "warn" : "ok");
-      else if (result && result.mismatch) showToast(result.error, "warn", 6000);
+      if (result && result.ok) {
+        showToast(result.message || "Mined", result.warning ? "warn" : "ok");
+        // The card the word colours are about was just made (or, with no deck chosen, the first
+        // one, which tells the background the deck): the next ask goes out soon, not at the interval.
+        state.wordIndexAskedAt = Date.now() - WORD_INDEX_REFRESH_MS + WORD_INDEX_MINE_DELAY_MS;
+      } else if (result && result.mismatch) showToast(result.error, "warn", 6000);
       else showToast("Mining failed: " + ((result && result.error) || "unknown error"), "error", 6000);
     } catch (err) {
       showToast("Mining failed: " + String((err && err.message) || err), "error", 6000);

@@ -28,7 +28,8 @@ function cssDeclarations(selector) {
 // one plain object per element popup.html declares, with the tag, the type and the range bounds
 // off the markup, the members the form, the status line and the hints touch, and the listeners
 // init() registers, which a test fires with dispatch(). An id popup.js asks for that the markup
-// lacks gets a bare element, so no test trips over a missing member.
+// lacks gets a bare element, so no test trips over a missing member. A select's options are its
+// children: renderDeckOptions builds them with createElement and replaceChildren.
 function fakeElement(tag = "div", attrs = {}) {
   const listeners = new Map();
   const styles = new Map();
@@ -79,6 +80,9 @@ function fakeElement(tag = "div", attrs = {}) {
     for (const fn of listeners.get(name) || []) fn({ type: name, target: el });
   };
   el.appendChild = (child) => el.options.push(child);
+  el.replaceChildren = (...children) => {
+    el.options = children;
+  };
   return el;
 }
 
@@ -94,6 +98,7 @@ function elementsFromHtml() {
 // `answer` plays the background: it gets every runtime.sendMessage and returns the reply. The
 // popup runs as Firefox's unless `runtimeURL` says otherwise: the button is for Firefox alone.
 // `opts.installedFonts` names the families the fake canvas measures differently from a generic.
+// The clocks init() sets up never run here; `intervals` holds them ({fn, ms}) for a test to tick.
 function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
   const elements = elementsFromHtml();
   const installed = new Set(opts.installedFonts || []);
@@ -112,7 +117,7 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
     hidden: false,
     activeElement: null,
     getElementById: (id) => {
-      if (!elements.has(id)) elements.set(id, fakeElement());
+      if (!elements.has(id)) elements.set(id, fakeElement(id));
       return elements.get(id);
     },
     createElement: (tag) => {
@@ -152,7 +157,7 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
   const api = new vm.Script(
     "({ startFlow, resumeStart, checkServer, startServerFromPopup, startNotUpHint, START_NOT_UP_HINT, START_ELSEWHERE_HINT, OFFLINE_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, checkForUpdatesFromPopup, openReleasePage, relativeTime, renderStatus," +
-      " UPDATE_LOST_HINT, stillOldHint, init, resetStyle })"
+      " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS })"
   ).runInContext(sandbox);
   // What the background's storage.local write of the settings looks like from the popup.
   const fireStorage = (settings) => {
@@ -364,6 +369,8 @@ function updateBackground(state) {
       case "snoozeUpdate":
         state.snoozed = msg.version;
         return { ok: true };
+      case "ankiDecks":
+        return typeof state.anki === "function" ? state.anki() : state.anki || decksOffline(null);
       default:
         return offline;
     }
@@ -1009,7 +1016,7 @@ test("the font probe runs once per name, and a slider drag redraws neither the s
 test("the poll skips a page out of view and catches up when it is back", async () => {
   const state = { health: offline, settings: {} };
   const { popup, bg } = await openForm(state);
-  assert.equal(popup.intervals.length, 1);
+  assert.equal(popup.intervals.length, 2, "the health refresh and the deck retry");
   assert.equal(popup.intervals[0].ms, 2000);
   const polls = () => bg.sent.filter((m) => m.type === "api" && m.path === "/health").length;
   const before = polls();
@@ -1141,4 +1148,588 @@ test("relativeTime rounds to the unit that says something", () => {
   assert.equal(relativeTime(now - 24 * 3600000, now), "1 day ago");
   assert.equal(relativeTime(now - 3 * 24 * 3600000, now), "3 days ago");
   assert.equal(relativeTime(now + 5000, now), "just now", "a clock that went backwards is not the future");
+});
+
+// ------------------------------------------------------------------ word colours
+
+// Anki's decks as the background lists them (sorted there; the popup sorts again, so the order
+// here does not matter) and the answers the ankiDecks message can carry.
+const DECKS = ["Vocab", "Default", "Mining::JP"];
+const decksOk = (seen) => ({ ok: true, decks: DECKS, seen });
+const decksOffline = (seen) => ({ ok: false, reason: "offline", error: "Anki is not running or AnkiConnect is not installed", seen });
+const optionsOf = (select) => select.options.map((o) => [o.value, o.textContent]);
+
+// A popup with a background that answers getSettings from `settings` over the defaults and
+// ankiDecks from `anki` (a value or a function; a test that changes the answer as it goes hands
+// in a function reading its own variable, which may hold a function in turn), recording every
+// message type and every settings patch saved.
+function deckPopup(settings, anki) {
+  const sent = [];
+  const saves = [];
+  const answer = (value) => (typeof value === "function" ? answer(value()) : value);
+  const popup = loadPopup((msg) => {
+    sent.push(msg.type);
+    if (msg.type === "getSettings") return Object.assign({}, DEFAULTS, settings);
+    if (msg.type === "ankiDecks") return answer(anki);
+    // The patches come out of the sandbox; a JSON round trip makes them deepEqual's own objects.
+    if (msg.type === "saveSettings") saves.push(JSON.parse(JSON.stringify(msg.settings)));
+    if (msg.type === "startServerStatus") return { starting: false };
+    return offline;
+  });
+  return { popup, sent, saves };
+}
+// The debounced save is 150 ms behind the edit.
+const saved = () => new Promise((resolve) => setTimeout(resolve, 250));
+
+test("renderDeckOptions keeps the automatic entry first, names the seen deck in it, and keeps the stored deck even when unlisted", () => {
+  const { popup } = deckPopup({}, null);
+  const select = popup.el("cardStatusDeck");
+  popup.renderDeckOptions(DECKS, null, "");
+  const auto = select.options[0];
+  assert.deepEqual(optionsOf(select), [["", "Automatic: no card mined yet"], ["Default", "Default"], ["Mining::JP", "Mining::JP"], ["Vocab", "Vocab"]]);
+  assert.equal(select.value, "");
+  popup.renderDeckOptions(DECKS, "Mining::JP", "Vocab");
+  assert.equal(select.options[0], auto, "the automatic option is the same element");
+  assert.equal(auto.textContent, "Automatic: Mining::JP");
+  assert.equal(auto.value, "");
+  assert.equal(select.value, "Vocab");
+  // Anki offline: no list, and the stored deck still has its option, so the value survives.
+  popup.renderDeckOptions([], null, "Old::Deck");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: no card mined yet"], ["Old::Deck", "Old::Deck"]]);
+  assert.equal(select.value, "Old::Deck");
+  // A stored deck Anki does not list sorts in among the others, once.
+  popup.renderDeckOptions(DECKS, "Vocab", "Gone");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: Vocab"], ["Default", "Default"], ["Gone", "Gone"], ["Mining::JP", "Mining::JP"], ["Vocab", "Vocab"]]);
+  assert.equal(select.value, "Gone");
+  popup.renderDeckOptions(DECKS, "Vocab", "Vocab");
+  assert.equal(optionsOf(select).filter(([value]) => value === "Vocab").length, 1);
+  // Before Anki was asked the entry keeps the page's description; junk in the list is dropped.
+  popup.renderDeckOptions(["Vocab", 5, null, ""], undefined, "");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: the deck of the last mined card"], ["Vocab", "Vocab"]]);
+});
+
+test("refreshDecks paints the hint: automatic with and without a seen deck, a manual deck listed or not, Anki offline", async () => {
+  let anki = decksOk(null);
+  const { popup, sent } = deckPopup({}, () => anki);
+  const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
+  popup.el("cardStatus").checked = true; // the hint is about the colours: painted while a feature is on
+  await popup.refreshDecks();
+  assert.deepEqual(sent, ["ankiDecks"]);
+  assert.equal(hint.textContent, popup.DECK_NONE_HINT);
+  assert.equal(hint.className, "hint warn");
+  assert.equal(select.options[0].textContent, "Automatic: no card mined yet");
+  anki = decksOk("Mining::JP");
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  assert.equal(hint.className, "hint");
+  assert.equal(select.options[0].textContent, "Automatic: Mining::JP");
+  // The deck of the last mined card was renamed or deleted since: Anki no longer lists it, and
+  // the background's searches in it find nothing, so "Looking at" would be a false promise.
+  anki = decksOk("Mining");
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "The last mined card's deck Mining is no longer in Anki; mine a card, or choose a deck");
+  assert.equal(hint.className, "hint warn");
+  assert.equal(select.options[0].textContent, "Automatic: Mining");
+  assert.equal(select.value, "");
+  // A manual deck that Anki lists needs no hint; one it does not list is an error.
+  select.value = "Vocab";
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "");
+  assert.equal(hint.className, "hint");
+  assert.equal(select.value, "Vocab");
+  select.value = "Gone";
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "No deck named Gone in Anki");
+  assert.equal(hint.className, "hint error");
+  assert.equal(select.value, "Gone", "the stored deck is kept for Anki to come back with it");
+  // Anki offline: its reason on the hint, the seen deck still named, the stored deck kept.
+  anki = decksOffline("Mining::JP");
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  assert.equal(hint.className, "hint warn");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: Mining::JP"], ["Gone", "Gone"]]);
+  assert.equal(select.value, "Gone");
+  // A message that fails outright reads the same way on the hint; the automatic entry keeps the
+  // page's description, since nobody got as far as the deck of the last mined card.
+  anki = () => {
+    throw new Error("Could not establish connection");
+  };
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "Could not establish connection");
+  assert.equal(hint.className, "hint warn");
+  assert.equal(select.options[0].textContent, "Automatic: the deck of the last mined card");
+  assert.equal(select.value, "Gone");
+});
+
+test("an answer overtaken by a later question does not overwrite the hint", async () => {
+  let releaseFirst;
+  const held = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let asks = 0;
+  const { popup } = deckPopup({}, async () => {
+    if (++asks === 1) {
+      await held;
+      return decksOk("Default");
+    }
+    return decksOk("Vocab");
+  });
+  popup.el("cardStatus").checked = true;
+  const first = popup.refreshDecks();
+  await popup.refreshDecks();
+  assert.equal(popup.el("deck-hint").textContent, "Looking at Vocab");
+  releaseFirst();
+  await first;
+  assert.equal(popup.el("deck-hint").textContent, "Looking at Vocab");
+  assert.equal(popup.el("cardStatusDeck").options[0].textContent, "Automatic: Vocab");
+});
+
+test("init asks Anki for its decks only when a word-colour feature is on, and keeps the stored deck either way", async () => {
+  const off = deckPopup({ cardStatus: false, pitchAccent: false, cardStatusDeck: "Mining::JP" }, decksOk("Vocab"));
+  await off.popup.init();
+  await settle();
+  assert.equal(off.sent.includes("ankiDecks"), false, "no ask for a viewer who never uses the feature");
+  assert.equal(off.popup.el("cardStatusDeck").value, "Mining::JP");
+  assert.deepEqual(optionsOf(off.popup.el("cardStatusDeck")), [["", "Automatic: the deck of the last mined card"], ["Mining::JP", "Mining::JP"]]);
+  assert.equal(off.popup.el("deck-hint").textContent, "");
+
+  const status = deckPopup({ cardStatus: true, pitchAccent: false, cardStatusDeck: "" }, decksOk("Vocab"));
+  await status.popup.init();
+  await settle();
+  assert.equal(status.sent.filter((t) => t === "ankiDecks").length, 1);
+  assert.equal(status.popup.el("deck-hint").textContent, "Looking at Vocab");
+  assert.equal(status.popup.el("cardStatusDeck").options[0].textContent, "Automatic: Vocab");
+
+  const pitch = deckPopup({ cardStatus: false, pitchAccent: true, cardStatusDeck: "Mining::JP" }, decksOffline(null));
+  await pitch.popup.init();
+  await settle();
+  assert.equal(pitch.sent.filter((t) => t === "ankiDecks").length, 1);
+  assert.equal(pitch.popup.el("cardStatusDeck").value, "Mining::JP", "an offline Anki does not lose the stored deck");
+  assert.equal(pitch.popup.el("deck-hint").textContent, "Anki is not running or AnkiConnect is not installed");
+});
+
+// The options page is the same popup.html and lives for hours: a verdict from the one ask at
+// init would stay long after Anki was started (or its dialog clicked), while the tab's colours,
+// asking on their own clock, already work. init() sets a slow clock beside the health refresh
+// that asks again while the newest answer failed and a feature is on.
+const retryClock = (popup) => popup.intervals.find((clock) => clock.ms === popup.DECKS_RETRY_MS);
+const asks = (sent) => sent.filter((t) => t === "ankiDecks").length;
+
+test("a failed deck verdict is asked again on the slow clock, so Anki started after the page opened reaches the hint and the list", async () => {
+  let anki = decksOffline(null);
+  const { popup, sent } = deckPopup({ cardStatus: true, pitchAccent: false, cardStatusDeck: "" }, () => anki);
+  const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
+  await popup.init();
+  await settle();
+  assert.equal(asks(sent), 1);
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  assert.equal(popup.DECKS_RETRY_MS, 30000);
+  assert.ok(popup.intervals.some((clock) => clock.ms === popup.HEALTH_REFRESH_MS), "the health refresh is still set up");
+  const clock = retryClock(popup);
+  assert.ok(clock, "init sets the deck retry clock");
+  // Anki still away: asked again, the same verdict painted again.
+  clock.fn();
+  await settle();
+  assert.equal(asks(sent), 2);
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  assert.equal(hint.className, "hint warn");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: no card mined yet"]]);
+  // Its permission dialog up and not clicked yet: the same, for the "denied" verdict.
+  anki = { ok: false, reason: "denied", error: "AnkiConnect denied access. Click Yes in Anki's permission dialog.", seen: null };
+  clock.fn();
+  await settle();
+  assert.equal(asks(sent), 3);
+  assert.equal(hint.textContent, "AnkiConnect denied access. Click Yes in Anki's permission dialog.");
+  // Anki started and Yes clicked since: the next tick brings the list and the deck it looks at.
+  anki = decksOk("Vocab");
+  clock.fn();
+  await settle();
+  assert.equal(asks(sent), 4);
+  assert.equal(hint.textContent, "Looking at Vocab");
+  assert.equal(hint.className, "hint");
+  assert.equal(select.options[0].textContent, "Automatic: Vocab");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Mining::JP", "Vocab"]);
+  // A good answer is left alone: the list changes with the viewer's own edits, which ask on their own.
+  clock.fn();
+  clock.fn();
+  await settle();
+  assert.equal(asks(sent), 4);
+});
+
+// The deck retry follows the health refresh's rule (see "the poll skips a page out of view"): a
+// hint nobody sees is not worth a knock at Anki every thirty seconds, and a page back in view
+// catches up now.
+test("the deck retry skips a page out of view and catches up when it is back", async () => {
+  let anki = decksOffline(null);
+  const { popup, sent } = deckPopup({ cardStatus: true, pitchAccent: false, cardStatusDeck: "" }, () => anki);
+  const hint = popup.el("deck-hint");
+  await popup.init();
+  await settle();
+  assert.equal(asks(sent), 1);
+  const clock = retryClock(popup);
+  popup.document.hidden = true;
+  popup.document.dispatch("visibilitychange");
+  for (let i = 0; i < 10; i++) clock.fn();
+  await settle();
+  assert.equal(asks(sent), 1, "nothing while out of view");
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  // Anki started meanwhile: the return brings the list, without waiting for the clock.
+  anki = decksOk("Vocab");
+  popup.document.hidden = false;
+  popup.document.dispatch("visibilitychange");
+  await settle();
+  assert.equal(asks(sent), 2, "one ask on return");
+  assert.equal(hint.textContent, "Looking at Vocab");
+  // A good verdict is left alone on return too, like on the clock.
+  popup.document.hidden = true;
+  popup.document.dispatch("visibilitychange");
+  popup.document.hidden = false;
+  popup.document.dispatch("visibilitychange");
+  await settle();
+  assert.equal(asks(sent), 2);
+});
+
+test("the deck retry asks nothing with both features off, nothing while an ask is still out, and nothing after a good answer", async () => {
+  let anki = decksOffline(null);
+  const { popup, sent } = deckPopup({ cardStatus: true, pitchAccent: false, cardStatusDeck: "" }, () => anki);
+  const checkbox = popup.el("cardStatus");
+  const hint = popup.el("deck-hint");
+  await popup.init();
+  await settle();
+  const clock = retryClock(popup);
+  assert.equal(asks(sent), 1);
+  // Both features off since the failed verdict: nobody uses the colours, so Anki is not knocked at.
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.equal(hint.textContent, "");
+  clock.fn();
+  await settle();
+  assert.equal(asks(sent), 1, "no ask for a viewer who uses neither feature");
+  // The feature back on: the save asks, and while that ask is out (Anki's dialog up, a slow
+  // Anki) the clock sends no second one.
+  let release;
+  anki = () =>
+    new Promise((resolve) => {
+      release = () => resolve(decksOk("Vocab"));
+    });
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.equal(asks(sent), 2);
+  clock.fn();
+  await settle();
+  assert.equal(asks(sent), 2, "an ask still out is waited for, not doubled");
+  release();
+  await settle();
+  assert.equal(hint.textContent, "Looking at Vocab");
+  clock.fn();
+  await settle();
+  assert.equal(asks(sent), 2, "a good answer is left alone");
+  // A popup opened with both features off never asked: the clock does not start asking either.
+  const off = deckPopup({ cardStatus: false, pitchAccent: false, cardStatusDeck: "" }, decksOffline(null));
+  await off.popup.init();
+  await settle();
+  retryClock(off.popup).fn();
+  await settle();
+  assert.equal(asks(off.sent), 0);
+});
+
+test("a checkbox turned on or another deck asks Anki after the save; a checkbox turned off does not", async () => {
+  const { popup, sent } = deckPopup({}, decksOk(null));
+  const checkbox = popup.el("cardStatus");
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks"]);
+  assert.equal(popup.el("deck-hint").textContent, popup.DECK_NONE_HINT);
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks", "saveSettings"]);
+  assert.equal(popup.el("deck-hint").textContent, "", "nothing to mine or choose a deck for once both features are off");
+  const pitch = popup.el("pitchAccent");
+  pitch.checked = true;
+  popup.onChange({ target: pitch });
+  await saved();
+  assert.deepEqual(sent.slice(3), ["saveSettings", "ankiDecks"]);
+  assert.equal(popup.el("deck-hint").textContent, popup.DECK_NONE_HINT);
+  const select = popup.el("cardStatusDeck");
+  select.value = "Vocab";
+  popup.onChange({ target: select });
+  await saved();
+  assert.deepEqual(sent.slice(5), ["saveSettings", "ankiDecks"]);
+  assert.equal(popup.el("deck-hint").textContent, "");
+  assert.equal(select.value, "Vocab");
+  // Any other control saves and asks nothing.
+  popup.onChange({ target: popup.el("pauseOnHover") });
+  await saved();
+  assert.deepEqual(sent.slice(7), ["saveSettings"]);
+});
+
+// A double click on a checkbox lands both edits inside the 150 ms debounce: the save writes the
+// feature off, and an ask then would bring up AnkiConnect's permission dialog for a viewer who
+// uses neither feature, with a "no card mined yet" hint under a feature that is off.
+test("a feature turned on and off again inside the debounce is saved off and asks Anki nothing", async () => {
+  const { popup, sent, saves } = deckPopup({}, decksOk(null));
+  const checkbox = popup.el("cardStatus");
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings"]);
+  assert.deepEqual(saves[0], { cardStatus: false }, "the save carries the edited field alone");
+  assert.equal(popup.el("deck-hint").textContent, "");
+  // The same double click with the other feature on: the colours are in use, so the ask stands.
+  // That feature is on since an earlier save and not in this patch: the checkboxes are judged
+  // from the form.
+  const pitch = popup.el("pitchAccent");
+  pitch.checked = true;
+  popup.onChange({ target: pitch });
+  await saved();
+  assert.deepEqual(sent.slice(1), ["saveSettings", "ankiDecks"]);
+  assert.deepEqual(saves[1], { pitchAccent: true });
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent.slice(3), ["saveSettings", "ankiDecks"]);
+  assert.deepEqual(saves[2], { cardStatus: false });
+  // A deck change inside the same debounce keeps its ask whatever the checkboxes say.
+  const select = popup.el("cardStatusDeck");
+  select.value = "Vocab";
+  popup.onChange({ target: select });
+  pitch.checked = false;
+  popup.onChange({ target: pitch });
+  await saved();
+  assert.deepEqual(sent.slice(5), ["saveSettings", "ankiDecks"]);
+});
+
+// The hint is about the colours: with both features off it says nothing. The options page is the
+// same popup.html and lives on, so a verdict left behind by an untick would stay for good, and
+// nudge the viewer to mine or choose a deck for features they just switched off.
+test("both features off leave no deck hint: an untick clears the last verdict, and an answer landing after it paints none", async () => {
+  let anki = decksOk(null);
+  const { popup, sent } = deckPopup({}, () => anki);
+  const checkbox = popup.el("cardStatus");
+  const pitch = popup.el("pitchAccent");
+  const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
+  // A stored deck Anki does not list: the error, then nothing once the feature is off.
+  select.value = "Gone";
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.equal(hint.textContent, "No deck named Gone in Anki");
+  assert.equal(hint.className, "hint error");
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks", "saveSettings"]);
+  assert.equal(hint.textContent, "");
+  assert.equal(hint.className, "hint");
+  assert.equal(select.value, "Gone", "the stored deck is kept");
+  // The other feature keeps the hint: one of the two is enough for the colours to matter.
+  select.value = "";
+  pitch.checked = true;
+  popup.onChange({ target: pitch });
+  await saved();
+  assert.equal(hint.textContent, popup.DECK_NONE_HINT);
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  await saved();
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.equal(hint.textContent, popup.DECK_NONE_HINT, "pitch accent is still on");
+  pitch.checked = false;
+  popup.onChange({ target: pitch });
+  await saved();
+  assert.equal(hint.textContent, "");
+  // An ask out while the viewer unticks: Anki's answer (the dialog clicked later, a slow list)
+  // lands under two off features and paints nothing, though the list is worth keeping.
+  let release;
+  anki = () =>
+    new Promise((resolve) => {
+      release = () => resolve(decksOk("Vocab"));
+    });
+  pitch.checked = true;
+  popup.onChange({ target: pitch });
+  await saved();
+  assert.equal(sent.filter((t) => t === "ankiDecks").length, 4);
+  assert.equal(hint.textContent, "", "no answer yet");
+  pitch.checked = false;
+  popup.onChange({ target: pitch });
+  await saved();
+  release();
+  await settle();
+  assert.equal(hint.textContent, "");
+  assert.equal(hint.className, "hint");
+  assert.equal(select.options[0].textContent, "Automatic: Vocab");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Mining::JP", "Vocab"]);
+});
+
+// The deck list and the hint describe one Anki: another AnkiConnect URL is another Anki (a second
+// profile, another port), whose decks the background's asks now go to. Both features off, nothing
+// is asked: a viewer who never uses the colours meets no permission dialog for a URL edit.
+test("a new AnkiConnect URL asks that Anki for its decks while a feature is on, and nothing while both are off", async () => {
+  let anki = decksOk("Mining::JP");
+  const { popup, sent, saves } = deckPopup({}, () => anki);
+  const url = popup.el("ankiUrl");
+  const hint = popup.el("deck-hint");
+  url.value = "http://127.0.0.1:8766";
+  popup.onChange({ target: url });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings"]);
+  assert.equal(saves[0].ankiUrl, "http://127.0.0.1:8766");
+  assert.equal(hint.textContent, "");
+  const checkbox = popup.el("cardStatus");
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent.slice(1), ["saveSettings", "ankiDecks"]);
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  // The second Anki is not there: the hint says so instead of naming the first one's deck.
+  anki = decksOffline("Mining::JP");
+  url.value = "http://127.0.0.1:8767";
+  popup.onChange({ target: url });
+  await saved();
+  assert.deepEqual(sent.slice(3), ["saveSettings", "ankiDecks"]);
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  // A deck change in the same debounce keeps its own ask; a URL edit with the feature unticked
+  // in the same debounce asks nothing.
+  anki = decksOk("Mining::JP");
+  const select = popup.el("cardStatusDeck");
+  select.value = "Vocab";
+  popup.onChange({ target: select });
+  url.value = "http://127.0.0.1:8765";
+  popup.onChange({ target: url });
+  await saved();
+  assert.deepEqual(sent.slice(5), ["saveSettings", "ankiDecks"]);
+  assert.equal(hint.textContent, "");
+  url.value = "http://127.0.0.1:8766";
+  popup.onChange({ target: url });
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent.slice(7), ["saveSettings"]);
+});
+
+// Reset style takes an edit still on its way with it (see "Reset style takes an edit still on its
+// way with it"): the deck ask that edit carried follows that one save, the way the server check
+// does, and does not survive to the next, unrelated edit.
+test("Reset style takes a pending deck edit with it, and the ask it carried follows that one save", async () => {
+  const { popup, sent, saves } = deckPopup({}, decksOk(null));
+  const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
+  select.value = "Vocab";
+  popup.onChange({ target: select });
+  await popup.resetStyle();
+  await settle();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks"], "one save, the deck edit folded into the reset's, and the ask it carried");
+  assert.equal(saves[0].cardStatusDeck, "Vocab");
+  assert.equal(saves[0].subPosition, DEFAULTS.subPosition);
+  assert.equal(select.value, "Vocab");
+  assert.equal(hint.textContent, "", "both features off: no hint, though the list was asked for");
+  assert.equal(select.options[0].textContent, "Automatic: no card mined yet");
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks"], "the debounced save was folded in, not run as well");
+  popup.onChange({ target: popup.el("pauseOnHover") });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks", "saveSettings"], "an unrelated edit asks nothing");
+  // A feature ticked and the style reset in the same breath: the tick is saved, and the ask stands.
+  const checkbox = popup.el("cardStatus");
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  await popup.resetStyle();
+  await settle();
+  assert.deepEqual(sent.slice(3), ["saveSettings", "ankiDecks"]);
+  assert.equal(saves[2].cardStatus, true);
+  assert.equal(hint.textContent, "", "Vocab is listed: nothing to say");
+  popup.onChange({ target: popup.el("pauseOnHover") });
+  await saved();
+  assert.deepEqual(sent.slice(5), ["saveSettings"]);
+});
+
+// The options page and the toolbar popup are two copies of this form. A deck chosen in one has no
+// option in the other until Anki lists it there, and a select given a value it has no option for
+// shows none: the option is built from Anki's last answer here. The hint then follows the deck,
+// the features and the AnkiConnect URL by the rules of an edit made here (onChange), less the
+// save, which is the other copy's; the popup's own save, echoed, asks nothing more.
+test("the word colours edited in the other copy of the form land in the select and the hint", async () => {
+  const state = { health: offline, settings: {}, anki: decksOk("Mining::JP") };
+  const { popup, bg, elsewhere } = await openForm(state);
+  const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
+  const asked = () => bg.types().filter((t) => t === "ankiDecks").length;
+  assert.equal(asked(), 0, "both features off: nothing asked at init");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: the deck of the last mined card"]]);
+  // A deck chosen elsewhere with both features off: it shows at once, and Anki is asked for its
+  // standing, as for a deck chosen here; the hint says nothing under two off features.
+  elsewhere({ cardStatusDeck: "Vocab" });
+  assert.equal(select.value, "Vocab");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: the deck of the last mined card"], ["Vocab", "Vocab"]]);
+  assert.equal(asked(), 1);
+  await settle();
+  assert.equal(hint.textContent, "");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Mining::JP", "Vocab"]);
+  // A feature turned on elsewhere: the hint is asked for.
+  elsewhere({ cardStatus: true });
+  assert.equal(popup.el("cardStatus").checked, true);
+  assert.equal(asked(), 2);
+  await settle();
+  assert.equal(hint.textContent, "", "a listed manual deck needs no hint");
+  // A deck Anki does not list: its option is built from Anki's last list, and the hint says so.
+  elsewhere({ cardStatusDeck: "Gone" });
+  assert.equal(select.value, "Gone");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Gone", "Mining::JP", "Vocab"]);
+  assert.equal(asked(), 3);
+  await settle();
+  assert.equal(hint.textContent, "No deck named Gone in Anki");
+  assert.equal(hint.className, "hint error");
+  // Back to automatic elsewhere.
+  elsewhere({ cardStatusDeck: "" });
+  assert.equal(select.value, "");
+  assert.equal(asked(), 4);
+  await settle();
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Mining::JP", "Vocab"], "the unlisted deck went with its choice");
+  // Another AnkiConnect URL elsewhere while a feature is on: that Anki is asked.
+  state.anki = decksOffline("Mining::JP");
+  elsewhere({ ankiUrl: "http://127.0.0.1:8766" });
+  assert.equal(asked(), 5);
+  await settle();
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  // The feature turned off elsewhere: the hint goes, and nothing is asked.
+  elsewhere({ cardStatus: false });
+  assert.equal(asked(), 5);
+  assert.equal(hint.textContent, "");
+  // A change elsewhere to anything else asks nothing, and neither does the echo of this form's
+  // own edit: its save asked already.
+  elsewhere({ fontScale: 1.2, ankiSentenceField: "Sentence" });
+  assert.equal(asked(), 5);
+  state.anki = decksOk("Mining::JP");
+  popup.el("pitchAccent").checked = true;
+  popup.el("pitchAccent").dispatch("input");
+  await wait(200);
+  await settle();
+  assert.equal(state.settings.pitchAccent, true);
+  assert.equal(asked(), 6, "once, from the save");
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  // The other feature turned on elsewhere asks, as here; turned off again with pitch accent still
+  // on, it asks nothing, as an untick made here does not: the hint has nothing new to say.
+  elsewhere({ cardStatus: true });
+  assert.equal(asked(), 7);
+  await settle();
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  elsewhere({ cardStatus: false });
+  assert.equal(asked(), 7, "an untick with the other feature on asks nothing");
+  assert.equal(hint.textContent, "Looking at Mining::JP", "pitch accent is still on");
+  elsewhere({ pitchAccent: false });
+  assert.equal(asked(), 7);
+  assert.equal(hint.textContent, "", "both off: the hint goes without an ask");
 });
