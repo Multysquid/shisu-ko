@@ -328,6 +328,18 @@ def test_build_window_cues_uses_the_phrase_after_a_short_pause_token():
     assert cues[0]["end"] < cues[1]["start"]
 
 
+def test_build_window_cues_preserves_the_first_segment_id_after_a_later_merge():
+    ws_a = words([("こんにちは", 0.0, 1.0)])
+    ws_b = words([("電車で行きます", 1.2, 2.0), ("明日は晴れます", 4.0, 5.0),
+                  ("散歩します", 7.0, 8.0)])
+    segs = [seg("こんにちは", 0.0, 1.0, ws_a),
+            seg("電車で行きます明日は晴れます散歩します", 1.2, 8.0, ws_b)]
+    cues, _ = server.build_window_cues(segs, 0.0, [[0.0, 2.0], [4.0, 5.0], [7.0, 8.0]],
+                                       limits(max_chars=18), 0)
+    assert [cue["text"] for cue in cues] == ["こんにちは電車で行きます", "明日は晴れます\n散歩します"]
+    assert [cue["seg"] for cue in cues] == [0, 0]
+
+
 def test_build_window_cues_applies_the_window_offset():
     ws = words([("こんにちは", 1.0, 2.0), ("。", 2.0, 2.1)])
     segs = [seg("こんにちは。", 1.0, 2.1, ws)]
@@ -546,6 +558,171 @@ def test_split_for_break_gives_up_when_no_position_is_legal():
     buf = words([("言", 0.0, 1.0), ("ってた", 1.0, 2.0)])
     head, tail = server.split_for_break(buf, limits(), "って")
     assert head is buf and tail == []
+
+
+# --------------------------------------------------------------------------- seam_for
+
+def test_seam_for_breaks_the_line_after_a_sentence_end():
+    assert server.seam_for("これはテストです。", 0.0, limits()) == "\n"
+
+
+def test_seam_for_breaks_the_line_on_a_pause():
+    assert server.seam_for("これはテスト", 0.30, limits()) == "\n"
+
+
+def test_seam_for_joins_mid_sentence():
+    assert server.seam_for("これはテスト", 0.10, limits()) == ""
+
+
+# --------------------------------------------------------------------------- merge_segments
+
+def cue(text: str, start: float, end: float, seg_id: int = 0):
+    return {"start": start, "end": end, "text": text, "seg": seg_id}
+
+
+def test_merge_segments_folds_two_neighbours_into_one():
+    cues = [cue("これはテストです", 0.0, 2.0), cue("電車で行きます", 2.2, 4.0, 1)]
+    out = server.merge_segments(cues, limits())
+    assert len(out) == 1
+    assert out[0]["text"] == "これはテストです電車で行きます"
+    assert (out[0]["start"], out[0]["end"]) == (0.0, 4.0)
+
+
+def test_merge_segments_breaks_the_line_at_a_sentence_boundary():
+    cues = [cue("これはテストです。", 0.0, 2.0), cue("電車で行きます", 2.2, 4.0, 1)]
+    out = server.merge_segments(cues, limits())
+    assert [c["text"] for c in out] == ["これはテストです。\n電車で行きます"]
+
+
+def test_merge_segments_drops_the_seam_rather_than_leave_a_stub():
+    # "はい。" alone is three characters; a second line that short is worse than no line break, and
+    # refusing the merge would leave the stub flashing on its own.
+    cues = [cue("はい。", 0.0, 1.0), cue("電車で行きます", 1.2, 3.0, 1)]
+    out = server.merge_segments(cues, limits())
+    assert [c["text"] for c in out] == ["はい。電車で行きます"]
+
+
+def test_merge_segments_lets_a_short_cue_reach_further():
+    cues = [cue("はい。", 0.0, 1.0), cue("電車で行きます", 2.0, 4.0, 1)]
+    assert len(server.merge_segments(cues, limits())) == 1  # 1.0 s gap, inside cross_reach
+    # Both sides longer than reach_chars, so the same gap is judged by merge_gap instead.
+    long = [cue("これはテストの文章です", 0.0, 2.0), cue("明日は電車で行きますね", 3.0, 4.5, 1)]
+    assert len(server.merge_segments(long, limits())) == 2
+
+
+# --------------------------------------------------------------------------- breaks_word
+
+# may_break() also says no on taste - a piece too short to read, a line opening on a particle -
+# and a merge that overrules its own length budget on taste builds a 41-character line, which it
+# did on the first live run. Only breaks_word(), the evidence, may do that.
+
+def test_breaks_word_reports_a_kinsoku_character():
+    assert server.breaks_word("なんか靴舐めますって言", "ってた") is True
+
+
+def test_breaks_word_reports_okurigana_after_a_kanji():
+    assert server.breaks_word("これやばい、動", "いた動いた") is True
+
+
+def test_breaks_word_ignores_a_long_tail_after_a_kanji():
+    # Okurigana is a few kana; a whole clause after a kanji is the next word, and forcing that
+    # merge past the length budget is what put a 37-character line on screen.
+    assert server.breaks_word("ピンクのも身に付けてるから全然", "こういうピンクとかでもいけちゃいそう") is False
+    assert server.breaks_word("こう、透明感", "むらさきってそう、透明感が出るらしいよ") is False
+    # A kinsoku character is evidence whatever follows it, because nothing can open a line with it.
+    assert server.breaks_word("と思", "っていうことなんですけどねそれで") is True
+
+
+def test_breaks_word_ignores_hiragana_after_katakana():
+    assert server.breaks_word("私がこう自撮りカメラ", "こうやって配信します") is False
+
+
+def test_breaks_word_ignores_a_particle_and_a_short_piece():
+    # Both of these make may_break() say no, and neither is evidence of a broken word.
+    assert server.may_break("コラボ配信しようかということで", "ということで、コラボ配信を") is False
+    assert server.breaks_word("コラボ配信しようかということで", "ということで、コラボ配信を") is False
+    assert server.may_break("押して", "うんでなんかね") is False
+    assert server.breaks_word("押して", "うんでなんかね") is False
+
+
+def test_breaks_word_respects_the_speakers_own_punctuation():
+    assert server.breaks_word("そうですね。", "いきましょう") is False
+    assert server.breaks_word("そうですね、", "いきましょう") is False
+
+
+def test_breaks_word_of_nothing():
+    assert server.breaks_word("", "ってた") is False
+    assert server.breaks_word("言", "") is False
+
+
+def test_merge_segments_does_not_force_a_seam_past_the_character_ceiling():
+    # The live-run regression: a forced merge may repair a word, not build a paragraph.
+    head = cue("あ" * 38, 0.0, 2.0)
+    tail = cue("ってた", 2.2, 3.0, 1)
+    assert server.breaks_word(head["text"], tail["text"]) is True
+    assert len(server.merge_segments([head, tail], limits())) == 2
+    assert len(server.merge_segments([cue("あ" * 30, 0.0, 2.0), cue("ってた", 2.2, 3.0, 1)], limits())) == 1
+
+
+def test_merge_segments_closes_a_seam_inside_a_word_over_the_char_limit():
+    cues = [cue("なんかこれは違うと思", 0.0, 2.0), cue("っております", 2.5, 4.0, 1)]
+    out = server.merge_segments(cues, limits(max_chars=8))
+    assert [c["text"] for c in out] == ["なんかこれは違うと思っております"]
+
+
+def test_merge_segments_does_not_force_a_seam_past_the_ceiling():
+    cues = [cue("なんかこれは違うと思", 0.0, 5.0), cue("っております", 5.5, 10.0, 1)]
+    out = server.merge_segments(cues, limits(max_chars=8))
+    assert len(out) == 2  # 10.0 s would be longer than cross_ceiling
+
+
+def test_merge_segments_does_not_force_a_seam_past_the_reach():
+    cues = [cue("なんかこれは違うと思", 0.0, 2.0), cue("っております", 4.0, 5.5, 1)]
+    out = server.merge_segments(cues, limits(max_chars=8))
+    assert len(out) == 2  # a 2.0 s gap is past cross_reach
+
+
+def test_merge_segments_refuses_a_legal_seam_past_the_character_limit():
+    cues = [cue("これはテストです", 0.0, 2.0), cue("電車で行きます", 2.2, 4.0, 1)]
+    assert len(server.merge_segments(cues, limits(max_chars=10))) == 2
+
+
+def test_merge_segments_refuses_a_legal_seam_past_the_duration_limit():
+    over = limits().max_seconds + 0.5
+    cues = [cue("これはテストです", 0.0, 3.0), cue("電車で行きます", 3.2, over, 1)]
+    assert len(server.merge_segments(cues, limits())) == 2
+    # Just inside it, the same pair merges: the duration is the only thing refusing them.
+    inside = [cue("これはテストです", 0.0, 3.0), cue("電車で行きます", 3.2, limits().max_seconds, 1)]
+    assert len(server.merge_segments(inside, limits())) == 1
+
+
+def test_merge_segments_drops_the_seam_rather_than_make_a_third_line():
+    # Refusing over the line limit would leave the second cue alone on screen; two rows of text
+    # beat an orphan, so the break is what gives way.
+    cues = [cue("あいうえお\nかきくけこ", 0.0, 2.0), cue("電車で行きます", 2.3, 4.0, 1)]
+    out = server.merge_segments(cues, limits())
+    assert [c["text"] for c in out] == ["あいうえお\nかきくけこ電車で行きます"]
+
+
+def test_merge_segments_still_refuses_when_the_plain_join_does_not_fit_either():
+    # Dropping the seam is the only fallback; past max_chars there is nothing left to give up.
+    cues = [cue("あ" * 15 + "\n" + "い" * 14, 0.0, 2.0), cue("電車で行きます", 2.3, 4.0, 1)]
+    assert len(server.merge_segments(cues, limits())) == 2
+
+
+def test_merge_segments_renames_the_segment_id_of_a_swallowed_sibling():
+    # B (seg 6) is merged into A (seg 5), so C, the rest of segment 6, has to follow it or
+    # sentenceForCue() in content.js would rejoin half a sentence.
+    cues = [cue("これはテストです", 0.0, 2.0, 5), cue("電車で行きます", 2.2, 3.0, 6),
+            cue("散歩に行きました", 5.0, 6.5, 6)]
+    out = server.merge_segments(cues, limits())
+    assert [c["text"] for c in out] == ["これはテストです電車で行きます", "散歩に行きました"]
+    assert [c["seg"] for c in out] == [5, 5]
+    assert "_merged" not in out[0]
+
+
+def test_merge_segments_on_empty_input():
+    assert server.merge_segments([], limits()) == []
 
 
 # --------------------------------------------------------------------------- group_words and may_break

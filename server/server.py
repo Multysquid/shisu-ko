@@ -477,6 +477,13 @@ class CueLimits:
     trim_slack: float = 0.15     # edge words whose midpoint is this far outside speech are dropped
     snap_reach: float = 0.60
     lead_out_silence: float = 0.40
+    # Merging across Whisper segments (merge_segments).
+    seam_gap: float = 0.25       # a pause at least this long reads as a new line, not a continuation
+    cross_reach: float = 1.5     # how far a cue too short to read, or a broken word, may reach
+    cross_ceiling: float = 8.5   # even a broken word may not build a cue longer than this
+    cross_chars: int = 34        # nor a wider one than this
+    reach_chars: int = 8         # a cue this short is worth reaching cross_reach for a partner
+    max_lines: int = 2           # the professional ceiling, and what the overlay has room for
 
 
 def cue_limits(args) -> CueLimits:
@@ -513,6 +520,7 @@ NO_LINE_START = set("ぁぃぅぇぉっゃゅょゎァィゥェォッャュョ�
 # Hiragana that attach to what came before: particles and auxiliaries. A line may not open with one.
 PARTICLE_START = set("がをにへはもやかねよぞなのでとんだしてたる")
 MIN_PIECE_CHARS = 4         # nothing shorter is a line of its own, or either side of a break
+OKURIGANA_TAIL_CHARS = 8    # a longer tail after a kanji is a new word, not that kanji's okurigana
 
 
 def is_kanji(ch: str) -> bool:
@@ -521,6 +529,32 @@ def is_kanji(ch: str) -> bool:
 
 def is_hiragana(ch: str) -> bool:
     return "ぁ" <= ch <= "ゟ"
+
+
+def breaks_word(head_text: str, tail_text: str) -> bool:
+    """True when a cut between these two texts lands inside a word, on evidence and not on taste.
+
+    Japanese writes no spaces, so the cheap evidence of a word boundary is the script change. Two
+    signs are unambiguous: the tail opens with a character that can never open a word, or with
+    hiragana directly after a kanji, which is okurigana. That pair is what keeps 言|ってた, 広|い,
+    動|いた and 思|っております off the screen. Katakana is left out deliberately - katakana words are
+    self-delimiting, so the hiragana after カメラ or ポンポン does open a new word.
+
+    Kept apart from may_break() because only this one may overrule a length budget. Refusing a cut
+    the splitter was about to make costs nothing, so may_break() can also say no on taste; a merge
+    that overrules its own limits on taste builds a 41-character line.
+    """
+    head, tail = (head_text or "").strip(), (tail_text or "").strip()
+    if not head or not tail:
+        return False
+    if tail[0] in NO_LINE_START:
+        return True
+    if head[-1] in SENTENCE_END | CLAUSE_BREAK:
+        return False
+    # Okurigana is a few kana on the end of a stem, so only a short tail is evidence of one. A long
+    # one after a kanji is a new word - 全然 || こういうピンクとかでもいけちゃいそう - and forcing
+    # that merge past the length budget builds a line that wraps to three rows.
+    return is_hiragana(tail[0]) and is_kanji(head[-1]) and len(tail) <= OKURIGANA_TAIL_CHARS
 
 
 def may_break(head_text: str, tail_text: str) -> bool:
@@ -645,6 +679,80 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
     return out
 
 
+def seam_for(prev_text: str, gap: float, limits: CueLimits) -> str:
+    """What joins two merged cues: "" inside one sentence, "\\n" where a viewer would see a new line.
+
+    The newline is not decoration. `.shisuko-sub` is `white-space: pre-wrap`, so the overlay renders
+    a second line; Yomitan ends its sentence at a newline, so a lookup in the first half yields the
+    first half; and match.js's TERMINATORS splits on it, so cutFrom() scores the mined sentence
+    exactly instead of falling back to coverage.
+    """
+    if prev_text and prev_text[-1] in SENTENCE_END:
+        return "\n"
+    return "\n" if gap >= limits.seam_gap else ""
+
+
+
+def merge_segments(cues, limits: CueLimits) -> list:
+    """Merge neighbouring cues across Whisper segment boundaries.
+
+    build_cues() runs once per segment, so merge_adjacent() only ever sees one segment's cues -
+    and in a two-person conversation 94% of neighbouring cues come from different segments, which
+    left the anti-flicker rule dead code and the median cue seven characters long. Three jobs the
+    within-segment merge never had: a seam Whisper cut inside a word (思 || っております) closes
+    whatever the budget says, since the break would otherwise survive into the overlay; a cue too
+    short to read reaches `cross_reach` instead of `merge_gap` for a partner; and the halves are
+    joined by seam_for().
+    """
+    out: list = []
+    for cue in cues:
+        if out:
+            prev = out[-1]
+            gap = cue["start"] - prev["end"]
+            forced = breaks_word(prev["text"].split("\n")[-1], cue["text"].split("\n")[0])
+            short = min(len(prev["text"]), len(cue["text"])) <= limits.reach_chars
+            seam = "" if forced else seam_for(prev["text"], gap, limits)
+            text = prev["text"] + seam + cue["text"]
+            # The line break is the first thing to give up. A row nobody can read, or a third row,
+            # is worse than no break at all, and refusing the merge over one leaves the stub alone
+            # on screen - which is how 言ってた ended up a four-character cue of its own.
+            if seam == "\n":
+                rows = text.split("\n")
+                if len(rows) > limits.max_lines or min(len(x) for x in rows) < MIN_PIECE_CHARS:
+                    text = prev["text"] + cue["text"]
+            lines = text.split("\n")
+            fits = (len(text) - text.count("\n") <= limits.max_chars
+                    and len(lines) <= limits.max_lines
+                    and max(len(x) for x in lines) <= limits.max_chars
+                    and cue["end"] - prev["start"] <= limits.max_seconds)
+            budget = limits.cross_reach if short else limits.merge_gap
+            if ((gap <= budget and fits)
+                    or (forced and gap <= limits.cross_reach
+                        and cue["end"] - prev["start"] <= limits.cross_ceiling
+                        and len(text) - text.count("\n") <= limits.cross_chars)):
+                prev["end"] = cue["end"]
+                prev["text"] = text
+                prev.setdefault("_merged", [prev["seg"]]).extend(
+                    cue.get("_merged", [cue["seg"]]))
+                continue
+        out.append(dict(cue))
+    # `seg` ties a cue to the sentence mining rejoins (sentenceForCue in content.js). A merged cue
+    # swallowed other segments' cues, so every cue still carrying one of those ids has to follow it
+    # here, or a leftover fragment would rejoin into half a sentence.
+    rename: dict = {}
+    for cue in out:
+        for old in cue.pop("_merged", [])[1:]:
+            if old != cue["seg"]:
+                rename.setdefault(old, cue["seg"])
+    for cue in out:
+        seen = set()
+        while cue["seg"] in rename and cue["seg"] not in seen:
+            seen.add(cue["seg"])
+            cue["seg"] = rename[cue["seg"]]
+    return out
+
+
+
 def normalise_gaps(cues, limits: CueLimits) -> list:
     """Close gaps that are long enough to see but too short to read as deliberate (P1.7)."""
     for prev, nxt in zip(cues, cues[1:]):
@@ -732,10 +840,13 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
         out = [c for c in out if c["start"] < window_end - 0.05]
         for cue in out:
             cue["end"] = min(cue["end"], max(window_end, cue["start"] + limits.hard_min_seconds))
+    # Merge before normalise_gaps, never after: closing every gap to min_gap first would hide the
+    # pause the seam is judged on and make every neighbour look adjacent.
+    out = merge_segments(sorted(out, key=lambda c: c["start"]), limits)
     for cue in out:
         cue["start"] = round(cue["start"], 2)
         cue["end"] = round(max(cue["end"], cue["start"] + 0.05), 2)
-    return normalise_gaps(sorted(out, key=lambda c: c["start"]), limits), seg_id
+    return normalise_gaps(out, limits), seg_id
 
 
 # --------------------------------------------------------------------------- sessions
