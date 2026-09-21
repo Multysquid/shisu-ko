@@ -10,9 +10,26 @@ const ADDON = path.join(__dirname, "..");
 
 // The start flow of popup.js, driven without Firefox. popup.js paints a handful of elements by id;
 // the fake document hands out one plain object per id with the members the status line and the
-// hints touch, and a test reads the badge, the detail and the button back from it.
-function fakeElement() {
-  const el = { textContent: "", className: "", disabled: false, hidden: false, value: "", placeholder: "", style: {}, options: [] };
+// hints touch, and a test reads the badge, the detail and the button back from it. A select's
+// options are its children: renderDeckOptions builds them with createElement and replaceChildren.
+function fakeElement(id) {
+  const el = {
+    id,
+    textContent: "",
+    className: "",
+    disabled: false,
+    hidden: false,
+    value: "",
+    placeholder: "",
+    style: { setProperty: () => {} },
+    children: [],
+    get options() {
+      return this.children;
+    },
+    get firstChild() {
+      return this.children[0] || null;
+    },
+  };
   el.classList = {
     toggle: (name, force) => {
       if (name === "hidden") el.hidden = !!force;
@@ -21,6 +38,10 @@ function fakeElement() {
     remove: () => {},
   };
   el.addEventListener = () => {};
+  el.appendChild = (node) => el.children.push(node);
+  el.replaceChildren = (...nodes) => {
+    el.children = nodes;
+  };
   return el;
 }
 
@@ -31,7 +52,7 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/") {
   const document = {
     addEventListener: () => {},
     getElementById: (id) => {
-      if (!elements.has(id)) elements.set(id, fakeElement());
+      if (!elements.has(id)) elements.set(id, fakeElement(id));
       return elements.get(id);
     },
     createElement: () => fakeElement(),
@@ -56,7 +77,7 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/") {
   const api = new vm.Script(
     "({ startFlow, resumeStart, checkServer, startServerFromPopup, startNotUpHint, START_NOT_UP_HINT, START_ELSEWHERE_HINT, OFFLINE_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, checkForUpdatesFromPopup, openReleasePage, relativeTime, renderStatus," +
-      " UPDATE_LOST_HINT, stillOldHint })"
+      " UPDATE_LOST_HINT, stillOldHint, renderDeckOptions, refreshDecks, DECK_NONE_HINT, init, onChange })"
   ).runInContext(sandbox);
   return { ...api, el: (id) => document.getElementById(id), opened };
 }
@@ -574,4 +595,175 @@ test("relativeTime rounds to the unit that says something", () => {
   assert.equal(relativeTime(now - 24 * 3600000, now), "1 day ago");
   assert.equal(relativeTime(now - 3 * 24 * 3600000, now), "3 days ago");
   assert.equal(relativeTime(now + 5000, now), "just now", "a clock that went backwards is not the future");
+});
+
+// ------------------------------------------------------------------ word colours
+
+// Anki's decks as the background lists them (sorted there; the popup sorts again, so the order
+// here does not matter) and the answers the ankiDecks message can carry.
+const DECKS = ["Vocab", "Default", "Mining::JP"];
+const decksOk = (seen) => ({ ok: true, decks: DECKS, seen });
+const decksOffline = (seen) => ({ ok: false, reason: "offline", error: "Anki is not running or AnkiConnect is not installed", seen });
+const optionsOf = (select) => select.options.map((o) => [o.value, o.textContent]);
+
+// A popup with a background that answers getSettings from `settings` and ankiDecks from `anki`
+// (a value or a function; a test that changes the answer as it goes hands in a function reading
+// its own variable, which may hold a function in turn), recording every message type.
+function deckPopup(settings, anki) {
+  const sent = [];
+  const answer = (value) => (typeof value === "function" ? answer(value()) : value);
+  const popup = loadPopup((msg) => {
+    sent.push(msg.type);
+    if (msg.type === "getSettings") return settings;
+    if (msg.type === "ankiDecks") return answer(anki);
+    if (msg.type === "startServerStatus") return { starting: false };
+    return offline;
+  });
+  return { popup, sent };
+}
+
+test("renderDeckOptions keeps the automatic entry first, names the seen deck in it, and keeps the stored deck even when unlisted", () => {
+  const { popup } = deckPopup({}, null);
+  const select = popup.el("cardStatusDeck");
+  popup.renderDeckOptions(DECKS, null, "");
+  const auto = select.options[0];
+  assert.deepEqual(optionsOf(select), [["", "Automatic: no card mined yet"], ["Default", "Default"], ["Mining::JP", "Mining::JP"], ["Vocab", "Vocab"]]);
+  assert.equal(select.value, "");
+  popup.renderDeckOptions(DECKS, "Mining::JP", "Vocab");
+  assert.equal(select.options[0], auto, "the automatic option is the same element");
+  assert.equal(auto.textContent, "Automatic: Mining::JP");
+  assert.equal(auto.value, "");
+  assert.equal(select.value, "Vocab");
+  // Anki offline: no list, and the stored deck still has its option, so the value survives.
+  popup.renderDeckOptions([], null, "Old::Deck");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: no card mined yet"], ["Old::Deck", "Old::Deck"]]);
+  assert.equal(select.value, "Old::Deck");
+  // A stored deck Anki does not list sorts in among the others, once.
+  popup.renderDeckOptions(DECKS, "Vocab", "Gone");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: Vocab"], ["Default", "Default"], ["Gone", "Gone"], ["Mining::JP", "Mining::JP"], ["Vocab", "Vocab"]]);
+  assert.equal(select.value, "Gone");
+  popup.renderDeckOptions(DECKS, "Vocab", "Vocab");
+  assert.equal(optionsOf(select).filter(([value]) => value === "Vocab").length, 1);
+  // Before Anki was asked the entry keeps the page's description; junk in the list is dropped.
+  popup.renderDeckOptions(["Vocab", 5, null, ""], undefined, "");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: the deck of the last mined card"], ["Vocab", "Vocab"]]);
+});
+
+test("refreshDecks paints the hint: automatic with and without a seen deck, a manual deck listed or not, Anki offline", async () => {
+  let anki = decksOk(null);
+  const { popup, sent } = deckPopup({}, () => anki);
+  const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
+  await popup.refreshDecks();
+  assert.deepEqual(sent, ["ankiDecks"]);
+  assert.equal(hint.textContent, popup.DECK_NONE_HINT);
+  assert.equal(hint.className, "hint warn");
+  assert.equal(select.options[0].textContent, "Automatic: no card mined yet");
+  anki = decksOk("Mining::JP");
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  assert.equal(hint.className, "hint");
+  assert.equal(select.options[0].textContent, "Automatic: Mining::JP");
+  // A manual deck that Anki lists needs no hint; one it does not list is an error.
+  select.value = "Vocab";
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "");
+  assert.equal(hint.className, "hint");
+  assert.equal(select.value, "Vocab");
+  select.value = "Gone";
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "No deck named Gone in Anki");
+  assert.equal(hint.className, "hint error");
+  assert.equal(select.value, "Gone", "the stored deck is kept for Anki to come back with it");
+  // Anki offline: its reason on the hint, the seen deck still named, the stored deck kept.
+  anki = decksOffline("Mining::JP");
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  assert.equal(hint.className, "hint warn");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: Mining::JP"], ["Gone", "Gone"]]);
+  assert.equal(select.value, "Gone");
+  // A message that fails outright reads the same way.
+  anki = () => {
+    throw new Error("Could not establish connection");
+  };
+  await popup.refreshDecks();
+  assert.equal(hint.textContent, "Could not establish connection");
+  assert.equal(hint.className, "hint warn");
+});
+
+test("an answer overtaken by a later question does not overwrite the hint", async () => {
+  let releaseFirst;
+  const held = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let asks = 0;
+  const { popup } = deckPopup({}, async () => {
+    if (++asks === 1) {
+      await held;
+      return decksOk("Old");
+    }
+    return decksOk("New");
+  });
+  const first = popup.refreshDecks();
+  await popup.refreshDecks();
+  assert.equal(popup.el("deck-hint").textContent, "Looking at New");
+  releaseFirst();
+  await first;
+  assert.equal(popup.el("deck-hint").textContent, "Looking at New");
+  assert.equal(popup.el("cardStatusDeck").options[0].textContent, "Automatic: New");
+});
+
+test("init asks Anki for its decks only when a word-colour feature is on, and keeps the stored deck either way", async () => {
+  const off = deckPopup({ cardStatus: false, pitchAccent: false, cardStatusDeck: "Mining::JP" }, decksOk("Vocab"));
+  await off.popup.init();
+  await settle();
+  assert.equal(off.sent.includes("ankiDecks"), false, "no ask for a viewer who never uses the feature");
+  assert.equal(off.popup.el("cardStatusDeck").value, "Mining::JP");
+  assert.deepEqual(optionsOf(off.popup.el("cardStatusDeck")), [["", "Automatic: the deck of the last mined card"], ["Mining::JP", "Mining::JP"]]);
+  assert.equal(off.popup.el("deck-hint").textContent, "");
+
+  const status = deckPopup({ cardStatus: true, pitchAccent: false, cardStatusDeck: "" }, decksOk("Vocab"));
+  await status.popup.init();
+  await settle();
+  assert.equal(status.sent.filter((t) => t === "ankiDecks").length, 1);
+  assert.equal(status.popup.el("deck-hint").textContent, "Looking at Vocab");
+  assert.equal(status.popup.el("cardStatusDeck").options[0].textContent, "Automatic: Vocab");
+
+  const pitch = deckPopup({ cardStatus: false, pitchAccent: true, cardStatusDeck: "Mining::JP" }, decksOffline(null));
+  await pitch.popup.init();
+  await settle();
+  assert.equal(pitch.sent.filter((t) => t === "ankiDecks").length, 1);
+  assert.equal(pitch.popup.el("cardStatusDeck").value, "Mining::JP", "an offline Anki does not lose the stored deck");
+  assert.equal(pitch.popup.el("deck-hint").textContent, "Anki is not running or AnkiConnect is not installed");
+});
+
+test("a checkbox turned on or another deck asks Anki after the save; a checkbox turned off does not", async () => {
+  const { popup, sent } = deckPopup({}, decksOk(null));
+  const saved = () => new Promise((resolve) => setTimeout(resolve, 250));
+  const checkbox = popup.el("cardStatus");
+  checkbox.checked = true;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks"]);
+  assert.equal(popup.el("deck-hint").textContent, popup.DECK_NONE_HINT);
+  checkbox.checked = false;
+  popup.onChange({ target: checkbox });
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks", "saveSettings"]);
+  const pitch = popup.el("pitchAccent");
+  pitch.checked = true;
+  popup.onChange({ target: pitch });
+  await saved();
+  assert.deepEqual(sent.slice(3), ["saveSettings", "ankiDecks"]);
+  const select = popup.el("cardStatusDeck");
+  select.value = "Vocab";
+  popup.onChange({ target: select });
+  await saved();
+  assert.deepEqual(sent.slice(5), ["saveSettings", "ankiDecks"]);
+  assert.equal(popup.el("deck-hint").textContent, "");
+  assert.equal(select.value, "Vocab");
+  // Any other control saves and asks nothing.
+  popup.onChange({ target: popup.el("pauseOnHover") });
+  await saved();
+  assert.deepEqual(sent.slice(7), ["saveSettings"]);
 });

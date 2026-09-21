@@ -72,6 +72,31 @@
       <p class="hint"><kbd>Alt+Shift+M</kbd> mines the current line by hand.</p>
     </section>
 
+    <!-- Both read the cards of one Anki deck: the one the last mined card went to, unless the
+         select names another. popup.js asks Anki for its decks only while one of the two is on
+         (the first ask brings up AnkiConnect's permission dialog) and says under the select which
+         deck is looked at, or what stands in the way. -->
+    <section>
+      <h2>Word colours</h2>
+      <label class="row check">
+        <input type="checkbox" id="cardStatus">
+        <span>Colour words by their Anki card</span>
+      </label>
+      <p class="hint legend"><span class="sw learned"></span>learned <span class="sw learning"></span>learning <span class="sw suspended"></span>suspended <span class="sw new"></span>new · other words keep the text colour</p>
+      <label class="row field">
+        <span class="lead">Deck</span>
+        <select id="cardStatusDeck">
+          <option value="">Automatic: the deck of the last mined card</option>
+        </select>
+      </label>
+      <p class="hint" id="deck-hint"></p>
+      <label class="row check">
+        <input type="checkbox" id="pitchAccent">
+        <span>Overbar by pitch accent</span>
+      </label>
+      <p class="hint legend"><span class="sw heiban"></span>heiban <span class="sw atamadaka"></span>atamadaka <span class="sw nakadaka"></span>nakadaka <span class="sw odaka"></span>odaka · from the card's pitch accent field</p>
+    </section>
+
     <section>
       <h2>Display</h2>
       <label class="row range">
@@ -237,6 +262,10 @@
         <label class="row field">
           <span class="lead">Word field <span class="soft">optional, first field when empty</span></span>
           <input type="text" id="ankiWordField" spellcheck="false">
+        </label>
+        <label class="row field">
+          <span class="lead">Pitch accent field <span class="soft">optional, a field named pitch/accent when empty</span></span>
+          <input type="text" id="ankiPitchField" spellcheck="false">
         </label>
         <label class="row range">
           <span class="lead">Audio padding</span>

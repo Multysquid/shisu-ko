@@ -61,6 +61,10 @@ let saveTimer = null;
 // The debounced save only remembers the last event, so a server-address or model edit leaves a
 // note here that the save flushes: "server" starts the status over, "model" refreshes the hint.
 let serverCheckPending = null;
+// The same for the word colours: a feature just turned on, or another deck chosen, asks Anki
+// for its decks once the save is through.
+let decksCheckPending = false;
+let decksAsked = 0; // questions to Anki so far: an answer overtaken by a later question is dropped
 let health = null; // the last /health answer, null while the server is unreachable
 let healthInFlight = false;
 
@@ -261,6 +265,63 @@ function renderModelField() {
   renderModelHint();
 }
 
+// ------------------------------------------------------------------ word colours
+
+const DECK_NONE_HINT = "Automatic: no card mined yet — mine one, or choose a deck";
+
+// The first entry of the deck select. Before Anki has been asked (`seen` undefined) it keeps the
+// page's description: with both features off nothing is asked, and "no card mined yet" would be a
+// claim nobody checked.
+function automaticDeckText(seen) {
+  if (seen === undefined) return "Automatic: the deck of the last mined card";
+  return seen ? `Automatic: ${seen}` : "Automatic: no card mined yet";
+}
+
+// The deck select: the automatic entry first, then Anki's decks. The stored choice keeps an
+// option even when Anki did not list it (Anki closed, or a deck renamed since): a select drops a
+// value it has no option for, and the setting would go with it at the next save.
+function renderDeckOptions(decks, seen, current) {
+  const select = document.getElementById("cardStatusDeck");
+  const auto = select.options[0] || document.createElement("option");
+  auto.value = "";
+  auto.textContent = automaticDeckText(seen);
+  const value = typeof current === "string" ? current : "";
+  const names = new Set(Array.isArray(decks) ? decks.filter((name) => typeof name === "string" && name) : []);
+  if (value) names.add(value);
+  const options = [...names].sort((a, b) => a.localeCompare(b)).map((name) => {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    return option;
+  });
+  select.replaceChildren(auto, ...options);
+  select.value = value;
+}
+
+// Ask Anki for its decks and say under the select which one the word colours look at, or what
+// stands in the way. Only asked while one of the two features is on, or when one was just turned
+// on or another deck chosen: the first ask brings up AnkiConnect's permission dialog, which a
+// viewer who never uses the feature must not meet. The answer names the deck the last mined card
+// went to as well, which is what "automatic" means; without an answer the select keeps the
+// stored deck and the hint says why the colours will not come.
+async function refreshDecks() {
+  const asked = ++decksAsked;
+  const res = await browser.runtime.sendMessage({ type: "ankiDecks" }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+  if (asked !== decksAsked) return;
+  const select = document.getElementById("cardStatusDeck");
+  const hint = document.getElementById("deck-hint");
+  const ok = !!(res && typeof res === "object" && res.ok);
+  const seen = res && typeof res.seen === "string" && res.seen ? res.seen : null;
+  const decks = ok && Array.isArray(res.decks) ? res.decks : [];
+  const value = select.value;
+  renderDeckOptions(decks, seen, value);
+  if (!ok) setHint(hint, res && typeof res.error === "string" && res.error ? res.error : "Anki gave no answer", "warn");
+  else if (value && !decks.includes(value)) setHint(hint, `No deck named ${value} in Anki`, "error");
+  else if (value) setHint(hint, "", "");
+  else if (seen) setHint(hint, `Looking at ${seen}`, "");
+  else setHint(hint, DECK_NONE_HINT, "warn");
+}
+
 function setField(el, value) {
   if (el.type === "checkbox") el.checked = !!value;
   else el.value = value === undefined || value === null ? "" : value;
@@ -285,12 +346,18 @@ function onChange(ev) {
   // A new server address starts over; a new model name only needs the hint brought up to date.
   if (ev.target.id === "serverUrl") serverCheckPending = "server";
   else if (ev.target.id === "model" && serverCheckPending !== "server") serverCheckPending = "model";
+  // A word-colour feature turned on, or another deck: the ask waits for the save, like the checks.
+  const id = ev.target.id;
+  if (id === "cardStatusDeck" || ((id === "cardStatus" || id === "pitchAccent") && ev.target.checked)) decksCheckPending = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     const check = serverCheckPending;
+    const decks = decksCheckPending;
     serverCheckPending = null;
+    decksCheckPending = false;
     await browser.runtime.sendMessage({ type: "saveSettings", settings: readForm() });
     if (check) checkServer(check === "server");
+    if (decks) refreshDecks();
   }, 150);
 }
 
@@ -704,6 +771,9 @@ async function setupPermissionBanner() {
 async function init() {
   setupPermissionBanner();
   const settings = await browser.runtime.sendMessage({ type: "getSettings" });
+  // The deck select has no option for the stored deck until Anki lists it, and a select given a
+  // value it has no option for shows none; the option comes first, the value after.
+  renderDeckOptions([], undefined, settings.cardStatusDeck);
   for (const key of FIELDS) {
     const el = document.getElementById(key);
     if (el) setField(el, settings[key]);
@@ -727,6 +797,8 @@ async function init() {
   document.getElementById("update-release").addEventListener("click", openReleasePage);
   document.getElementById("check-updates").addEventListener("click", checkForUpdatesFromPopup);
   renderModelHint();
+  // Anki is asked about its decks only for a viewer who uses the word colours (see refreshDecks).
+  if (settings.cardStatus || settings.pitchAccent) refreshDecks();
   await resumeStart();
   // A resumed start or update has already painted its badge; "Checking server" is for a popup that knows nothing.
   checkServer(startFlow.state === "idle" && updateFlow.state === "idle");
