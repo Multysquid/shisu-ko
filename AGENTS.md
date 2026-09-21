@@ -137,8 +137,10 @@ faster-whisper's own word-anomaly score, repetition loops, and a gated phrase bl
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
 following silence, merges fragments below `--min-cue-seconds`, and closes gaps under 0.5 s. Every cue
-carries `seg`, the id of the Whisper segment it came from, so the extension can rejoin a sentence for
-mining. Cue caches are format 2; older caches are ignored. `server/tools/cue_stats.py` and
+carries `seg`, the id of the Whisper segment it came from. Mining does not read it: a segment is a run
+of speech, not a sentence, and rejoining its cues put clauses on a card that were never on screen (see
+"What a mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment.
+Cue caches are format 2; older caches are ignored. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change; keep them working.
 
 Language watch: when `--language-patience` is above 0 (default 60) every window's speech-only
@@ -373,6 +375,22 @@ time". The watcher's own `requestPermission` stays untimed: its poll resolves wh
 answers the dialog. Whatever is written into a note's HTML fields goes through `escapeHtml()`:
 the sentence that fills an empty sentence field, and every text part `extendSentenceField()`
 puts around its own `<b>`.
+
+### What a mined card gets
+
+The cue that was on screen, and nothing more. `sentenceForCue(cue)` in `content.js` is the one place
+that decides it; it returns `{start, end, text, cueIds: [cue.id]}`, and `clipParams()` in
+`background.js` takes the audio bounds from that, so the sentence field and the clip always describe
+the same span the viewer read and heard.
+
+It used to rejoin every cue sharing a `seg` within 1.5 s, on the premise that a Whisper segment is a
+sentence. It is not, and there is no second signal to fall back on. Whisper punctuates a fluent
+narrator barely at all (7 marks in 3095 characters on one measured video), so every split inside such
+a segment came from `--max-cue-chars` and the rejoin undid all of them: a card mined off a 3 s line
+got 9 s of audio and a clause that was never displayed. The VAD is a worse witness, not a better one
+— Silero cuts at 300 ms of silence, a breath, and that narrator ran 14.26 s across three cues between
+breaths, so deferring to it would have made the card longer again. `extendSentenceField()` still
+grows Yomitan's fragment when Yomitan cut inside the cue, but never past the cue.
 
 ### Matching a card to its subtitle (`addon/match.js`)
 
@@ -1162,6 +1180,14 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
   `jumpTarget()` answers null, leaving YouTube's own seek alone, when there is no cue at all or
   the playhead and the target do not sit in the same covered range (`coveredRange()`): the last
   known line before an untranscribed stretch is not the previous line.
+- Left steps one line back wherever the playhead sits in the current line: inside a line, the line
+  before it; in the gap after one, that line again. It used to replay the current line past
+  `CUE_REPLAY_S` (1 s) into it, asbplayer's rule, but a line runs three to six seconds, so that
+  was nearly always and Left restarted what was already playing. And `leadIn()` takes the previous
+  cue's end as a floor: `normalise_gaps` closes every gap under 0.5 s to 0.1 s, shorter than the
+  0.15 s lead-in, so the old unclamped seek landed inside the previous line and flashed its last
+  frames before sweeping back into the line the viewer had just left. The lead-in may eat silence
+  and nothing else.
 
 ## Making changes
 

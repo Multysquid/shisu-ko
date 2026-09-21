@@ -67,7 +67,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.11.0"
+VERSION = "0.11.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
 # GPU context, no model left) and
@@ -568,8 +568,9 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
                       window_end: Optional[float] = None) -> tuple:
     """Gate hallucinated segments, build their cues and stamp each with its segment id.
 
-    `seg` ties every cue back to the sentence Whisper heard, so mining can rejoin the cues that
-    a display-sized split pulled apart. Returns (cues, next segment id).
+    `seg` ties every cue back to the Whisper segment it came from, which is a run of speech and
+    not a sentence: mining reads the cue alone (see sentenceForCue in content.js). Kept for the
+    cache tools, which measure a change per segment. Returns (cues, next segment id).
     """
     out: list = []
     for seg in segs:

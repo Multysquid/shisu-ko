@@ -65,12 +65,10 @@
   // A refreshed index that differs from the last in more words than this is walked line by line
   // like a new one: matching a line again costs about as much as looking for that many words in it.
   const WORD_INDEX_PROBE_MAX = 64;
+  // A card is most likely to appear while a subtitle is hovered.
   const HOVER_POLL_INTERVAL_MS = 300;
-  const SENTENCE_MAX_GAP_S = 1.5; // cues of one segment further apart than this are not one sentence // a card is most likely to appear while a subtitle is hovered
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
   const MIN_BLANK_S = 0.3;
-  // Left this far into a line replays it instead of stepping back to the one before.
-  const CUE_REPLAY_S = 1.0;
   const CUE_LEAD_IN_S = 0.15;
   // A playhead less than this far past a covered end is the server catching up, not a seek into
   // an untranscribed stretch: the server's own --window, the 40 s of speech it takes at a time. A
@@ -951,15 +949,13 @@
     let added = false;
     for (const raw of incoming) {
       if (!raw || typeof raw.text !== "string") continue;
-      const seg = Number(raw.seg);
+      // The server stamps every cue with the `seg` of the Whisper segment it came from; nothing
+      // here reads it, because a segment is not a sentence (see sentenceForCue).
       const cue = {
         id: Number(raw.id),
         start: Number(raw.start) || 0,
         end: Number(raw.end) || 0,
         text: raw.text.trim(),
-        // Cues built from one Whisper segment share a `seg`; an older server sends none, and then
-        // every cue is a sentence of its own (see sentenceForCue).
-        seg: Number.isFinite(seg) ? seg : null,
       };
       // JSON.parse turns 1e999 into Infinity: a cue that never ends, or a seek target the video
       // element throws on. Nothing a server has a reason to send, so it is dropped like a bad id.
@@ -1047,10 +1043,14 @@
   // minutes to it is not what the key means. The playhead's range is the one it sits in, or the
   // one that ended less than COVERED_LAG_S before it (rangeBehind): a live stream's playhead runs
   // past the covered end most of the time, and so does a plain video's while a window is still
-  // being transcribed, and the line just heard is still the previous line there. Left replays the
-  // current line once the viewer is more than a second into it, the way asbplayer does, and steps
-  // back to the line before it otherwise; before the first line it lands on the start of the
-  // video. Every target starts a shade early so the first syllable survives.
+  // being transcribed, and the line just heard is still the previous line there.
+  //
+  // Left steps one line back and lands on its start: inside a line, the line before it; in the
+  // gap after a line, that line itself, which is the last thing heard and the one the viewer
+  // wants again. Before the first line it lands on the start of the video. Right takes the start
+  // of the next line. Left used to replay the current line once the viewer was a second into it,
+  // asbplayer's rule, but a subtitle line runs three to six seconds, so past that first second --
+  // nearly always -- Left restarted the line already playing and read as a dead key.
   function jumpTarget(cues, t, direction, covered) {
     const list = cues || [];
     if (!list.length) return null;
@@ -1065,23 +1065,31 @@
         hi = mid - 1;
       }
     }
-    let to;
+    let j; // the line to land on
     if (direction > 0) {
-      const next = list[idx + 1];
-      to = next ? leadIn(next.start) : null;
+      j = idx + 1;
     } else {
       const cur = list[idx];
-      const prev = idx > 0 ? list[idx - 1] : null;
-      if (cur && t - cur.start > CUE_REPLAY_S) to = leadIn(cur.start);
-      else to = prev ? leadIn(prev.start) : 0;
+      // Inside a line, step past it to the one before; in the gap after a line, that line is
+      // itself the step back, since nothing has been heard since.
+      j = cur && t <= cur.end ? idx - 1 : idx;
     }
+    let to;
+    if (direction < 0 && j < 0) to = 0; // nothing before the first line but the start of the video
+    else if (j < 0 || j >= list.length) to = null;
+    else to = leadIn(list[j].start, j > 0 ? list[j - 1].end : null);
     if (to === null || covered === undefined) return to;
     const range = coveredRange(covered, t) || rangeBehind(covered, t);
     return range && coveredRange(covered, to) === range ? to : null;
   }
 
-  function leadIn(start) {
-    return Math.max(0, start - CUE_LEAD_IN_S);
+  // A seek lands a shade before the line so its first syllable survives, but the lead-in may only
+  // eat silence. `normalise_gaps` on the server closes every gap under 0.5 s to 0.1 s, shorter
+  // than the lead-in itself, so reaching back through one lands inside the previous line and
+  // flashes its tail before the line that was asked for. Where there is no room, land on the line.
+  function leadIn(start, prevEnd) {
+    const want = start - CUE_LEAD_IN_S;
+    return Math.max(0, prevEnd !== null && prevEnd !== undefined && want < prevEnd ? start : want);
   }
 
   function onKeyDown(ev) {
@@ -1637,33 +1645,22 @@
     return best;
   }
 
-  // The whole spoken sentence a cue belongs to. The server splits one Whisper segment into several
-  // short cues and marks them with the same `seg`, so joining those in start order gives back the
-  // sentence, and their outer bounds give its audio range. Pure: cues in, sentence out.
-  function sentenceForCue(cues, cue) {
+  // The spoken sentence a mined card gets: the cue that was on screen, and nothing more.
+  //
+  // The server marks every cue it split out of one Whisper segment with a shared `seg`, and this
+  // used to rejoin them, on the premise that a segment is a sentence. It is not. A narrator who
+  // reads without pausing gets almost no punctuation out of Whisper, so `group_words` splits on
+  // the cue length limit alone, and rejoining those pieces hands the card clauses the viewer
+  // never saw and seconds they never heard. The VAD is no better a witness: Silero cuts at 300 ms
+  // of silence, which is a breath, and such a narrator runs ten seconds and three cues between
+  // breaths -- deferring to it makes the card longer still. Neither signal marks a sentence.
+  //
+  // So the line the viewer read and heard is the one thing certainly true of the card, and the
+  // clip bounds follow from it. Pure: a cue in, a sentence out, in the shape the callers and the
+  // background's clipParams() expect.
+  function sentenceForCue(cue) {
     if (!cue) return null;
-    const own = { start: cue.start, end: cue.end, text: cue.text, cueIds: [cue.id] };
-    if (!Number.isFinite(cue.seg)) return own;
-    const all = cues.filter((c) => c && c.seg === cue.seg);
-    if (all.length < 2) return own;
-    all.sort((a, b) => a.start - b.start || a.end - b.end);
-    // A segment can span a long pause (music, a cut); only the run of cues around this one that
-    // sits within SENTENCE_MAX_GAP_S of its neighbours is the sentence.
-    let i = all.indexOf(cue);
-    if (i < 0) i = all.findIndex((c) => c.id === cue.id);
-    if (i < 0) return own;
-    let lo = i;
-    while (lo > 0 && all[lo].start - all[lo - 1].end <= SENTENCE_MAX_GAP_S) lo--;
-    let hi = i;
-    while (hi < all.length - 1 && all[hi + 1].start - all[hi].end <= SENTENCE_MAX_GAP_S) hi++;
-    const parts = all.slice(lo, hi + 1);
-    if (parts.length < 2) return own;
-    return {
-      start: Math.min(...parts.map((c) => c.start)),
-      end: Math.max(...parts.map((c) => c.end)),
-      text: parts.map((c) => c.text).join(""),
-      cueIds: parts.map((c) => c.id),
-    };
+    return { start: cue.start, end: cue.end, text: cue.text, cueIds: [cue.id] };
   }
 
   // The sentence after this one, so its audio can be fetched before it is spoken. Pure: the cue
@@ -1678,7 +1675,7 @@
     }
     if (last < 0) return null;
     const next = list[last + 1];
-    return next ? sentenceForCue(list, next) : null;
+    return next ? sentenceForCue(next) : null;
   }
 
   // One canvas for every frame read back: a backing store the size of the frame per line would be
@@ -1802,7 +1799,7 @@
   function schedulePremine(cue) {
     clearPremineTimer();
     if (!cue || !premineAllowed()) return;
-    const sentence = sentenceForCue(state.cues, cue);
+    const sentence = sentenceForCue(cue);
     if (!sentence) return;
     const key = sentence.cueIds[0];
     state.premineTimer = setTimeout(() => {
@@ -1821,7 +1818,7 @@
   async function premineNow(key) {
     if (!premineAllowed()) return;
     const active = cueById(state.activeCueId);
-    const sentence = active ? sentenceForCue(state.cues, active) : null;
+    const sentence = active ? sentenceForCue(active) : null;
     if (!sentence || sentence.cueIds[0] !== key) return; // the line moved on while we waited
     // A held frame is read by automatic mining alone: a mine the viewer asks for captures the frame
     // on screen. Otherwise the readback and the few hundred kilobytes shipped per line would be
@@ -1851,7 +1848,7 @@
     state.hoverCaptureTimer = setTimeout(() => {
       state.hoverCaptureTimer = null;
       if (state.activeCueId !== id || !premineAllowed()) return;
-      const sentence = sentenceForCue(state.cues, cueById(id));
+      const sentence = sentenceForCue(cueById(id));
       if (!sentence) return;
       const video = state.video;
       const key = sentence.cueIds[0];
@@ -1895,7 +1892,7 @@
     state.transcriptHoverTimer = setTimeout(() => {
       state.transcriptHoverTimer = null;
       if (generation !== state.cueGeneration || !premineAllowed()) return;
-      const sentence = sentenceForCue(state.cues, cue);
+      const sentence = sentenceForCue(cue);
       if (sentence) sendPremine(sentence, { hover: true });
     }, HOVER_CAPTURE_DELAY_MS);
   }
@@ -1960,7 +1957,7 @@
       const video = state.video;
       const videoId = state.videoId;
       const generation = state.cueGeneration;
-      const sentence = sentenceForCue(state.cues, cue);
+      const sentence = sentenceForCue(cue);
       const key = sentence ? sentence.cueIds[0] : null;
       // The viewer asking for this line gets the frame on screen now. An automatic mine takes the
       // pre-mined frame when there is one: it is the frame that was up while the line was read,
