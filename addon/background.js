@@ -1075,16 +1075,27 @@ function sentenceOf(msg) {
 // is would lose characters on the card, and the server, which the viewer names by URL, could put
 // markup, or a script, into the collection through it. The overlay shows the same text through
 // textContent; this is the one place it is written into HTML.
+//
+// The newline the server puts between two merged utterances is a line break to every reader of
+// this text -- the overlay renders it (white-space: pre-wrap), Yomitan ends its sentence at it --
+// so it has to stay one on the card too, where HTML would otherwise collapse it into a space.
 function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  return String(text)
+    .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]))
+    .replace(/\r?\n/g, "<br>");
 }
 
 // Yomitan copies the sentence from the one cue it scanned, so the card keeps a fragment of what was
 // said. Give it the whole sentence instead, carrying Yomitan's <b> around the looked-up word across.
 // Returns null when there is nothing to extend: unrelated text, or the sentence is already there.
 function extendSentenceField(existing, full) {
-  const text = String(full || "");
   const have = normalizeSentence(existing);
+  // A cue can hold two utterances, joined by the newline seam_for() put between them. Yomitan ends
+  // its sentence at that newline, so a fragment from the first row must not grow into the second:
+  // the seam is there precisely to keep the other speaker's line off the card. Grow inside the row
+  // the fragment came from; a cue without a seam is one row, and behaves as it always did.
+  const rows = String(full || "").split("\n");
+  const text = rows.find((row) => normalizeSentence(row).includes(have)) || String(full || "");
   const want = normalizeSentence(text);
   if (!have || !want || have.length >= want.length || !want.includes(have)) return null;
   const bold = (/<b[^>]*>([\s\S]*?)<\/b>/i.exec(String(existing)) || [])[1];

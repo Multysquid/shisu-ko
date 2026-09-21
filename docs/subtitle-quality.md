@@ -224,3 +224,136 @@ a number, so every rule gets a test with a synthetic word list.
 Honest caveat: none of the targets above are validated against this codebase yet. They are derived from the
 standards in (a) and from the faster-whisper source, not from a measured baseline. Measure first; the
 baseline numbers may move the targets.
+
+## (e) What was measured, and what changed
+
+Section (d) asked for numbers and admitted it had none. This section has them, against `main`.
+
+Method, as (d) prescribed: `server/tools/dump_words.py` transcribes 40 s windows of cached audio
+with the server's own `model.transcribe()` call and writes the raw segments and word timings to
+JSON; `server/tools/replay_cues.py` replays `build_window_cues()` over that JSON. Old and new are
+compared on **identical Whisper output**, so beam-search nondeterminism cannot swamp the effect.
+Three videos, ~45 minutes, chosen as the worst, a middling and the healthiest cache on disk.
+
+### Three causes
+
+**1. faster-whisper anchors a segment's first word to the previous segment's end.** Over 448
+multi-word segments:
+
+| gap between adjacent words | p50 | p90 | max |
+|---|---|---|---|
+| after word[0] | 0.00 s | **0.72 s** | **9.20 s** |
+| every later position | 0.00 s | **0.00 s** | 3.73 s |
+
+Position 0 holds 76% of all gaps at or over the 0.45 s split threshold while being 17% of
+positions, and 23% of segments put word[0] in a different speech interval from word[1]:
+
+```
+チ[146.19-146.67]  ラ[152.54-152.70]  ッ  と  動画 ...    5.87 s inside チラッと
+よ[184.14-184.42]  い[193.62-193.82]  しょ                9.20 s inside よいしょ
+```
+
+One artifact, five symptoms: words split mid-word; a single character floating over silence seconds
+before its own sentence; `trim_words()` eating the leading mora; and — the expensive pair — the VAD
+gate deleting the segment because its span now covers a silence it never contained, and the anomaly
+gate deleting it because a six-second "word" scores +4. Those two dropped **29 real lines in 17
+minutes**, キズナアイでーす, はじめまして! and ちょっと待って among them. Repairing the timings
+before the gates brings that to 8.
+
+**2. Nothing forbade a break inside a word.** Japanese speakers pause mid-word, VAD confirms it, and
+`group_words()` obeyed. The one non-obvious rule is that hiragana after a **kanji** is okurigana,
+while hiragana after **katakana** is not — カメラ|こうやって is a real boundary, 動|いた is not.
+
+**3. Merging never crossed a Whisper segment.** `build_cues()` runs per segment, so
+`merge_adjacent()` only ever saw one segment's cues — and 94% of neighbouring cues come from
+different segments. The anti-flicker rule was dead code, and this is the largest single effect below.
+
+### Before and after
+
+`DhcrgdOzgic`, 17 minutes of a fast two-person collab, the worst cache on disk:
+
+| metric | `main` | this branch |
+|---|---|---|
+| cues | 456 | 208 |
+| duration p50 | 1.14 s | 3.78 s |
+| under 1.0 s | 37.9% | **0.5%** |
+| characters p50 | 7 | 23 |
+| cues ≤ 4 chars | 28.7% | **1.9%** |
+| cues ≤ 6 chars | 47.4% | **4.3%** |
+| `kinsoku` (exact mid-word breaks) | 4 | **0** |
+| `okuri` (suspected mid-word breaks) | 13 | 4 |
+| `stubs` (under 4 chars beside a reachable gap) | 93 | **0** |
+| cue time over silence | 3.9% | 1.0% |
+| spoken seconds carrying text | 79.9% | **90.5%** |
+| text swaps per minute | 26.6 | **12.1** |
+| real lines deleted by the gates | 29 | 8 |
+
+| video | cues ≤ 4 chars | kinsoku / okuri | stubs | speech with text | swaps/min |
+|---|---|---|---|---|---|
+| `DhcrgdOzgic` | 28.7% → 1.9% | 4 → 0 / 13 → 4 | 93 → 0 | 79.9% → 90.5% | 26.6 → 12.1 |
+| `5oiVvJB3x9Q` | 23.9% → 3.6% | 2 → 0 / 8 → 1 | 40 → 1 | 81.9% → 88.3% | 20.5 → 10.4 |
+| `IdYM3nWCWVk` | 6.9% → 0.6% | 0 → 0 / 2 → 0 | 7 → 0 | 60.6% → 64.3% | 16.3 → 14.7 |
+
+`kinsoku` is exact and reaches zero on all three. Every surviving `okuri` is the heuristic's own
+false positive — `…らしいえ?対象 || あどう?と`, `…から全然 || こういうピンクとか…`,
+`…こう、透明感 || むらさきってそう…`, `声裏返りましたよ今 || まずやってきたのは` all cut between
+two complete words. That is why the tool prints the pairs and not only the count.
+
+The third video was already healthy, and it is here to show nothing over-merged: it loses 17 cues
+out of 174 and gains nothing it did not need.
+
+```
+BEFORE                                  AFTER
+129.8  コ                               131.1  コラボ配信をしていきたいと思いまーということで
+131.2  ラボ配信をしていきたいと思いまー  139.1  ところばちゃん呼んでみましょう私もねあの今日が初対面なので
+146.2  チ                               143.9  ドキドキしております
+152.5  ラッと動画見たことあるんだけど…   152.4  チラッと動画見たことあるんだけどすごいね
+154.5  可愛い感じの子                   154.5  可愛い感じの子だった気がする
+157.7  だった気がする                   160.3  なんか、靴舐めますって言ってた
+160.3  なんか、靴舐めますって言
+163.4  ってた
+```
+
+### The two constants
+
+`--max-cue-seconds` 6.0 → 7.0, Netflix's own maximum. The 6.0 in (c) was chosen when the median cue
+was 1.14 s and the cap almost never bound; a merged cue now sits near it, and the cap was what left
+`言ってた` alone as a four-character cue — the merge that would have absorbed it came to 6.96 s.
+That matters beyond the flicker, because the cue is also the mined sentence (see (c), "Decided, and
+then reversed"), and these two cues came from different Whisper segments, so nothing downstream
+could have put the line back together.
+
+| `--max-cue-seconds` | `5oiVvJB3x9Q` stubs | ≤ 4 chars | swaps/min | duration p95 |
+|---|---|---|---|---|
+| 6.0 | 5 | 4.8% | 11.9 | 5.48 s |
+| **7.0** | **1** | **3.5%** | **10.6** | **6.01 s** |
+| 7.5 | 1 | 3.6% | 10.4 | 6.24 s |
+
+`lead_out` 0.50 → 0.70 and `lead_out_silence` 0.40 → 0.30, the beat after the audio:
+
+| lead_out / silence | cues under 1.0 s | screen filled | tail after audio p50 |
+|---|---|---|---|
+| 0.50 / 0.40 | 3.5% | 71.5% | 0.72 s |
+| **0.70 / 0.30** | **0.9%** | **73.6%** | **0.76 s** |
+| 0.90 / 0.25 | 1.3% | 74.8% | 0.76 s |
+
+0.70 is the knee: past it the extra screen time is bought by leaving text over silence, which rises
+from 0.9% to 1.3%.
+
+### Four traps
+
+Each cost a whole cue or a whole line, silently, and each has a regression test.
+
+- A head repair that slides a word **backwards** lands it on the previous utterance, where
+  `cue_overlaps()` deletes the newer cue entirely. The first prototype did this and quietly lost
+  `すごい、なんか未知との遭遇みたいな`. The repair moves forward only.
+- Refusing a merge because it would leave a row below `MIN_PIECE_CHARS`, or a third row, is worse
+  than merging: the stub stays on screen alone. The line break is what gives way. Refusing on the
+  row count is what left `言ってた` by itself; refusing on the short row took `cues ≤ 4 chars` back
+  up from 5.5% to 11.2%.
+- One predicate cannot do both jobs. `may_break()` also says no on taste, and the merge reads its
+  answer as "a word is broken here" and overrules its length budget. The first live run therefore
+  produced a 41-character, 8.1-second cue, forced together only because `と` is a particle.
+  `breaks_word()` is the narrow predicate, and it alone may overrule `max_chars`.
+- The offline replay showed none of the last two. Both appeared only when the real pipeline took a
+  different beam. Replay is for comparing builders; it is not a substitute for running the server.

@@ -130,18 +130,68 @@ A segment touching the end of a window is dropped and the covered range ends whe
 began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
 
-Cue building (`docs/subtitle-quality.md` is the rationale): the server runs Silero VAD itself on each
-window (`detect_speech()`, with `VAD_PARAMS`: min speech 250 ms, min silence 300 ms) and passes the
-same options to faster-whisper. Segments go through gates before becoming cues: no words, VAD overlap under 0.5,
-faster-whisper's own word-anomaly score, repetition loops, and a gated phrase blocklist.
+Cue building (`docs/subtitle-quality.md` is the rationale and the measurements): the server runs
+Silero VAD itself on each window (`detect_speech()`, with `VAD_PARAMS`: min speech 250 ms, min
+silence 300 ms) and passes the same options to faster-whisper.
+
+`repair_lead_words()` runs first, before the gates. faster-whisper anchors a segment's first word to
+the segment's own start, and segment starts run flush with the previous segment's end, so one or two
+characters end up stranded in the previous utterance, seconds ahead of the sentence they open
+(measured: the gap after word[0] has p90 0.72 s and a worst case of 9.2 s, while every later position
+has p90 0.00 s). It only ever slides such a head **forward**, only while it is short, and only out of
+an interval it does not already share with the rest of the segment: moving one backwards drops it on
+the previous utterance, where `cue_overlaps()` then deletes a whole good cue. It runs before
+`hallucination_reason()` because an unrepaired head makes the segment's span cover a silence it never
+contained, and the VAD and anomaly gates then delete real speech — 29 lines in 17 minutes of the
+sample, against 8 once repaired.
+
+Segments go through gates before becoming cues: no words, VAD overlap under 0.5, faster-whisper's own
+word-anomaly score, repetition loops, and a gated phrase blocklist.
+
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
-following silence, merges fragments below `--min-cue-seconds`, and closes gaps under 0.5 s. Every cue
-carries `seg`, the id of the Whisper segment it came from. Mining does not read it: a segment is a run
-of speech, not a sentence, and rejoining its cues put clauses on a card that were never on screen (see
-"What a mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment.
-Cue caches are format 2; older caches are ignored. `server/tools/cue_stats.py` and
-`retranscribe.py` measure a cache before and after a change; keep them working.
+following silence, merges fragments below `--min-cue-seconds`, and closes gaps under 0.5 s.
+
+Every cut asks `may_break(head, tail)` first, because a pause is not a word boundary: Japanese
+speakers pause inside words, VAD confirms the silence, and the splitter used to obey (言 | ってた,
+広 | い, 動 | いた). The rules are kinsoku shori plus one piece of script evidence: nothing opens a
+line with a small kana, っ, ー, 々 or a closing mark; neither side may be shorter than
+`MIN_PIECE_CHARS`; hiragana after a **kanji** is okurigana; nothing opens on a particle. Katakana is
+deliberately outside the okurigana rule — katakana words are self-delimiting, so the hiragana after
+カメラ does open a word. A speaker's own 。！？ or 、 outranks every guess. `split_for_break()`
+applies the same rules when a buffer runs past the hard limits, including to the seam against the
+word that follows it. `may_break()` is asked about a prospective line, not one Whisper word:
+Whisper's words are sub-tokens, often one character, so `group_words()` gathers just enough of what
+follows (`tail_text()`) to reach `MIN_PIECE_CHARS` before asking.
+
+`breaks_word()` is the narrow half of `may_break()`, and the two must stay apart. `may_break()` also
+says no on taste — a short piece, a line opening on a particle — which is right for the splitter,
+where refusing a cut costs nothing. `merge_segments()` reads its predicate as "a word is broken here"
+and overrules its own length budget to close it, so it must ask `breaks_word()`, which answers only
+on evidence. Wiring the merge to `may_break()` produced a 41-character, 8.1-second cue on the first
+live run, forced together only because と is a particle.
+
+`merge_segments()` is the last step of `build_window_cues()`, and must run **before**
+`normalise_gaps()`: closing every gap to `min_gap` first would hide the pause the seam is judged on.
+`build_cues()` runs once per Whisper segment, so `merge_adjacent()` only ever saw one segment's cues,
+and in a two-person conversation 94% of neighbouring cues come from different segments — which left
+the anti-flicker rule dead code and the median cue seven characters long. The cross-segment merge
+closes a broken word whatever the budget says (inside `cross_chars` and `cross_ceiling`), lets a cue
+shorter than `reach_chars` reach `cross_reach` for a partner, and joins the halves through
+`seam_for()`: `""` inside one sentence, `"\n"` where a viewer would see a new line. Three readers act
+on that newline — `.shisuko-sub` is `white-space: pre-wrap` so the overlay renders the second row,
+Yomitan ends its sentence there, and `match.js`'s `TERMINATORS` splits on it. A seam that would leave
+a row under `MIN_PIECE_CHARS`, or a third row, gives way to a plain join rather than the merge being
+refused; refusing leaves the stub alone on screen.
+
+Every cue still carries `seg`, the id of the Whisper segment it came from, and a merge re-stamps
+every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
+not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
+mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment, and a stale
+id would mis-group it. Cue caches are format 3; older caches are ignored, which is the only way a
+geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
+`retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
+compare two cue builders on identical Whisper output; keep them working.
 
 Language watch: when `--language-patience` is above 0 (default 60) every window's speech-only
 samples (`speech_samples()`, capped at 30 s) go through `model.detect_language()` before
@@ -391,6 +441,14 @@ got 9 s of audio and a clause that was never displayed. The VAD is a worse witne
 — Silero cuts at 300 ms of silence, a breath, and that narrator ran 14.26 s across three cues between
 breaths, so deferring to it would have made the card longer again. `extendSentenceField()` still
 grows Yomitan's fragment when Yomitan cut inside the cue, but never past the cue.
+
+A merged cue can hold two utterances either side of the newline `seam_for()` put between them, and
+Yomitan ends its sentence at that newline, so the grow stops at the row the fragment came from.
+`normalize()` strips whitespace, so the seam is invisible to the comparison and
+`extendSentenceField()` has to split on it itself; without that it put the other speaker's line on
+the card, which is the one thing the seam exists to prevent. A cue without a seam is one row and
+behaves as it always did. `escapeHtml()` writes the newline as `<br>`, since HTML would otherwise
+collapse it into a space and the card would lose the boundary entirely.
 
 ### Matching a card to its subtitle (`addon/match.js`)
 
