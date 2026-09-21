@@ -1075,8 +1075,14 @@ function sentenceOf(msg) {
 // is would lose characters on the card, and the server, which the viewer names by URL, could put
 // markup, or a script, into the collection through it. The overlay shows the same text through
 // textContent; this is the one place it is written into HTML.
+//
+// The newline the server puts between two merged utterances is a line break to every reader of
+// this text -- the overlay renders it (white-space: pre-wrap), Yomitan ends its sentence at it --
+// so it has to stay one on the card too, where HTML would otherwise collapse it into a space.
 function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  return String(text)
+    .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]))
+    .replace(/\r?\n/g, "<br>");
 }
 
 // Yomitan copies the sentence from the one cue it scanned, so the card keeps a fragment of what was
