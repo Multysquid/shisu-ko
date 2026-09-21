@@ -48,6 +48,12 @@
   // so it must not happen on the tick that puts the line on screen.
   const PREMINE_CAPTURE_DELAY_MS = 400;
   const ANKI_POLL_LOG_MS = 60000;
+  // The deck index behind the word colours is asked for this often (the background keeps it as
+  // long, so most asks come back "unchanged"); a failing ask is logged this often.
+  const WORD_INDEX_REFRESH_MS = 30000;
+  const WORD_INDEX_LOG_MS = 60000;
+  // The settings the deck index depends on: a change to any of them starts it over.
+  const WORD_SETTINGS = ["cardStatus", "pitchAccent", "cardStatusDeck", "ankiPitchField"];
   const HOVER_POLL_INTERVAL_MS = 300;
   const SENTENCE_MAX_GAP_S = 1.5; // cues of one segment further apart than this are not one sentence // a card is most likely to appear while a subtitle is hovered
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
@@ -125,6 +131,15 @@
     hoverCaptureTimer: null,
     ankiPollInFlight: false,
     lastAnkiPollLog: 0,
+    // The deck's words as SHISUKO_WORDS.buildIndex() holds them, for the word colours: `at` is the
+    // background's timestamp of the entries it was built from (the `since` of the next ask), `key`
+    // a fingerprint of those entries, so an index refetched unchanged does not redraw the transcript.
+    wordIndex: null,
+    wordIndexAt: 0,
+    wordIndexKey: "",
+    wordIndexAskedAt: 0,
+    wordIndexInFlight: false,
+    lastWordIndexLog: 0,
     resizeObserver: null,
     videoListeners: null,
     lastSeekSync: 0,
@@ -291,9 +306,17 @@
       state.modelError = null;
       state.modelLoading = null;
     }
+    // The index belongs to a deck and a pitch field; with either changed, or a colour switched, the
+    // lines go back to plain text now and the new deck is asked for at once (never while off).
+    const wordsChanged = WORD_SETTINGS.some((key) => next[key] !== state.settings[key]);
+    if (wordsChanged) dropWordIndex();
     state.settings = next;
     applySettings();
     if (modelChanged) sync();
+    if (wordsChanged) {
+      refreshWordMarks();
+      if (wordColoursOn()) pollWordIndex();
+    }
   });
 
   // Settings come from storage, so every value is treated as untrusted input before it reaches CSS.
@@ -624,6 +647,7 @@
     const video = state.video;
     if (!video) return;
     pollForNewCard();
+    pollWordIndex();
     const decision = {
       paused: !!video.paused,
       t: playhead(),
@@ -861,7 +885,7 @@
       state.subBox.classList.add("shisuko-hidden");
       state.subText.textContent = "";
     } else {
-      state.subText.textContent = cue.text;
+      renderText(state.subText, cue.text);
       state.subBox.classList.remove("shisuko-hidden");
       schedulePremine(cue);
     }
@@ -974,7 +998,7 @@
     time.title = "Jump here";
     const text = document.createElement("span");
     text.className = "shisuko-linetext";
-    text.textContent = cue.text;
+    renderText(text, cue.text);
     const mine = document.createElement("button");
     mine.type = "button";
     mine.className = "shisuko-line-mine";
@@ -1048,6 +1072,118 @@
     if (!Number.isFinite(start)) return;
     seekPlayhead(start - 0.2);
     state.video.play().catch(() => {});
+  }
+
+  // ------------------------------------------------------------ word colours
+
+  // Either colour needs the deck index; neither may cost anything while the add-on is off.
+  function wordColoursOn() {
+    const s = state.settings;
+    return !!s.enabled && (!!s.cardStatus || !!s.pitchAccent);
+  }
+
+  function dropWordIndex() {
+    state.wordIndex = null;
+    state.wordIndexAt = 0;
+    state.wordIndexKey = "";
+    state.wordIndexAskedAt = 0;
+  }
+
+  // The one place subtitle text goes into an element, on screen and in the transcript. The text
+  // stays DOM text nodes, which is what Yomitan scans; a word with a card sits in an inline span
+  // that carries what the card says, and content.css colours it. Nothing else is ever put in.
+  function renderText(el, text) {
+    const s = state.settings;
+    const index = state.wordIndex;
+    if (!wordColoursOn() || !index) {
+      el.textContent = text;
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    let plain = "";
+    const flush = () => {
+      if (plain) frag.appendChild(document.createTextNode(plain));
+      plain = "";
+    };
+    for (const run of SHISUKO_WORDS.markWords(text, index)) {
+      const status = s.cardStatus && run.status ? run.status : null;
+      const pitch = s.pitchAccent && run.pitch ? run.pitch : null;
+      // A card with nothing to show here is text like any other, joined with its neighbours.
+      if (!status && !pitch) {
+        plain += run.text;
+        continue;
+      }
+      flush();
+      const span = document.createElement("span");
+      span.className = "shisuko-word";
+      if (status) span.dataset.status = status;
+      if (pitch) span.dataset.pitch = pitch;
+      span.textContent = run.text;
+      frag.appendChild(span);
+    }
+    flush();
+    el.replaceChildren(frag);
+  }
+
+  // Draw the line on screen and the transcript again with the index as it is now.
+  function refreshWordMarks() {
+    if (state.activeCueId !== null && state.subText) {
+      const cue = cueById(state.activeCueId);
+      if (cue) renderText(state.subText, cue.text);
+    }
+    if (state.settings.showTranscript && state.transcriptList) {
+      state.transcriptDirty = true;
+      state.transcriptAppendFrom = null;
+      renderTranscript();
+    }
+  }
+
+  // Ask the background for the deck's words. It runs from syncTick(), so a switched-off add-on,
+  // a page without a player and a hidden tab never ask; the background answers from its cache,
+  // and "unchanged" when it still holds what this tab was last given.
+  async function pollWordIndex() {
+    if (!wordColoursOn() || state.wordIndexInFlight) return;
+    if (document.visibilityState !== "visible") return;
+    const now = Date.now();
+    if (now - state.wordIndexAskedAt < WORD_INDEX_REFRESH_MS) return;
+    state.wordIndexAskedAt = now;
+    state.wordIndexInFlight = true;
+    let res;
+    try {
+      res = await sendMessage({ type: "cardStatus", since: state.wordIndexAt });
+    } finally {
+      state.wordIndexInFlight = false;
+    }
+    if (!res) return;
+    if (!res.ok) {
+      // Turned off since the ask: nothing may stay coloured. Anki closed or a deck gone is
+      // ordinary and gets a debug line, never a toast.
+      if (res.reason === "off") {
+        dropWordIndex();
+        refreshWordMarks();
+      } else {
+        logWordIndexError(res.error || res.reason);
+      }
+      return;
+    }
+    if (res.unchanged || !Array.isArray(res.entries)) return;
+    const at = Number(res.at) || 0;
+    if (at === state.wordIndexAt) return;
+    state.wordIndexAt = at;
+    // The background refetches the deck every half minute and stamps it anew, yet the words rarely
+    // change; a transcript of thousands of lines is only rebuilt when they did.
+    const key = JSON.stringify(res.entries);
+    if (key === state.wordIndexKey && state.wordIndex) return;
+    state.wordIndex = SHISUKO_WORDS.buildIndex(res.entries);
+    state.wordIndexKey = key;
+    refreshWordMarks();
+  }
+
+  function logWordIndexError(error) {
+    const now = Date.now();
+    if (now - state.lastWordIndexLog < WORD_INDEX_LOG_MS) return;
+    state.lastWordIndexLog = now;
+    console.debug("Shisu-ko: word colours:", error || "unknown error");
   }
 
   // ------------------------------------------------------------ sentence mining

@@ -12,6 +12,7 @@ const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
 const MATCH_PATH = path.join(__dirname, "..", "match.js");
+const WORDS_PATH = path.join(__dirname, "..", "words.js");
 const SOURCE_PATH = path.join(__dirname, "..", "content.js");
 
 const OPEN = "(() => {";
@@ -19,7 +20,8 @@ const CLOSE = "})();";
 const EXPORTS =
   "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
   " premineAllowed, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown," +
-  " modelForSync, fontStack, sync, updateStatus };\n";
+  " modelForSync, fontStack, sync, updateStatus," +
+  " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, setSubtitle, transcriptLine };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
@@ -34,16 +36,56 @@ function instrument(source) {
   );
 }
 
-function stubElement() {
+// Enough of a DOM node for what content.js builds: a class list, a data set, and children that
+// the text content is read from and written to (a written text is one text node, like the DOM's).
+// A fragment appended or put in place of the children hands its own children over and empties.
+function textNode(text) {
+  return { nodeType: 3, textContent: String(text) };
+}
+
+function adopt(parent, node) {
+  if (node.nodeType === 11) {
+    parent.childNodes.push(...node.childNodes);
+    node.childNodes.length = 0;
+  } else {
+    parent.childNodes.push(node);
+  }
+}
+
+function stubNode(nodeType, tag) {
   const classes = new Set();
-  return {
+  const el = {
+    nodeType,
+    tagName: tag,
+    className: "",
+    dataset: {},
+    childNodes: [],
     classList: {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
       contains: (c) => classes.has(c),
       toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)),
     },
+    setAttribute: () => {},
+    addEventListener: () => {},
+    appendChild: (node) => {
+      adopt(el, node);
+      return node;
+    },
+    replaceChildren: (...nodes) => {
+      el.childNodes.length = 0;
+      for (const node of nodes) adopt(el, node);
+    },
   };
+  Object.defineProperty(el, "textContent", {
+    get: () => el.childNodes.map((node) => node.textContent).join(""),
+    set: (text) => el.replaceChildren(...(text === "" ? [] : [textNode(text)])),
+  });
+  return el;
+}
+
+function stubElement(tag) {
+  return stubNode(1, String(tag || "div").toUpperCase());
 }
 
 function loadContent(overrides = {}) {
@@ -67,7 +109,9 @@ function loadContent(overrides = {}) {
       visibilityState: "visible",
       querySelector: () => null,
       addEventListener: () => {},
-      createElement: () => stubElement(),
+      createElement: (tag) => stubElement(tag),
+      createTextNode: (text) => textNode(text),
+      createDocumentFragment: () => stubNode(11, "#document-fragment"),
     },
     browser: {
       runtime: {
@@ -86,6 +130,7 @@ function loadContent(overrides = {}) {
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
   new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
+  new vm.Script(fs.readFileSync(WORDS_PATH, "utf8"), { filename: WORDS_PATH }).runInContext(sandbox);
   new vm.Script(instrument(fs.readFileSync(SOURCE_PATH, "utf8")), { filename: SOURCE_PATH }).runInContext(sandbox);
 
   const api = sandbox.__shisukoExports;

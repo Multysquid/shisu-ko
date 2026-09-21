@@ -609,3 +609,360 @@ test("fontStack falls back to the preset alone for an empty or unusable family n
   assert.ok(!api.fontStack("default", "a\\b").includes("\\")); // a backslash would escape the closing quote
   assert.equal(api.fontStack("default", "x".repeat(100)), `"${"x".repeat(100)}", ${GOTHIC}`);
 });
+
+// ------------------------------------------------------------------ word colours
+
+const words = require("../words");
+
+// A deck as the background hands it over, [word, status, pitch], and a line holding both words.
+const DECK = [["日本語", "learned", null], ["字幕", "new", "heiban"]];
+const LINE = "これは日本語の字幕です";
+
+// What renderText put into an element: a text node as its text, a span as class{marks}:text.
+function nodes(el) {
+  return el.childNodes.map((node) => {
+    if (node.nodeType === 3) return node.textContent;
+    const marks = Object.entries(node.dataset).map(([key, value]) => `${key}=${value}`).join(",");
+    return `${node.className}{${marks}}:${node.textContent}`;
+  });
+}
+
+// The deck's index as a poll would have left it. An async test gives it only after settled():
+// the settings loaded at start-up replace whatever was put in state.settings before.
+function giveIndex(api, settings) {
+  Object.assign(api.state.settings, settings);
+  api.state.wordIndex = words.buildIndex(DECK);
+  api.state.wordIndexAt = 1000;
+  api.state.wordIndexKey = JSON.stringify(DECK);
+}
+
+function withIndex(settings) {
+  const loaded = loadContent();
+  giveIndex(loaded.api, settings);
+  return loaded;
+}
+
+// A subtitle box and its text span, as buildOverlay() would have made them.
+function subtitleBox(api, sandbox) {
+  api.state.subBox = sandbox.document.createElement("div");
+  api.state.subText = sandbox.document.createElement("span");
+}
+
+// The background's answers to the cardStatus asks, handed out in order and the asks kept; every
+// other message still goes to the loader's stub.
+function backgroundAnswering(sandbox, answers) {
+  const asks = [];
+  const other = sandbox.browser.runtime.sendMessage;
+  sandbox.browser.runtime.sendMessage = async (msg) => {
+    if (msg.type !== "cardStatus") return other(msg);
+    asks.push(msg);
+    if (!answers.length) throw new Error("the fake background ran out of answers");
+    return answers.shift();
+  };
+  return asks;
+}
+
+test("wordColoursOn needs the master switch and one of the two colours", () => {
+  const { api } = loadContent();
+  assert.equal(api.wordColoursOn(), false);
+  api.state.settings.cardStatus = true;
+  assert.equal(api.wordColoursOn(), true);
+  api.state.settings.cardStatus = false;
+  api.state.settings.pitchAccent = true;
+  assert.equal(api.wordColoursOn(), true);
+  api.state.settings.enabled = false;
+  assert.equal(api.wordColoursOn(), false);
+});
+
+test("renderText writes plain text while both colours are off, or without an index", () => {
+  const { api, sandbox } = withIndex({});
+  const el = sandbox.document.createElement("span");
+  api.renderText(el, LINE);
+  assert.deepEqual(nodes(el), [LINE]);
+  api.state.settings.cardStatus = true;
+  api.state.settings.enabled = false;
+  api.renderText(el, LINE);
+  assert.deepEqual(nodes(el), [LINE]);
+  api.state.settings.enabled = true;
+  api.state.wordIndex = null;
+  api.renderText(el, LINE);
+  assert.deepEqual(nodes(el), [LINE]);
+});
+
+test("renderText marks the card's state only with cardStatus on, in spans holding text nodes", () => {
+  const { api, sandbox } = withIndex({ cardStatus: true });
+  const el = sandbox.document.createElement("span");
+  api.renderText(el, LINE);
+  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"]);
+  assert.equal(el.textContent, LINE); // the DOM text is the line, for Yomitan
+  assert.equal(el.childNodes[1].childNodes[0].nodeType, 3);
+  api.renderText(el, "字幕"); // drawn again: the old children go
+  assert.deepEqual(nodes(el), ["shisuko-word{status=new}:字幕"]);
+});
+
+test("renderText marks the pitch only with pitchAccent on, and joins the text around it", () => {
+  const { api, sandbox } = withIndex({ pitchAccent: true });
+  const el = sandbox.document.createElement("span");
+  api.renderText(el, LINE);
+  // 日本語 has a card but no pitch: with the state not shown it is text like the rest.
+  assert.deepEqual(nodes(el), ["これは日本語の", "shisuko-word{pitch=heiban}:字幕", "です"]);
+  assert.equal(el.textContent, LINE);
+});
+
+test("renderText marks both with both colours on", () => {
+  const { api, sandbox } = withIndex({ cardStatus: true, pitchAccent: true });
+  const el = sandbox.document.createElement("span");
+  api.renderText(el, LINE);
+  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new,pitch=heiban}:字幕", "です"]);
+  api.renderText(el, "");
+  assert.deepEqual(nodes(el), []);
+});
+
+test("setSubtitle and transcriptLine draw their text through renderText", () => {
+  const { api, sandbox } = withIndex({ cardStatus: true });
+  subtitleBox(api, sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
+  api.setSubtitle(api.cueById(0));
+  assert.equal(api.state.activeCueId, 0);
+  assert.ok(!api.state.subBox.classList.contains("shisuko-hidden"));
+  assert.equal(nodes(api.state.subText)[1], "shisuko-word{status=learned}:日本語");
+  assert.equal(api.state.subText.textContent, LINE);
+
+  const line = api.transcriptLine(api.cueById(0));
+  assert.equal(line.className, "shisuko-line");
+  assert.equal(line.dataset.id, "0");
+  const text = line.childNodes[1];
+  assert.equal(text.className, "shisuko-linetext");
+  assert.deepEqual(nodes(text), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"]);
+  assert.equal(api.state.lineById.get(0), line);
+
+  api.setSubtitle(null);
+  assert.equal(api.state.subText.textContent, "");
+  assert.ok(api.state.subBox.classList.contains("shisuko-hidden"));
+});
+
+test("refreshWordMarks redraws the line on screen and rebuilds the transcript while it is shown", () => {
+  const { api, sandbox } = loadContent();
+  api.state.settings.cardStatus = true;
+  api.state.settings.showTranscript = true;
+  subtitleBox(api, sandbox);
+  api.state.transcriptList = sandbox.document.createElement("div");
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "字幕" }]);
+  api.setSubtitle(api.cueById(0));
+  const before = api.state.lineById.get(0);
+  assert.deepEqual(nodes(api.state.subText), [LINE]); // no index yet
+  assert.deepEqual(nodes(before.childNodes[1]), [LINE]);
+
+  api.state.wordIndex = words.buildIndex(DECK);
+  api.refreshWordMarks();
+  assert.equal(nodes(api.state.subText).length, 5);
+  assert.equal(api.state.transcriptList.childNodes.length, 2);
+  const after = api.state.lineById.get(0);
+  assert.notEqual(after, before); // a full rebuild
+  assert.equal(nodes(after.childNodes[1]).length, 5);
+  assert.deepEqual(nodes(api.state.lineById.get(1).childNodes[1]), ["shisuko-word{status=new}:字幕"]);
+  assert.equal(api.state.transcriptDirty, false);
+  assert.equal(api.state.transcriptAppendFrom, null);
+
+  api.state.settings.showTranscript = false;
+  api.state.wordIndex = null;
+  api.refreshWordMarks();
+  assert.deepEqual(nodes(api.state.subText), [LINE]);
+  assert.equal(api.state.lineById.get(0), after); // a hidden transcript is left for applySettings()
+  assert.equal(api.state.transcriptDirty, false);
+});
+
+test("pollWordIndex asks only with a colour on, the tab visible and the interval past, one ask at a time", async () => {
+  const { api, sandbox } = loadContent();
+  const asks = backgroundAnswering(sandbox, [{ ok: true, unchanged: true }, { ok: true, unchanged: true }]);
+  await api.pollWordIndex();
+  assert.equal(asks.length, 0); // both colours off
+  api.state.settings.pitchAccent = true;
+  sandbox.document.visibilityState = "hidden";
+  await api.pollWordIndex();
+  assert.equal(asks.length, 0);
+  sandbox.document.visibilityState = "visible";
+  await api.pollWordIndex();
+  assert.equal(asks.length, 1);
+  assert.deepEqual(plain(asks[0]), { type: "cardStatus", since: 0 });
+  await api.pollWordIndex();
+  assert.equal(asks.length, 1); // asked a moment ago
+  api.state.wordIndexAskedAt = Date.now() - 30_000;
+  api.state.wordIndexAt = 1000;
+  await api.pollWordIndex();
+  assert.equal(asks.length, 2);
+  assert.equal(asks[1].since, 1000);
+  api.state.wordIndexAskedAt = 0;
+  api.state.settings.enabled = false;
+  await api.pollWordIndex();
+  assert.equal(asks.length, 2); // the master switch: nothing goes out
+
+  // An ask still out: the next tick waits for it instead of sending a second one.
+  api.state.settings.enabled = true;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  sandbox.browser.runtime.sendMessage = async (msg) => {
+    asks.push(msg);
+    await gate;
+    return { ok: true, unchanged: true };
+  };
+  const pending = api.pollWordIndex();
+  assert.equal(asks.length, 3);
+  api.state.wordIndexAskedAt = 0;
+  await api.pollWordIndex();
+  assert.equal(asks.length, 3);
+  release();
+  await pending;
+  assert.equal(api.state.wordIndexInFlight, false);
+});
+
+test("pollWordIndex keeps an unchanged index, moves the stamp for the same words and rebuilds on new ones", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  api.state.settings.cardStatus = true;
+  subtitleBox(api, sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
+  api.setSubtitle(api.cueById(0));
+  const asks = backgroundAnswering(sandbox, [
+    { ok: true, deck: "Mining", automatic: true, at: 1000, entries: DECK },
+    { ok: true, unchanged: true, at: 1000, deck: "Mining" },
+    { ok: true, deck: "Mining", automatic: true, at: 2000, entries: DECK, stale: true },
+    { ok: true, deck: "Mining", automatic: true, at: 3000, entries: [["日本語", "learning", null]] },
+  ]);
+  await api.pollWordIndex();
+  assert.equal(api.state.wordIndexAt, 1000);
+  assert.equal(api.state.wordIndex.size, 2);
+  assert.equal(nodes(api.state.subText)[1], "shisuko-word{status=learned}:日本語");
+  const built = api.state.wordIndex;
+
+  api.state.wordIndexAskedAt = 0;
+  await api.pollWordIndex();
+  assert.equal(asks[1].since, 1000);
+  assert.equal(api.state.wordIndex, built);
+
+  // Refetched by the background and stamped anew, the same words: nothing is redrawn.
+  const drawn = api.state.subText.childNodes[1];
+  api.state.wordIndexAskedAt = 0;
+  await api.pollWordIndex();
+  assert.equal(api.state.wordIndexAt, 2000);
+  assert.equal(api.state.wordIndex, built);
+  assert.equal(api.state.subText.childNodes[1], drawn);
+
+  // A card reviewed since: a new index, and the line drawn again.
+  api.state.wordIndexAskedAt = 0;
+  await api.pollWordIndex();
+  assert.equal(asks[3].since, 2000);
+  assert.equal(api.state.wordIndexAt, 3000);
+  assert.equal(api.state.wordIndex.size, 1);
+  assert.deepEqual(nodes(api.state.subText), ["これは", "shisuko-word{status=learning}:日本語", "の字幕です"]);
+});
+
+test("pollWordIndex drops the index when the background says off, and logs other failures once a minute", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  giveIndex(api, { cardStatus: true });
+  subtitleBox(api, sandbox);
+  api.state.toastEl = sandbox.document.createElement("div");
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
+  api.setSubtitle(api.cueById(0));
+  assert.equal(nodes(api.state.subText).length, 5);
+  const logs = [];
+  sandbox.console = { debug: (...args) => logs.push(args.join(" ")), log: () => {}, warn: () => {}, error: () => {} };
+  backgroundAnswering(sandbox, [
+    { ok: false, reason: "offline", error: "Anki is not running or AnkiConnect is not installed" },
+    { ok: false, reason: "noDeck", error: "No card mined yet; pick a deck in the popup" },
+    { ok: false, reason: "off" },
+  ]);
+  api.state.wordIndexAskedAt = 0;
+  await api.pollWordIndex();
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /word colours: Anki is not running/);
+  assert.equal(api.state.wordIndex.size, 2); // a failure keeps what there is
+  assert.equal(nodes(api.state.subText).length, 5);
+  assert.equal(api.state.toastEl.textContent, ""); // never a toast
+
+  api.state.wordIndexAskedAt = 0;
+  await api.pollWordIndex();
+  assert.equal(logs.length, 1); // within the minute
+  api.state.lastWordIndexLog = Date.now() - 60_000;
+  api.state.wordIndexAskedAt = 0;
+  await api.pollWordIndex();
+  assert.equal(api.state.wordIndex, null);
+  assert.equal(api.state.wordIndexAt, 0);
+  assert.equal(logs.length, 1); // "off" is not a failure
+  assert.deepEqual(nodes(api.state.subText), [LINE]);
+  assert.equal(api.state.toastEl.textContent, "");
+});
+
+test("a changed deck or colour starts the index over and asks for the new one at once, never while off", async () => {
+  const { api, sandbox, onSettingsChanged } = loadContent();
+  await settled();
+  giveIndex(api, { cardStatus: true });
+  subtitleBox(api, sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
+  api.setSubtitle(api.cueById(0));
+  api.state.wordIndexAskedAt = Date.now();
+  const asks = backgroundAnswering(sandbox, [{ ok: true, unchanged: true }, { ok: true, unchanged: true }, { ok: true, unchanged: true }]);
+
+  onSettingsChanged({ settings: { newValue: { cardStatus: true, showStatus: false } } }, "local");
+  assert.equal(api.state.wordIndex.size, 2); // another setting: the index stands
+  assert.equal(api.state.wordIndexAt, 1000);
+  assert.equal(asks.length, 0);
+
+  onSettingsChanged({ settings: { newValue: { cardStatus: true, cardStatusDeck: "Vocab" } } }, "local");
+  assert.equal(api.state.wordIndex, null);
+  assert.equal(api.state.wordIndexAt, 0);
+  assert.equal(api.state.wordIndexKey, "");
+  assert.deepEqual(nodes(api.state.subText), [LINE]); // plain again at once
+  assert.equal(asks.length, 1);
+  assert.equal(asks[0].since, 0);
+  await settled(); // the answer is back
+
+  api.state.wordIndex = words.buildIndex(DECK);
+  onSettingsChanged({ settings: { newValue: { cardStatus: false, cardStatusDeck: "Vocab" } } }, "local");
+  assert.equal(api.state.wordIndex, null); // turned off: dropped, nothing asked
+  assert.equal(asks.length, 1);
+
+  onSettingsChanged({ settings: { newValue: { enabled: false, cardStatus: true, cardStatusDeck: "Other" } } }, "local");
+  assert.equal(asks.length, 1); // the master switch off: a deck change asks nothing either
+
+  onSettingsChanged({ settings: { newValue: { pitchAccent: true, ankiPitchField: "Pitch" } } }, "local");
+  assert.equal(asks.length, 2);
+  await settled();
+  api.state.wordIndexAskedAt = 0;
+  onSettingsChanged({ settings: { newValue: { pitchAccent: true, ankiPitchField: "Pitch", ankiWordField: "Word" } } }, "local");
+  assert.equal(asks.length, 2); // the word field is the background's business (it drops its own cache)
+});
+
+test("the master switch off: syncTick sends nothing, the deck index included", async () => {
+  const { api, sent } = loadContent();
+  await settled();
+  api.state.video = { currentTime: 0, paused: false };
+  api.state.settings.cardStatus = true;
+  api.state.settings.pitchAccent = true;
+  api.state.settings.enabled = false;
+  const before = sent.length;
+  api.syncTick();
+  assert.equal(sent.length, before);
+  api.state.settings.enabled = true;
+  api.syncTick();
+  assert.deepEqual(plain(sent.slice(before).map((m) => m.type)), ["cardStatus", "api"]);
+  assert.equal(sent[before].since, 0);
+});
+
+test("a new server session drops the cues but not the deck index", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  giveIndex(api, { cardStatus: true });
+  serverAnswering(sandbox, [
+    { status: "ready", session: "a", cues: [cue(0, "旧一")], next: 1 },
+    { status: "ready", session: "b", cues: [], next: 1 },
+  ]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 0.5, paused: true };
+  await api.sync();
+  await api.sync();
+  assert.deepEqual(plain(api.state.cues), []);
+  assert.equal(api.state.wordIndex.size, 2);
+  assert.equal(api.state.wordIndexAt, 1000);
+});
