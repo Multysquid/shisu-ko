@@ -139,6 +139,7 @@ def write_cache(tmp_path, model, cues, covered, duration=100.0, title="t", suffi
     data = {
         "video_id": VIDEO, "title": title, "duration": duration, "format": server.CACHE_FORMAT,
         "model": model, "language": "ja", "cues": cues, "covered": covered, "speech": [],
+        "lyrics": "auto",  # made under the rule: nothing here is a sung stretch to offer again
     }
     (tmp_path / f"{VIDEO}.{suffix}cues.json").write_text(json.dumps(data), encoding="utf-8")
 

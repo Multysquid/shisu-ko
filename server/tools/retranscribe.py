@@ -51,6 +51,11 @@ def parse_args(argv=None):
     p.add_argument("--compute-type", default="auto")
     p.add_argument("--language", default="ja")
     p.add_argument("--beam-size", type=int, default=5)
+    p.add_argument("--lyrics", default="auto", choices=["auto", "off"],
+                   help="auto: a window in which the speech detector hears next to nothing (under a second of speech) "
+                        "but the audio is not silent, sung lyrics or speech over music, is transcribed without the "
+                        "detector when Whisper hears the target language in it, under stricter gates; off: such "
+                        "windows go through the detector as before, blank when it heard nothing")
     p.add_argument("--initial-prompt", default="")
     p.add_argument("--window", type=float, default=40.0)
     p.add_argument("--first-window", type=float, default=20.0)
@@ -79,9 +84,9 @@ def count_drops(totals: dict, examples: list):
     """Wrap build_window_cues so every window's gate counts land in one place."""
     original = server.build_window_cues
 
-    def wrapper(segs, offset, speech, limits, seg_id, drops=None, window_end=None):
+    def wrapper(segs, offset, speech, limits, seg_id, drops=None, window_end=None, lyrics=False):
         seen: dict = {}
-        result = original(segs, offset, speech, limits, seg_id, seen, window_end)
+        result = original(segs, offset, speech, limits, seg_id, seen, window_end, lyrics)
         for key, value in seen.items():
             if key == "_text":
                 examples.extend(value)
