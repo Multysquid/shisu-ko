@@ -741,6 +741,53 @@ def test_find_python_runs_the_candidates_instead_of_trusting_where(tmp_path):
     assert found in ("py -3", "python", "python3")
 
 
+def test_launchers_refuse_to_run_without_their_siblings():
+    """Explorer shows a zip as a folder and, on a double-click, extracts only the clicked file into
+    a temporary place; the launcher then runs alone and every python it calls fails on a missing
+    file. Each launcher checks for server.py next to itself before anything else."""
+    for name in ("run.cmd", "setup.cmd"):
+        text = (SERVER_DIR / name).read_bytes()
+        guard = text.index(b'if not exist "%~dp0server.py" (')
+        assert guard < text.index(b"%VENV%"), f"{name}: the guard comes before the venv is looked at"
+        assert b"Extract the whole zip first" in text and f"server\\{name}".encode() in text
+    for name in ("run.sh", "setup.sh"):
+        text = (SERVER_DIR / name).read_text(encoding="utf-8")
+        guard = text.index('[ -f "${HERE}/server.py" ] ||')
+        assert guard < text.index("${VENV}/bin/python"), f"{name}: the guard comes before the venv is looked at"
+        assert "extract the whole zip first" in text and f"server/{name}" in text
+
+
+def _alone(name, tmp_path):
+    """Copies one launcher into an empty folder and runs it there, as a zip double-click does."""
+    copy = tmp_path / name
+    copy.write_bytes((SERVER_DIR / name).read_bytes())
+    if name.endswith(".cmd"):
+        # stdin from NUL so the trailing `pause` returns at once instead of waiting for a key
+        command = f'cmd.exe /c ""{copy}" < NUL"'
+        done = subprocess.run(command, capture_output=True, text=True, cwd=tmp_path, timeout=60)
+    else:
+        done = subprocess.run(["bash", str(copy)], capture_output=True, text=True, cwd=tmp_path, timeout=60)
+    return done
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the .cmd launchers run under cmd.exe")
+@pytest.mark.parametrize("name", ["run.cmd", "setup.cmd"])
+def test_cmd_launcher_alone_explains_the_zip_and_stops(name, tmp_path):
+    done = _alone(name, tmp_path)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Extract the whole zip first" in done.stdout
+    assert f"server\\{name}" in done.stdout
+    assert "venv" not in done.stdout.lower(), "nothing beyond the guard ran"
+
+
+@pytest.mark.skipif(WINDOWS, reason="bash launchers run on POSIX")
+@pytest.mark.parametrize("name", ["run.sh", "setup.sh"])
+def test_sh_launcher_alone_explains_the_zip_and_stops(name, tmp_path):
+    done = _alone(name, tmp_path)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "extract the whole zip first" in done.stdout and f"server/{name}" in done.stdout
+
+
 def test_launchers_register_the_host():
     run_cmd = (SERVER_DIR / "run.cmd").read_bytes().decode("utf-8")
     assert '"%~dp0native_host.py" --register' in run_cmd

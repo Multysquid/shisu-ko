@@ -7,6 +7,16 @@ REM       run.cmd --cookies-from-browser firefox
 REM       run.cmd --check
 REM       run.cmd --no-update     start without looking for a newer version first
 
+REM Explorer shows a zip as a folder and, on a double-click, extracts only the clicked file
+REM into a temporary place: this script then runs alone, and every sibling is missing.
+if not exist "%~dp0server.py" (
+  echo This file is running on its own, from inside a zip or a folder without the rest
+  echo of Shisu-ko. Extract the whole zip first ^(right-click it, "Extract All..."^), then
+  echo start server\run.cmd from the extracted folder.
+  pause
+  exit /b 1
+)
+
 set "VENV=%USERPROFILE%\.shisu-ko\venv"
 if not exist "%VENV%\Scripts\python.exe" (
   echo The Python environment is missing. Run setup.cmd first.
