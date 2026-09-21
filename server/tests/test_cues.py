@@ -318,6 +318,16 @@ def test_build_window_cues_stamps_one_segment_id_per_segment():
     assert len([c for c in cues if c["seg"] == 7]) == 2  # split for display, one spoken sentence
 
 
+def test_build_window_cues_uses_the_phrase_after_a_short_pause_token():
+    ws = words([("今日はいい天気", 0.0, 1.0), ("電車", 4.0, 4.5),
+                ("で", 4.5, 4.7), ("行きます", 4.7, 5.5)])
+    segment = seg("今日はいい天気電車で行きます", 0.0, 5.5, ws)
+    cues, _ = server.build_window_cues([segment], 0.0, [[0.0, 1.1], [3.95, 5.6]], limits(), 0)
+    assert len(cues) == 2
+    assert [cue["text"] for cue in cues] == ["今日はいい天気", "電車で行きます"]
+    assert cues[0]["end"] < cues[1]["start"]
+
+
 def test_build_window_cues_applies_the_window_offset():
     ws = words([("こんにちは", 1.0, 2.0), ("。", 2.0, 2.1)])
     segs = [seg("こんにちは。", 1.0, 2.1, ws)]
@@ -457,6 +467,100 @@ def test_repair_returns_short_lists_and_unknown_speech_unchanged():
     ws = words([("言", 3.0, 4.0), ("ってた", 6.0, 6.8)])
     server.repair_lead_words(ws, [])
     assert timings(ws) == [(3.0, 4.0), (6.0, 6.8)]
+
+
+# --------------------------------------------------------------------------- may_break
+
+def test_may_break_refuses_a_tail_opening_with_a_small_kana():
+    assert server.may_break("なんか靴舐めますって言", "ってた") is False
+
+
+def test_may_break_allows_a_break_after_a_sentence_end():
+    # "ている" is both under MIN_PIECE_CHARS and particle-initial; the speaker's 。 outranks both.
+    assert server.may_break("これはテストです。", "ている") is True
+
+
+def test_may_break_checks_the_line_start_rule_before_the_sentence_end():
+    assert server.may_break("これはテストです。", "って言った") is False
+
+
+def test_may_break_refuses_a_piece_too_short_to_read():
+    assert server.may_break("あい", "うえおか") is False
+    assert server.may_break("あいうえお", "かき") is False
+
+
+def test_may_break_allows_a_break_after_a_clause_break():
+    assert server.may_break("そうですね、", "でもやっぱり") is True
+
+
+def test_may_break_refuses_okurigana():
+    assert server.may_break("これやばい、動", "いた動いた") is False
+
+
+def test_may_break_allows_hiragana_after_katakana():
+    assert server.may_break("私がこう自撮りカメラ", "こうやって配信します") is True
+
+
+def test_may_break_refuses_a_tail_opening_with_a_particle():
+    assert server.may_break("ここに来た", "のはなぜか") is False
+
+
+def test_may_break_allows_an_ordinary_boundary():
+    assert server.may_break("そうですね", "電車で行きます") is True
+
+
+def test_may_break_allows_a_break_against_nothing():
+    assert server.may_break("", "ってた") is True
+    assert server.may_break("なんか靴", "") is True
+
+
+# --------------------------------------------------------------------------- split_for_break
+
+def test_split_for_break_takes_a_legal_clause_boundary():
+    buf = words([("あいうえおかきくけこ", 0.0, 1.0), ("、", 1.0, 1.1), ("さしすせそ", 1.1, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "たちつてと")
+    assert (server.word_text(head), server.word_text(tail)) == ("あいうえおかきくけこ、", "さしすせそ")
+
+
+def test_split_for_break_backs_off_an_illegal_clause_boundary():
+    # split_at_clause() would cut before っていう, which may not open a line.
+    buf = words([("これはちょっと", 0.0, 1.0), ("違うと思って", 1.0, 2.0), ("、", 2.0, 2.1),
+                 ("っていう", 2.1, 2.8)])
+    head, tail = server.split_for_break(buf, limits(), "こと")
+    assert (server.word_text(head), server.word_text(tail)) == ("これはちょっと", "違うと思って、っていう")
+
+
+def test_split_for_break_emits_the_whole_buffer_on_a_legal_seam():
+    buf = words([("そうですね", 0.0, 1.0), ("電車で", 1.0, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "行きます")
+    assert head is buf and tail == []
+
+
+def test_split_for_break_backs_off_an_illegal_seam_against_the_next_word():
+    buf = words([("なんか靴", 0.0, 1.0), ("舐めますって言", 1.0, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "ってた")
+    assert (server.word_text(head), server.word_text(tail)) == ("なんか靴", "舐めますって言")
+
+
+def test_split_for_break_gives_up_when_no_position_is_legal():
+    buf = words([("言", 0.0, 1.0), ("ってた", 1.0, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "って")
+    assert head is buf and tail == []
+
+
+# --------------------------------------------------------------------------- group_words and may_break
+
+def test_group_words_does_not_split_a_pause_inside_a_word():
+    # A full second of real silence between 言 and ってた: VAD agrees, and it is still one word.
+    ws = words([("なんか靴舐めますって言", 0.0, 2.0), ("ってた", 3.0, 3.6)])
+    groups = server.group_words(ws, [[0.0, 2.1], [2.95, 3.7]], limits())
+    assert [server.word_text(g) for g in groups] == ["なんか靴舐めますって言ってた"]
+
+
+def test_group_words_still_splits_a_pause_at_a_legal_boundary():
+    ws = words([("こんにちは", 0.0, 1.0), ("電車で行きます", 2.0, 3.0)])
+    groups = server.group_words(ws, [[0.0, 1.1], [1.95, 3.1]], limits())
+    assert [server.word_text(g) for g in groups] == ["こんにちは", "電車で行きます"]
 
 
 # --------------------------------------------------------------------------- repair before the gates

@@ -507,6 +507,46 @@ def trim_words(words, speech, slack: float) -> list:
     return list(words[lo:hi])
 
 
+# Kana that only ever continue the sound before them, and so may never open a line (kinsoku shori),
+# together with the closing marks that belong to the line they end.
+NO_LINE_START = set("ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮーヵヶ々〜~,.、。!?！？)）]】」』")
+# Hiragana that attach to what came before: particles and auxiliaries. A line may not open with one.
+PARTICLE_START = set("がをにへはもやかねよぞなのでとんだしてたる")
+MIN_PIECE_CHARS = 4         # nothing shorter is a line of its own, or either side of a break
+
+
+def is_kanji(ch: str) -> bool:
+    return "一" <= ch <= "鿿" or ch == "々"
+
+
+def is_hiragana(ch: str) -> bool:
+    return "ぁ" <= ch <= "ゟ"
+
+
+def may_break(head_text: str, tail_text: str) -> bool:
+    """False when a cut between these two texts would land inside a word, or read as a stub.
+
+    The splitter's rules, and it can afford to be fussier than breaks_word(): refusing a cut only
+    leaves two words together, so this also says no to a piece too short to read, to a line opening
+    on a particle, and to any hiragana after a kanji, without breaks_word()'s tail-length test. The
+    marks a speaker's own punctuation puts at a real boundary outrank every guess below them.
+    """
+    head, tail = (head_text or "").strip(), (tail_text or "").strip()
+    if not head or not tail:
+        return True
+    if tail[0] in NO_LINE_START:
+        return False
+    if head[-1] in SENTENCE_END:
+        return True
+    if len(head) < MIN_PIECE_CHARS or len(tail) < MIN_PIECE_CHARS:
+        return False
+    if head[-1] in CLAUSE_BREAK:
+        return True
+    if is_hiragana(tail[0]) and is_kanji(head[-1]):
+        return False
+    return tail[0] not in PARTICLE_START
+
+
 def split_at_clause(buf, limits: CueLimits) -> tuple:
     """Back a hard break off to the last clause boundary inside the final 40% of the buffer (P1.2)."""
     total = len(word_text(buf))
@@ -518,29 +558,68 @@ def split_at_clause(buf, limits: CueLimits) -> tuple:
     return (buf[:best], buf[best:]) if best else (buf, [])
 
 
+def split_for_break(buf, limits: CueLimits, next_word: str) -> tuple:
+    """Where to cut a buffer that has run past the limits: the last clause boundary if it is a
+    legal break, else the last position that is one. Emitting the whole buffer is itself a break,
+    against the word that follows it, so that seam is checked too."""
+    head, tail = split_at_clause(buf, limits)
+    if tail:
+        if may_break(word_text(head), word_text(tail)):
+            return head, tail
+    elif may_break(word_text(buf), next_word):
+        return buf, []
+    for j in range(len(buf) - 1, 0, -1):
+        if may_break(word_text(buf[:j]), word_text(buf[j:])):
+            return buf[:j], buf[j:]
+    return buf, []
+
+
 def group_words(words, speech, limits: CueLimits) -> list:
-    """Cut a word list into cue-sized groups: sentence end, VAD pause, clause, then hard limits."""
+    """Cut a word list into cue-sized groups: sentence end, VAD pause, clause, then hard limits.
+
+    Every cut asks may_break() first. Japanese speakers pause inside words - one second between 言
+    and ってた in the sample - and VAD confirms the silence, so a pause alone is not a boundary.
+    """
     groups: list = []
     buf: list = []
+
+    def tail_text(start: int) -> str:
+        tail: list = []
+        tail_chars = 0
+        for j in range(start, len(words)):
+            candidate = words[j]
+            tail.append(candidate)
+            tail_chars += len((candidate.word or "").strip())
+            if tail_chars >= MIN_PIECE_CHARS:
+                break
+        return word_text(tail)
+
     for i, w in enumerate(words):
+        # may_break() needs enough of the prospective line to avoid treating a readable boundary
+        # as a stub. Whisper's words are not display units, so the next word alone can be too short;
+        # gather only the small prefix needed for that test rather than rebuilding the full suffix.
+        next_text = tail_text(i)
+        following_text = tail_text(i + 1)
         if buf:
             gap = w.start - words[i - 1].end
             silent = gap - interval_overlap(words[i - 1].end, w.start, speech)
-            if gap >= limits.pause_split and silent >= limits.vad_silence:
+            if gap >= limits.pause_split and silent >= limits.vad_silence \
+                    and may_break(word_text(buf), next_text):
                 groups.append(buf)
                 buf = []
         buf.append(w)
         text = word_text(buf)
         if not text:
             continue
-        if text[-1] in SENTENCE_END:
+        if text[-1] in SENTENCE_END and may_break(text, following_text):
             groups.append(buf)
             buf = []
-        elif text[-1] in CLAUSE_BREAK and len(text) >= limits.max_chars * limits.clause_ratio:
+        elif text[-1] in CLAUSE_BREAK and len(text) >= limits.max_chars * limits.clause_ratio \
+                and may_break(text, following_text):
             groups.append(buf)
             buf = []
         elif len(text) >= limits.max_chars or buf[-1].end - buf[0].start >= limits.max_seconds:
-            head, buf = split_at_clause(buf, limits)
+            head, buf = split_for_break(buf, limits, following_text)
             groups.append(head)
     if buf:
         groups.append(buf)
