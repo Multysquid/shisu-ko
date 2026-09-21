@@ -58,11 +58,29 @@ const SUB_FONTS = {
 const FONT_PROBE_TEXT = "日本語の字幕 Subtitle 123";
 
 let saveTimer = null;
+// The fields edited since the last save, by id. The save sends those and nothing else: this form
+// is not the only writer (the content script saves `enabled` and `showTranscript` for the keyboard
+// commands and the transcript's close button, and this page is also the options page, alive in a
+// tab), and a save of the whole form would put back what another writer changed meanwhile.
+const dirty = new Set();
+// The patch each field was last sent with, from the flush until the store echoes that value
+// (onStorageChanged): the echo is a storage round trip away, and an echo of an earlier write
+// landing in between (another writer's save, queued in the background just before this one;
+// this form's own previous save, still being written) carries the value from before the edit.
+// The reply to the save ends the wait too, for a write with no echo coming: one that failed, or
+// one that left the store as it was (a slider dragged and put back within the debounce; Chrome
+// reports no change then). The store notifies before the background's write resolves and the
+// reply goes out, so the reply never overtakes the echo the field is waiting for.
+const inFlight = new Map();
 // The debounced save only remembers the last event, so a server-address or model edit leaves a
 // note here that the save flushes: "server" starts the status over, "model" refreshes the hint.
 let serverCheckPending = null;
 let health = null; // the last /health answer, null while the server is unreachable
-let healthInFlight = false;
+// /health requests so far, and the number of the one under way (0 between two). The interval
+// waits for the answer under way; a first check, after a server-address edit, starts over and
+// drops the answer of the request it overtakes, which the old address may still be holding up.
+let healthAsked = 0;
+let healthInFlight = 0;
 
 // The start flow, one step at a time: idle -> requesting (the permission prompt is up) -> starting
 // (the launcher was asked) -> waiting (it answered; /health is polled until the server does or the
@@ -113,15 +131,6 @@ function readField(el) {
   return el.value.trim();
 }
 
-function readForm() {
-  const patch = {};
-  for (const key of FIELDS) {
-    const el = document.getElementById(key);
-    if (el) patch[key] = readField(el);
-  }
-  return patch;
-}
-
 // Each range shows its value and paints the travelled part of its own track (the --fill custom
 // property; see popup.css), so the slider carries the value twice: by position and by length.
 const RANGES = {
@@ -135,16 +144,19 @@ const RANGES = {
 // "Reset style" restores these and nothing else, so a botched experiment costs one click.
 const STYLE_KEYS = ["subPosition", "subFont", "subFontFamily", "subTextColor", "subBackgroundOpacity", "subOutline", "transcriptSide"];
 
+// Called for every event of every control (a slider drag is hundreds of them), so it only writes
+// what changed: the popup repaints on every mutation, and an unchanged textContent is still one.
 function updateOutputs() {
   for (const [id, format] of Object.entries(RANGES)) {
     const el = document.getElementById(id);
     const value = Number(el.value);
     const min = Number(el.min);
-    el.style.setProperty("--fill", `${((value - min) / (Number(el.max) - min)) * 100}%`);
-    document.getElementById(`${id}Out`).textContent = format(value);
+    const fill = `${((value - min) / (Number(el.max) - min)) * 100}%`;
+    if (el.style.getPropertyValue("--fill") !== fill) el.style.setProperty("--fill", fill);
+    setText(document.getElementById(`${id}Out`), format(value));
   }
   const on = document.getElementById("enabled").checked;
-  document.getElementById("enabled-label").textContent = on ? "On" : "Off";
+  setText(document.getElementById("enabled-label"), on ? "On" : "Off");
   document.body.classList.toggle("off", !on);
   renderFontSample();
 }
@@ -177,22 +189,39 @@ function fontStack(subFont, subFontFamily) {
 // Firefox offers no list of installed fonts, but a canvas tells whether one name resolves: text
 // set in '"<family>", <generic>' measures the same as the generic alone only when the family fell
 // through to it. Three generics, so a family that happens to match one still differs from another.
+// A verdict holds for the life of the popup (fonts are not installed while it is open), so each
+// name is measured once: the probe makes a canvas and a context, and updateOutputs() would
+// otherwise run it for every slider position.
+const fontProbes = new Map();
+
 function fontInstalled(family) {
+  if (fontProbes.has(family)) return fontProbes.get(family);
   const ctx = document.createElement("canvas").getContext("2d");
   if (!ctx) return true; // nothing to measure with: better no warning than a wrong one
+  let installed = false;
   for (const generic of ["monospace", "serif", "sans-serif"]) {
     ctx.font = `48px ${generic}`;
     const base = ctx.measureText(FONT_PROBE_TEXT).width;
     ctx.font = `48px "${family}", ${generic}`;
-    if (ctx.measureText(FONT_PROBE_TEXT).width !== base) return true;
+    if (ctx.measureText(FONT_PROBE_TEXT).width !== base) {
+      installed = true;
+      break;
+    }
   }
-  return false;
+  fontProbes.set(family, installed);
+  return installed;
 }
 
-// The sample shows the stack the content script will use, weight from the preset included.
+// The sample shows the stack the content script will use, weight from the preset included. It
+// depends on the preset and the typed name alone, so it is rendered again only when one changed.
+let fontSampleFor = null;
+
 function renderFontSample() {
   const preset = document.getElementById("subFont").value;
   const typed = document.getElementById("subFontFamily").value.trim();
+  const key = `${preset}\n${typed}`;
+  if (key === fontSampleFor) return;
+  fontSampleFor = key;
   const family = fontFamilyName(typed);
   const sample = document.getElementById("font-sample");
   sample.style.fontFamily = fontStack(preset, family);
@@ -255,7 +284,12 @@ function renderModelHint() {
 function renderModelField() {
   if (health) {
     const input = document.getElementById("model");
-    if (typeof health.default_model === "string" && health.default_model) input.placeholder = `${health.default_model} (server default)`;
+    if (typeof health.default_model === "string" && health.default_model) {
+      // Guarded like the texts (setText): an attribute set to its own value is a mutation too,
+      // and this runs with every /health answer.
+      const placeholder = `${health.default_model} (server default)`;
+      if (input.placeholder !== placeholder) input.placeholder = placeholder;
+    }
     addModelSuggestions(health.models);
   }
   renderModelHint();
@@ -267,31 +301,75 @@ function setField(el, value) {
 }
 
 async function resetStyle() {
-  const patch = {};
   for (const key of STYLE_KEYS) {
-    patch[key] = SHISUKO_DEFAULT_SETTINGS[key];
     const el = document.getElementById(key);
-    if (el) setField(el, patch[key]);
+    if (el) setField(el, SHISUKO_DEFAULT_SETTINGS[key]);
+    dirty.add(key);
   }
   updateOutputs();
-  // A pending edit would otherwise land after the reset and put the old value back.
-  clearTimeout(saveTimer);
-  serverCheckPending = false;
-  await browser.runtime.sendMessage({ type: "saveSettings", settings: patch });
+  // An edit still on its way to storage goes with the reset instead of being cancelled: a text
+  // field's change fires on the blur this click causes, 150 ms before its save would have.
+  await flushSave();
 }
 
 function onChange(ev) {
   updateOutputs();
+  dirty.add(ev.target.id);
   // A new server address starts over; a new model name only needs the hint brought up to date.
   if (ev.target.id === "serverUrl") serverCheckPending = "server";
   else if (ev.target.id === "model" && serverCheckPending !== "server") serverCheckPending = "model";
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    const check = serverCheckPending;
-    serverCheckPending = null;
-    await browser.runtime.sendMessage({ type: "saveSettings", settings: readForm() });
-    if (check) checkServer(check === "server");
-  }, 150);
+  saveTimer = setTimeout(flushSave, 150);
+}
+
+// The save: the fields edited since the last one, read now (a slider's last position, not its
+// first). The message is sent before anything is awaited, so the flush from pagehide gets out
+// too: this document dies with a click outside the popup, and a text field's change event fires
+// on that very close, with none of the 150 ms left for the timer. The check the edit asked for
+// follows the save, so the background already reads the new address.
+function flushSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  if (dirty.size === 0) return Promise.resolve();
+  const check = serverCheckPending;
+  serverCheckPending = null;
+  const patch = {};
+  for (const key of dirty) {
+    const el = document.getElementById(key);
+    if (el) patch[key] = readField(el);
+  }
+  dirty.clear();
+  for (const key of Object.keys(patch)) inFlight.set(key, patch);
+  const saved = browser.runtime.sendMessage({ type: "saveSettings", settings: patch }).catch(() => {});
+  saved.then(() => {
+    // A later flush may have sent the field again: that one is still waited for.
+    for (const key of Object.keys(patch)) if (inFlight.get(key) === patch) inFlight.delete(key);
+  });
+  if (check) saved.then(() => checkServer(check === "server"));
+  return saved;
+}
+
+// A change made elsewhere lands in the form (see `dirty`), except in a field with an edit of its
+// own under way: one waiting for its save, one sent and waiting for the store's echo of it (see
+// `inFlight`: an echo that carries another value is an earlier write's, and the field is already
+// past it), or a text field with the focus, whose typing is not an edit until its change event
+// (every other control's edit is in `dirty` at once, and a checkbox keeps the focus long after
+// its click). The popup's own save comes back through here too, and changes nothing.
+function onStorageChanged(changes, area) {
+  if (area !== "local" || !changes.settings || !changes.settings.newValue) return;
+  const next = changes.settings.newValue;
+  for (const key of FIELDS) {
+    const el = document.getElementById(key);
+    if (!el || dirty.has(key) || (el.type === "text" && el === document.activeElement) || !Object.hasOwn(next, key)) continue;
+    const sent = inFlight.get(key);
+    if (sent) {
+      if (next[key] !== sent[key]) continue;
+      inFlight.delete(key);
+    }
+    if (readField(el) !== next[key]) setField(el, next[key]);
+  }
+  updateOutputs();
+  renderModelHint();
 }
 
 // The status line answers the popup's first question: can it transcribe right now? The badge word
@@ -349,22 +427,32 @@ function renderStatus() {
   renderUpdate();
 }
 
-// Only the first check announces itself; the refreshes behind it change the text in place.
+// Only the first check announces itself; the refreshes behind it change the text in place. A
+// first check goes out even while a refresh is under way (see healthAsked): the refresh may be
+// held up by the old address for the full request timeout, and its answer is not this server's.
 async function checkServer(first) {
-  if (healthInFlight) return;
+  if (healthInFlight && !first) return;
   if (first) {
+    // The flows' outcomes (failed, done, stale, lost) were judged at the address this check
+    // leaves behind: "no answer after 90 s", or the hint naming the very URL just changed, would
+    // otherwise stand in for the offline hint at the new one for as long as it is offline too. A
+    // launch or an update still under way is the background's, and goes on.
+    if (!START_BUSY.has(startFlow.state)) startFlow.state = "idle";
+    if (!UPDATE_BUSY.has(updateFlow.state)) updateFlow.state = "idle";
     const badge = document.getElementById("server-status");
     setText(badge, "Checking server");
     badge.className = "badge";
     setText(document.getElementById("server-detail"), "");
   }
-  healthInFlight = true;
+  const asked = ++healthAsked;
+  healthInFlight = asked;
   let res;
   try {
     res = await browser.runtime.sendMessage({ type: "api", path: "/health" }).catch(() => null);
   } finally {
-    healthInFlight = false;
+    if (healthInFlight === asked) healthInFlight = 0;
   }
+  if (asked !== healthAsked) return; // overtaken by a first check: the old address's answer
   health = res && res.ok && res.data ? res.data : null;
   // The start flow ends here, one way or the other: the server answered, or it had its 90 s.
   // A start still in the click handler's hands (requesting, starting) is left to it.
@@ -378,8 +466,11 @@ async function checkServer(first) {
   if (updateFlow.state === "updating") judgeUpdate();
   renderStatus();
   // The banner follows behind: the background's answer may wait on a check of GitHub, and the
-  // status line must not.
-  refreshUpdate(false).then(renderStatus);
+  // status line must not. Most ticks ask nothing (the server's answer is the same), and paint
+  // nothing more.
+  refreshUpdate(false).then((answered) => {
+    if (answered) renderStatus();
+  });
 }
 
 // Where an update under way stands after this /health answer. The new version ends it; the old
@@ -517,18 +608,23 @@ function latestVersion() {
 // Answers can cross: the first question may wait ten seconds on GitHub while the server comes
 // online and a second one, answered from the store at once, has already put the banner up; the
 // first answer then lands with "offline" and would take it down, so only the latest question's
-// answer counts, and the questions are numbered for that.
+// answer counts, and the questions are numbered for that. The dropped first answer carried the
+// day's check, though, which the second one was answered without (the background reads the store
+// for a question without `check`, and a check under way is not in the store yet), so the popup
+// asks once more when it lands: nothing else would, while the server's answer stays the same.
+// Resolves to whether a new answer was taken, which is when the banner needs painting again.
 async function refreshUpdate(force) {
   const key = health ? `${health.version}|${health.launcher}` : "offline";
   const first = updateKey === null;
-  if (!force && key === updateKey) return;
+  if (!force && key === updateKey) return false;
   updateKey = key;
   const asked = ++updateAsked;
   const status = await browser.runtime.sendMessage({ type: "updateStatus", health, check: first }).catch(() => null);
-  if (asked !== updateAsked) return;
-  if (!status || typeof status !== "object" || !status.decision || typeof status.decision !== "object") return;
+  if (asked !== updateAsked) return first ? refreshUpdate(true) : false;
+  if (!status || typeof status !== "object" || !status.decision || typeof status.decision !== "object") return false;
   updateInfo = status;
   if (status.updating && typeof status.updating === "object" && updateFlow.state === "idle") watchUpdate(status.updating);
+  return true;
 }
 
 // The banner, from the background's verdict and this popup's own flow. Nothing is shown without a
@@ -726,11 +822,26 @@ async function init() {
   document.getElementById("update-later").addEventListener("click", snoozeUpdateFromPopup);
   document.getElementById("update-release").addEventListener("click", openReleasePage);
   document.getElementById("check-updates").addEventListener("click", checkForUpdatesFromPopup);
+  browser.storage.onChanged.addListener(onStorageChanged);
+  // The popup closes with a click outside it, and the document goes with it (see flushSave).
+  window.addEventListener("pagehide", flushSave);
+  document.addEventListener("visibilitychange", onVisibilityChange);
   renderModelHint();
   await resumeStart();
   // A resumed start or update has already painted its badge; "Checking server" is for a popup that knows nothing.
   checkServer(startFlow.state === "idle" && updateFlow.state === "idle");
-  setInterval(() => checkServer(false), HEALTH_REFRESH_MS);
+  // The toolbar popup is in view for its whole life; the same page as the options page lives on
+  // in a tab, and a status line nobody sees is not worth a request every two seconds.
+  setInterval(() => {
+    if (!document.hidden) checkServer(false);
+  }, HEALTH_REFRESH_MS);
+}
+
+// Out of view: an edit on its way is saved now (the popup closing, a tab switch). Back in view:
+// the status line catches up now rather than at the next tick.
+function onVisibilityChange() {
+  if (document.hidden) flushSave();
+  else checkServer(false);
 }
 
 document.addEventListener("DOMContentLoaded", init);
