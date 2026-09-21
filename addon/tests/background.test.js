@@ -1728,3 +1728,402 @@ test("the message switch routes the four update messages", async () => {
   assert.equal((await dispatch({ type: "updateServer" })).restarting, true);
   assert.equal(mock.count("update"), 1);
 });
+
+// ------------------------------------------------------------------ word colours
+
+const SHISUKO_WORDS = require("../words");
+
+// The five searches the deck index runs, by the clause after the deck; a fake AnkiConnect answers
+// each with the note ids a test puts in that set.
+const STATUS_CLAUSES = {
+  "is:suspended": "suspended",
+  "-is:suspended": "unsuspended",
+  "is:new -is:suspended": "new",
+  "is:learn": "learning",
+  "is:review -is:learn -is:suspended": "review",
+};
+
+// A note as notesInfo lists it, with the fields of a Yomitan card.
+function note(id, word, extra) {
+  const fields = { Expression: { value: word, order: 0 }, Sentence: { value: `${word}です`, order: 1 } };
+  let order = 2;
+  for (const [name, value] of Object.entries(extra || {})) fields[name] = { value, order: order++ };
+  return { noteId: id, fields };
+}
+
+// One deck as AnkiConnect sees it: `sets` holds the note ids each search lists (suspended and
+// unsuspended together being the deck), `notes` what notesInfo says about each id.
+function deckHandlers(deck, sets, notes, extra) {
+  return {
+    requestPermission: granted,
+    findNotes: (p) => {
+      const found = /^"deck:(.+)" (.+)$/.exec(p.query);
+      if (!found || found[1] !== deck || !(found[2] in STATUS_CLAUSES)) return [];
+      return sets[STATUS_CLAUSES[found[2]]] || [];
+    },
+    notesInfo: (p) => p.notes.map((id) => (notes[id] ? notes[id] : {})),
+    ...extra,
+  };
+}
+
+const queriesAsked = (anki) => anki.calls.filter((c) => c.action === "findNotes").map((c) => c.params.query);
+const notesAsked = (anki) => anki.calls.filter((c) => c.action === "notesInfo").map((c) => plain(c.params.notes));
+const sortedEntries = (entries) => plain(entries).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+// A deck with a note in every state, a duplicate word and an empty one.
+const DECK = "Japanese::Mining";
+const DECK_SETS = { suspended: [5], unsuspended: [1, 2, 3, 4, 6, 8, 9], new: [2, 3, 9], learning: [4], review: [1] };
+const DECK_NOTES = {
+  1: note(1, "日本語"),
+  2: note(2, "猫", { Reading: "ねこ", PitchAccent: "[1]" }),
+  3: note(3, "橋", { Reading: "はし", PitchAccent: "[2]" }),
+  4: note(4, "字幕"),
+  5: note(5, "食べる"),
+  6: note(6, "走る"), // unsuspended, in no queue: buried while learning
+  8: note(8, ""),
+  9: note(9, "日本語"), // the same word as note 1, on a new card
+};
+const DECK_ENTRIES = sortedEntries([
+  ["日本語", "learned", null],
+  ["猫", "new", "atamadaka"],
+  ["橋", "new", "odaka"],
+  ["字幕", "learning", null],
+  ["食べる", "suspended", null],
+  ["走る", "learning", null],
+  ["日本語", "new", null],
+]);
+
+const colourSettings = (patch) => makeMemoryStorage({ settings: { cardStatus: true, cardStatusDeck: DECK, ...patch } });
+
+test("deckSearch quotes the deck name whole and escapes what Anki reads as syntax", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.deckSearch("My Deck::Sub"), '"deck:My Deck::Sub"');
+  assert.equal(sandbox.deckSearch('a"b*c_d\\e'), '"deck:a\\"b\\*c\\_d\\\\e"');
+});
+
+test("wordColoursOn is either feature", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.wordColoursOn({ cardStatus: false, pitchAccent: false }), false);
+  assert.equal(sandbox.wordColoursOn({ cardStatus: true, pitchAccent: false }), true);
+  assert.equal(sandbox.wordColoursOn({ cardStatus: false, pitchAccent: true }), true);
+});
+
+test("resolveDeck takes the popup's deck, else the last mined card's, else none", async () => {
+  const seen = { ankiDeckSeen: { deck: "Seen::Deck", at: 1, noteId: 7 } };
+  const manual = loadBackground({ storage: makeMemoryStorage({ settings: { cardStatusDeck: " Mine " }, ...seen }) });
+  assert.deepEqual(plain(await manual.sandbox.resolveDeck(await manual.sandbox.getSettings())), { deck: "Mine", automatic: false });
+  const automatic = loadBackground({ storage: makeMemoryStorage(seen) });
+  assert.deepEqual(plain(await automatic.sandbox.resolveDeck(await automatic.sandbox.getSettings())), { deck: "Seen::Deck", automatic: true });
+  const none = loadBackground();
+  assert.deepEqual(plain(await none.sandbox.resolveDeck(await none.sandbox.getSettings())), { deck: null, automatic: true });
+});
+
+test("cardStatus answers 'off' without touching Anki while both features are off", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, DECK_SETS, DECK_NOTES));
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  assert.deepEqual(plain(await sandbox.cardStatus({})), { ok: false, reason: "off" });
+  assert.equal(anki.calls.length, 0);
+});
+
+test("cardStatus asks for no deck when nothing was mined and none is chosen", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, DECK_SETS, DECK_NOTES));
+  const { sandbox } = loadBackground({ storage: makeMemoryStorage({ settings: { pitchAccent: true } }), fetch: anki.fetch });
+  const res = await sandbox.cardStatus({});
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "noDeck");
+  assert.match(res.error, /pick a deck/);
+  assert.equal(anki.calls.length, 0);
+});
+
+test("cardStatus reports Anki's refusal and Anki being away", async () => {
+  const denied = ankiFetch({ requestPermission: { permission: "denied" } });
+  const refused = loadBackground({ storage: colourSettings(), fetch: denied.fetch });
+  assert.deepEqual(plain(await refused.sandbox.cardStatus({})), { ok: false, reason: "denied", error: "AnkiConnect denied access. Click Yes in Anki's permission dialog." });
+  assert.deepEqual(denied.actions(), ["requestPermission"]);
+
+  const away = loadBackground({
+    storage: colourSettings(),
+    fetch: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  assert.deepEqual(plain(await away.sandbox.cardStatus({})), { ok: false, reason: "offline", error: "Anki is not running or AnkiConnect is not installed" });
+
+  const broken = ankiFetch({
+    requestPermission: granted,
+    findNotes: () => {
+      throw new Error("collection is not available");
+    },
+  });
+  const failed = loadBackground({ storage: colourSettings(), fetch: broken.fetch });
+  assert.deepEqual(plain(await failed.sandbox.cardStatus({})), { ok: false, reason: "error", error: "collection is not available" });
+});
+
+test("cardStatus runs the five searches on the deck and reads every note once", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, DECK_SETS, DECK_NOTES));
+  const { sandbox } = loadBackground({ storage: colourSettings(), fetch: anki.fetch });
+  const res = await sandbox.cardStatus({ since: 0 });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.deck, DECK);
+  assert.equal(res.automatic, false);
+  assert.equal(typeof res.at, "number");
+  assert.deepEqual(queriesAsked(anki), [
+    '"deck:Japanese::Mining" is:suspended',
+    '"deck:Japanese::Mining" -is:suspended',
+    '"deck:Japanese::Mining" is:new -is:suspended',
+    '"deck:Japanese::Mining" is:learn',
+    '"deck:Japanese::Mining" is:review -is:learn -is:suspended',
+  ]);
+  // Every note of the deck, in one call, and none twice.
+  assert.deepEqual(notesAsked(anki), [[5, 1, 2, 3, 4, 6, 8, 9]]);
+  assert.deepEqual(sortedEntries(res.entries), DECK_ENTRIES);
+  // The content script merges the two cards of 日本語 to the one with the least progress.
+  const index = SHISUKO_WORDS.buildIndex(plain(res.entries));
+  assert.equal(index.exact.get("日本語").status, "new");
+  assert.equal(index.exact.get("橋").pitch, "odaka");
+});
+
+test("cardStatus reads the word and the pitch from the fields the viewer named", async () => {
+  // The named pitch field wins over the one whose name says "Accent"; [2] on a two-mora reading is odaka.
+  const notes = { 1: note(1, "<b>猫</b>", { Reading: "ねこ", Accent: "[0]", Pitch: "[2]" }) };
+  const anki = ankiFetch(deckHandlers(DECK, { suspended: [], unsuspended: [1], new: [1], learning: [], review: [] }, notes));
+  const { sandbox } = loadBackground({ storage: colourSettings({ ankiWordField: "Reading", ankiPitchField: "Pitch" }), fetch: anki.fetch });
+  const res = await sandbox.cardStatus({});
+  assert.deepEqual(plain(res.entries), [["ねこ", "new", "odaka"]]);
+});
+
+test("cardStatus answers a second ask from memory, and the same index as 'unchanged'", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, DECK_SETS, DECK_NOTES));
+  const { sandbox } = loadBackground({ storage: colourSettings(), fetch: anki.fetch });
+  const first = await sandbox.cardStatus({ since: 0 });
+  const calls = anki.calls.length;
+  const again = await sandbox.cardStatus({});
+  assert.equal(again.at, first.at);
+  assert.deepEqual(plain(again.entries), plain(first.entries));
+  assert.deepEqual(plain(await sandbox.cardStatus({ since: first.at })), { ok: true, unchanged: true, at: first.at, deck: DECK });
+  assert.equal(anki.calls.length, calls, "an index this fresh asks Anki nothing");
+});
+
+test("a refresh after the time to live runs the searches again but asks only about new notes", async () => {
+  const sets = { suspended: [5], unsuspended: [1, 2, 3, 4, 6, 8, 9], new: [2, 3, 9], learning: [4], review: [1] };
+  const notes = { ...DECK_NOTES, 10: note(10, "学校") };
+  const anki = ankiFetch(deckHandlers(DECK, sets, notes));
+  const { sandbox, setNow } = loadBackground({ storage: colourSettings(), fetch: anki.fetch });
+  const first = await sandbox.cardStatus({});
+  // The viewer reviewed 字幕 to learned, suspended 日本語's new card, and added 学校 meanwhile.
+  sets.learning = [];
+  sets.review = [1, 4];
+  sets.suspended = [5, 9];
+  sets.unsuspended = [1, 2, 3, 4, 6, 8, 10];
+  sets.new = [2, 3, 10];
+  setNow(first.at + sandbox.CARD_STATUS_TTL_MS);
+  const res = await sandbox.cardStatus({ since: first.at });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.notEqual(res.at, first.at);
+  assert.equal(queriesAsked(anki).length, 10);
+  assert.deepEqual(notesAsked(anki), [[5, 1, 2, 3, 4, 6, 8, 9], [10]]);
+  assert.deepEqual(
+    sortedEntries(res.entries),
+    sortedEntries([
+      ["日本語", "learned", null],
+      ["猫", "new", "atamadaka"],
+      ["橋", "new", "odaka"],
+      ["字幕", "learned", null],
+      ["食べる", "suspended", null],
+      ["走る", "learning", null],
+      ["日本語", "suspended", null],
+      ["学校", "new", null],
+    ])
+  );
+});
+
+test("notes are read in chunks, and a chunk Anki complains about costs those notes alone", async () => {
+  const ids = [];
+  const notes = {};
+  for (let id = 1; id <= 450; id++) {
+    ids.push(id);
+    notes[id] = note(id, `語${id}`);
+  }
+  const handlers = deckHandlers(DECK, { suspended: [], unsuspended: ids, new: ids, learning: [], review: [] }, notes);
+  const anki = ankiFetch({
+    ...handlers,
+    notesInfo: (p) => {
+      if (p.notes.includes(201)) throw new Error("note was not found: 201");
+      return handlers.notesInfo(p);
+    },
+  });
+  const { sandbox } = loadBackground({ storage: colourSettings(), fetch: anki.fetch });
+  const res = await sandbox.cardStatus({});
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(notesAsked(anki).map((chunk) => chunk.length), [200, 200, 50]);
+  assert.equal(res.entries.length, 250);
+});
+
+test("a refresh that fails answers the old index as stale, and nothing when there is none", async () => {
+  let away = false;
+  const anki = ankiFetch(deckHandlers(DECK, DECK_SETS, DECK_NOTES));
+  const fetch = async (url, init) => {
+    if (away) throw new TypeError("fetch failed");
+    return anki.fetch(url, init);
+  };
+  const { sandbox, setNow } = loadBackground({ storage: colourSettings(), fetch });
+  const first = await sandbox.cardStatus({});
+  away = true;
+  setNow(first.at + sandbox.CARD_STATUS_TTL_MS + 1);
+  const stale = await sandbox.cardStatus({});
+  assert.equal(stale.ok, true, JSON.stringify(stale));
+  assert.equal(stale.stale, true);
+  assert.equal(stale.at, first.at);
+  assert.deepEqual(plain(stale.entries), plain(first.entries));
+  assert.deepEqual(plain(await sandbox.cardStatus({ since: first.at })), { ok: true, unchanged: true, at: first.at, deck: DECK, stale: true });
+  // Anki back: the next ask is a full refresh again.
+  away = false;
+  const fresh = await sandbox.cardStatus({ since: first.at });
+  assert.equal(fresh.stale, undefined);
+  assert.notEqual(fresh.at, first.at);
+
+  // An empty deck leaves nothing worth answering: the failure it is.
+  const empty = ankiFetch(deckHandlers("Empty", { suspended: [], unsuspended: [], new: [], learning: [], review: [] }, {}));
+  let gone = false;
+  const bare = loadBackground({
+    storage: colourSettings({ cardStatusDeck: "Empty" }),
+    fetch: async (url, init) => {
+      if (gone) throw new TypeError("fetch failed");
+      return empty.fetch(url, init);
+    },
+  });
+  const none = await bare.sandbox.cardStatus({});
+  assert.deepEqual(plain(none.entries), []);
+  gone = true;
+  bare.setNow(none.at + bare.sandbox.CARD_STATUS_TTL_MS + 1);
+  assert.deepEqual(plain(await bare.sandbox.cardStatus({})), { ok: false, reason: "offline", error: "Anki is not running or AnkiConnect is not installed" });
+});
+
+test("asks that overlap share one fetch", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, DECK_SETS, DECK_NOTES));
+  const { sandbox } = loadBackground({ storage: colourSettings(), fetch: anki.fetch });
+  sandbox.ankiWatch.permission = "granted"; // the first permission check is one request at a time; this is about the index
+  const [a, b] = await Promise.all([sandbox.cardStatus({}), sandbox.cardStatus({})]);
+  assert.equal(a.at, b.at);
+  assert.equal(queriesAsked(anki).length, 5);
+  assert.equal(notesAsked(anki).length, 1);
+});
+
+test("another deck, or another field to read, drops the index; other settings leave it", async () => {
+  const other = { suspended: [], unsuspended: [20], new: [], learning: [], review: [20] };
+  const mine = deckHandlers(DECK, DECK_SETS, DECK_NOTES);
+  const theirs = deckHandlers("Other", other, { 20: note(20, "本") });
+  const anki = ankiFetch({
+    ...mine,
+    findNotes: (p) => (p.query.startsWith('"deck:Other"') ? theirs.findNotes(p) : mine.findNotes(p)),
+    notesInfo: (p) => (p.notes.includes(20) ? theirs.notesInfo(p) : mine.notesInfo(p)),
+  });
+  const { sandbox } = loadBackground({ storage: colourSettings(), fetch: anki.fetch });
+  const first = await sandbox.cardStatus({});
+  assert.equal(first.deck, DECK);
+
+  await sandbox.saveSettings({ fontScale: 1.2 });
+  assert.equal((await sandbox.cardStatus({})).at, first.at, "a setting the index does not depend on");
+  assert.equal(queriesAsked(anki).length, 5);
+
+  await sandbox.saveSettings({ cardStatusDeck: "Other" });
+  const switched = await sandbox.cardStatus({});
+  assert.equal(switched.deck, "Other");
+  assert.deepEqual(plain(switched.entries), [["本", "learned", null]]);
+  assert.equal(queriesAsked(anki).length, 10);
+  assert.ok(queriesAsked(anki).slice(5).every((q) => q.startsWith('"deck:Other"')));
+
+  await sandbox.saveSettings({ ankiWordField: "Reading" });
+  await sandbox.cardStatus({});
+  assert.equal(queriesAsked(anki).length, 15, "a new word field means every note is read again");
+  assert.deepEqual(notesAsked(anki).slice(-1), [[20]]);
+
+  await sandbox.saveSettings({ ankiPitchField: "Accent" });
+  await sandbox.cardStatus({});
+  assert.equal(queriesAsked(anki).length, 20);
+});
+
+test("a mine remembers the deck the card went to and drops the index, so the card shows at once", async () => {
+  const mock = miningFetch({
+    ...ankiOk,
+    ...deckHandlers(DECK, DECK_SETS, DECK_NOTES, { notesInfo: (p) => (p.notes.includes(555) ? noteFields("文0") : p.notes.map((id) => DECK_NOTES[id] || {})) }),
+    findCards: (p) => (p.query === "nid:555" ? [9001, 9002, 9003] : []),
+    getDecks: { Default: [9003], "Japanese::Mining": [9001, 9002] },
+  });
+  const storage = makeMemoryStorage({ settings: { cardStatus: true } });
+  const { sandbox, storage: store, dispatch } = loadBackground({ storage, fetch: mock.fetch, ...instantTimers });
+  assert.equal((await sandbox.cardStatus({})).reason, "noDeck");
+
+  const res = await dispatch(mineMsg(0), 1);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  await settle();
+  const seen = store._dump()[sandbox.DECK_SEEN_KEY];
+  assert.equal(seen.deck, "Japanese::Mining");
+  assert.equal(seen.noteId, 555);
+  assert.equal(typeof seen.at, "number");
+  const findCards = mock.calls.find((c) => c.action === "findCards");
+  assert.deepEqual(plain(findCards.params), { query: "nid:555" });
+  const getDecks = mock.calls.find((c) => c.action === "getDecks");
+  assert.deepEqual(plain(getDecks.params), { cards: [9001, 9002, 9003] });
+
+  // Automatic now means that deck; the card just filled is looked up straight away.
+  const coloured = await sandbox.cardStatus({});
+  assert.equal(coloured.ok, true, JSON.stringify(coloured));
+  assert.equal(coloured.deck, "Japanese::Mining");
+  assert.equal(coloured.automatic, true);
+  const before = mock.calls.filter((c) => c.action === "findNotes").length;
+  assert.equal((await dispatch(mineMsg(0), 1)).ok, true);
+  await settle();
+  await sandbox.cardStatus({});
+  assert.equal(mock.calls.filter((c) => c.action === "findNotes").length, before + 5, "the index was fetched again after the mine");
+});
+
+test("a mine whose deck cannot be told still succeeds and remembers nothing", async () => {
+  const mock = miningFetch({
+    ...ankiOk,
+    findCards: () => {
+      throw new Error("collection is not available");
+    },
+  });
+  const { storage, dispatch } = loadBackground({ fetch: mock.fetch, ...instantTimers });
+  const res = await dispatch(mineMsg(0), 1);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  await settle();
+  assert.equal(storage._dump().ankiDeckSeen, undefined);
+});
+
+test("ankiDecks lists the decks sorted with the last mined card's, and says why it cannot", async () => {
+  const seen = { ankiDeckSeen: { deck: "Japanese::Mining", at: 1, noteId: 555 } };
+  const anki = ankiFetch({ requestPermission: granted, deckNames: ["Japanese::Mining", "Default", "English"] });
+  const listed = loadBackground({ storage: makeMemoryStorage(seen), fetch: anki.fetch });
+  assert.deepEqual(plain(await listed.sandbox.ankiDecks()), { ok: true, decks: ["Default", "English", "Japanese::Mining"], seen: "Japanese::Mining" });
+
+  const none = loadBackground({ fetch: anki.fetch });
+  assert.deepEqual(plain(await none.sandbox.ankiDecks()), { ok: true, decks: ["Default", "English", "Japanese::Mining"], seen: null });
+
+  const away = loadBackground({
+    storage: makeMemoryStorage(seen),
+    fetch: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  assert.deepEqual(plain(await away.sandbox.ankiDecks()), { ok: false, reason: "offline", error: "Anki is not running or AnkiConnect is not installed", seen: "Japanese::Mining" });
+
+  const denied = ankiFetch({ requestPermission: { permission: "denied" } });
+  const refused = loadBackground({ fetch: denied.fetch });
+  const res = await refused.sandbox.ankiDecks();
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "denied");
+  assert.equal(res.seen, null);
+});
+
+test("the message switch routes cardStatus and ankiDecks", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, DECK_SETS, DECK_NOTES, { deckNames: [DECK] }));
+  const off = loadBackground({ fetch: anki.fetch });
+  assert.deepEqual(plain(await off.dispatch({ type: "cardStatus", since: 0 })), { ok: false, reason: "off" });
+  const on = loadBackground({ storage: colourSettings(), fetch: anki.fetch });
+  const res = await on.dispatch({ type: "cardStatus", since: 0 });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.entries.length, DECK_ENTRIES.length);
+  assert.deepEqual(plain(await on.dispatch({ type: "ankiDecks" })), { ok: true, decks: [DECK], seen: null });
+});

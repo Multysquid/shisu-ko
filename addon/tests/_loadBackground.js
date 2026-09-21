@@ -12,6 +12,7 @@ const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
 const MATCH_PATH = path.join(__dirname, "..", "match.js");
+const WORDS_PATH = path.join(__dirname, "..", "words.js");
 const SOURCE_PATH = path.join(__dirname, "..", "background.js");
 
 function makeMemoryStorage(initial) {
@@ -135,6 +136,8 @@ function loadBackground(overrides = {}) {
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
   // match.js sits between them in the manifest too: background.js reads SHISUKO_MATCH at load time.
   new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
+  // words.js follows match.js in the manifest: the deck index reads notes through SHISUKO_WORDS.
+  new vm.Script(fs.readFileSync(WORDS_PATH, "utf8"), { filename: WORDS_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
   // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, sleep) live in the global
   // *lexical* environment, not as globalThis properties, but that environment is shared across
@@ -146,6 +149,7 @@ function loadBackground(overrides = {}) {
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
       " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
       " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
+      " globalThis.CARD_STATUS_TTL_MS = CARD_STATUS_TTL_MS; globalThis.DECK_SEEN_KEY = DECK_SEEN_KEY;" +
       " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
