@@ -150,8 +150,10 @@ const HOLD_TIMEOUT_MS = 12000; // two missed 5 s heartbeats: the tab left the vi
 // How long a focused holder keeps the right without syncing. It has to exceed the content script's
 // 5 s idle heartbeat, or a *paused* focused tab would look quiet between two heartbeats and the
 // right would flap; it has to stay well under HOLD_TIMEOUT_MS so that a focused tab which really
-// stopped syncing -- master switch off, an ad, the YouTube home page, a throttled background tab --
-// hands the right on in one heartbeat instead of twelve seconds of blank overlays elsewhere.
+// stopped syncing -- master switch off, the YouTube home page, a throttled background tab --
+// hands the right on in one heartbeat instead of twelve seconds of blank overlays elsewhere. An
+// ad is not one of them: the content script syncs through it on the video's own position (or the
+// session would time out under a long mid-roll), so the watched tab keeps the right for its length.
 const FOCUS_STALE_MS = 7000;
 
 const activeTabs = new Map(); // windowId -> the tab active in it
@@ -170,8 +172,8 @@ function focusedTabId() {
 //
 // No tab becomes the holder unless it is the one asking; only an existing holder keeps a right it
 // already has. Naming a tab that did not ask looks tempting -- the focused tab is the one the
-// viewer wants -- but a focused tab that has stopped syncing (the master switch, an ad, the
-// YouTube home page) would then hold the right in silence and every other tab would stand by
+// viewer wants -- but a focused tab that has stopped syncing (the master switch, the YouTube
+// home page) would then hold the right in silence and every other tab would stand by
 // until its entry aged out. A focused tab that is not the holder needs no help: its own next tick
 // takes the right through rule 1, a second later at most.
 function electSyncTab(candidate, current, focused, tabs, now) {

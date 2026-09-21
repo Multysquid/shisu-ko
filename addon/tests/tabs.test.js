@@ -156,8 +156,8 @@ test("a watched tab that stops syncing releases the right after the focus window
   assert.equal(status(await dispatch(syncMsg(false), 2)), "standby");
   assert.equal(calls.length, 1);
 
-  // Alt+Shift+S in tab 1 (an ad, the YouTube home page, a throttled tab: the same silence). It is
-  // still the focused tab, and it never asks again.
+  // Alt+Shift+S in tab 1 (the YouTube home page, a throttled tab: the same silence). It is still
+  // the focused tab, and it never asks again.
   setNow(T0 + FOCUS_STALE_MS - 1);
   assert.equal(status(await dispatch(syncMsg(false), 2)), "standby");
   setNow(T0 + FOCUS_STALE_MS + 1);
@@ -170,6 +170,25 @@ test("a watched tab that stops syncing releases the right after the focus window
   assert.equal(status(await dispatch(syncMsg(false), 1)), "ready");
   assert.equal(status(await dispatch(syncMsg(false), 2)), "standby");
   assert.equal(calls.length, 3);
+});
+
+test("a watched tab syncing through an ad keeps the right: to the election an ad is a playing video", async () => {
+  const calls = [];
+  const { dispatch, activateTab, focusWindow, sandbox, setNow } = loadBackground({ fetch: recorder(calls) });
+  activateTab(1, 10);
+  activateTab(2, 20);
+  await focusWindow(10);
+  // A 30 s mid-roll in tab 1. The content script keeps asking every second through it, on the
+  // video's own position (the session must not time out under a long ad), so the ad is not one of
+  // the silences FOCUS_STALE_MS is sized for: tab 2, playing in another window, waits it out.
+  const ad = 30;
+  assert.ok(ad * 1000 > sandbox.HOLD_TIMEOUT_MS, "longer than every timeout, so the right had every chance to pass");
+  for (let s = 0; s <= ad; s++) {
+    setNow(T0 + s * 1000);
+    assert.equal(status(await dispatch(syncMsg(false), 1)), "ready", `${s} s`);
+    assert.equal(status(await dispatch(syncMsg(false), 2)), "standby", `${s} s`);
+  }
+  assert.equal(calls.length, ad + 1);
 });
 
 test("losing browser focus altogether leaves the right where it is", async () => {

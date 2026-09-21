@@ -540,7 +540,9 @@ test("sync remembers what the server is loading and what it refused, and forgets
 });
 
 // A sequence of /sync answers, each handed out once; the request bodies are kept for inspection.
-// Every other message still goes to the loader's stub, which records it in `sent`.
+// Every other message still goes to the loader's stub, which records it in `sent`. An answer with
+// `ok: false` is one of the background's own refusals (a 4xx/5xx as apiRequest passes it on, or
+// unreachable) and goes out as it is; anything else is the server's data.
 function serverAnswering(sandbox, answers) {
   const bodies = [];
   const other = sandbox.browser.runtime.sendMessage;
@@ -548,7 +550,8 @@ function serverAnswering(sandbox, answers) {
     if (msg.path !== "/sync") return other(msg);
     bodies.push(msg.body);
     if (!answers.length) throw new Error("the fake server ran out of answers");
-    return { ok: true, data: answers.shift() };
+    const answer = answers.shift();
+    return answer && answer.ok === false ? answer : { ok: true, data: answer };
   };
   return bodies;
 }
@@ -929,6 +932,58 @@ test("a standby answer teaches the tab nothing about the server", async () => {
   assert.equal(api.ankiPollAllowed(), true);
 });
 
+test("a request refused after standby clears the flag: the tab holds the right again, and the error shows", async () => {
+  const refused = (error) => ({ ok: false, error, data: { ok: false, error } }); // a 4xx/5xx, as apiRequest passes it on
+  const { api, sandbox } = loadContent();
+  await settled();
+  serverAnswering(sandbox, [
+    { status: "ready", session: "a", cues: [cue(0, "一")], next: 1, covered: [[0, 30]], duration: 1200 },
+    { status: "standby" },
+    refused("cache is broken"), // the viewer clicked into the tab: the election let this one through
+    refused("cache is broken"),
+    { status: "ready", session: "a", cues: [], next: 1, covered: [[0, 30]], duration: 1200 },
+    { status: "standby" },
+    { ok: false, offline: true, error: "Server unreachable" },
+  ]);
+  const el = statusElement();
+  api.state.statusEl = el;
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 10, paused: false };
+  api.state.settings.autoMine = true;
+  await api.sync();
+  await api.sync();
+  assert.equal(api.state.standby, true);
+
+  for (const round of [1, 2]) {
+    await api.sync();
+    // The background answers standby only with ok: true, so this answer means the request went to
+    // the server. The flag used to survive it, for as long as the server kept refusing the video:
+    // the line read "running in another tab", the guards stayed closed and a paused tab fell back
+    // to the heartbeat, all against the branch's own verdict.
+    assert.equal(api.state.standby, false, `round ${round}`);
+    assert.equal(api.state.serverStatus, "error", `round ${round}`);
+    assert.equal(api.state.offline, false, `round ${round}`);
+    assert.equal(el.textContent, "Shisu-ko: cache is broken", `round ${round}`);
+    assert.ok(el.classes.has("shisuko-status-error"), `round ${round}`);
+    assert.equal(api.premineAllowed(), true, `round ${round}`);
+    assert.equal(api.ankiPollAllowed(), true, `round ${round}`);
+    const st = { paused: true, t: 10, status: api.state.serverStatus, covered: api.state.covered, duration: 1200, lastSyncAt: NOW, standby: api.state.standby };
+    assert.equal(api.shouldSync(st, NOW + 1000), true, "an error is watched every tick, paused or not");
+  }
+  await api.sync();
+  assert.equal(api.state.serverStatus, "ready");
+  assert.equal(api.state.standby, false);
+
+  // Unreachable is not standby either, whatever the last tick said: offline outranks the flag in
+  // every guard, but the flag must not be what is left once the server is back.
+  await api.sync();
+  assert.equal(api.state.standby, true);
+  await api.sync();
+  assert.equal(api.state.standby, false);
+  assert.equal(api.state.offline, true);
+  assert.equal(api.state.serverStatus, "offline");
+});
+
 test("sync keeps the server's language verdict and drops it with the cues", async () => {
   const { api, sandbox } = loadContent();
   await settled();
@@ -956,6 +1011,44 @@ test("sync keeps the server's language verdict and drops it with the cues", asyn
   await api.sync();
   assert.equal(api.state.languagePaused, false);
   assert.equal(api.state.heard, null);
+});
+
+test("a request refused by the server drops the language pause, so its error shows in the pause's place", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  serverAnswering(sandbox, [
+    { status: "ready", session: "a", language_paused: true, heard: "en", cues: [], next: 0 },
+    { ok: false, error: "division by zero", data: { ok: false, error: "division by zero" } }, // a 500
+    { status: "ready", session: "a", language_paused: true, heard: "en", cues: [], next: 0 },
+    { ok: false, error: "invalid t/since", data: { ok: false, error: "invalid t/since" } }, // a 400
+    { status: "ready", session: "a", language_paused: true, heard: "en", cues: [], next: 0 },
+    { ok: false, offline: true, error: "Server unreachable" },
+  ]);
+  const el = statusElement();
+  api.state.statusEl = el;
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 10, paused: false };
+  const paused = "Shisu-ko paused: the speech is not in the subtitle language (hearing en)";
+
+  await api.sync();
+  assert.equal(el.textContent, paused);
+  for (const error of ["division by zero", "invalid t/since"]) {
+    await api.sync();
+    // statusText() ranks the pause above the status switch, so the verdict of the last good answer
+    // used to sit in front of the server's words, unstyled, for as long as the server refused.
+    assert.equal(api.state.serverStatus, "error", error);
+    assert.equal(api.state.languagePaused, false, error);
+    assert.equal(api.state.heard, null, error);
+    assert.equal(el.textContent, `Shisu-ko: ${error}`);
+    assert.ok(el.classes.has("shisuko-status-error"), error);
+    await api.sync();
+    assert.equal(api.state.languagePaused, true, "the next real answer brings the verdict back");
+    assert.equal(el.textContent, paused);
+  }
+  await api.sync();
+  assert.equal(api.state.languagePaused, false, "unreachable says as little about the session");
+  assert.equal(api.state.heard, null);
+  assert.equal(el.textContent, "Shisu-ko server offline. Start it with server/run.cmd or docker/up.cmd");
 });
 
 // ------------------------------------------------------------------ keyboard commands

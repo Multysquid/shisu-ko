@@ -259,9 +259,18 @@ A refused tab gets `{status: "standby"}` from the background without a server ca
 script treats that as "this tab is not the one talking to the server" and nothing more: it leaves
 `offline`, the server status, the cues and `since` untouched, so a tab that stands by and comes
 back keeps its subtitles, and it stops pre-mining and polling Anki, which is what kept `/clip`
-reaching the server from a tab the election had refused. `statusText()` in `content.js` (pure,
-tested) shows standby and the language pause even with `showStatus` off, since they are the only
-answer to "why is nothing appearing?"; neither is styled as an error.
+reaching the server from a tab the election had refused. Every other answer clears the flag, a
+refusal by the server (`{ok: false, error, data}`, a 4xx/5xx) or unreachable included: the
+background answers standby only with `ok: true`, so any other answer means the election let the
+request through, and a flag left by the last refused tick would hide the server's error behind
+"running in another tab" and keep the pre-mining and the Anki watch closed. Such a refusal also
+drops the language verdict (`languagePaused`, `heard`), as a restarted session does: the answer
+says nothing about the session, `statusText()` ranks the pause above the error, and the next
+real answer brings the verdict back. An ad does not hand the right on: `/sync` keeps going out
+through it (see "Gotchas"), so the watched tab keeps asking and keeps the right for the ad's
+length. `statusText()` in `content.js` (pure, tested) shows standby and the language pause even
+with `showStatus` off, since they are the only answer to "why is nothing appearing?"; neither is
+styled as an error.
 
 ## How automatic mining works
 

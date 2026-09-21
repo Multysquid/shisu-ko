@@ -801,6 +801,15 @@
       return;
     }
     if (!result || !result.ok) {
+      // Not standby, so the election let this request through: the background answers standby
+      // only with ok: true. A flag left by the last refused tick would rank above the verdict
+      // below in statusText() and keep the pre-mining and the Anki watch closed.
+      state.standby = false;
+      // The language verdict came from the last answer that was one; this one says nothing about
+      // the session, so it goes, as on a restart, or statusText() would show the pause in place of
+      // the error below. The next real answer brings it back.
+      state.languagePaused = false;
+      state.heard = null;
       // Only an answer the server itself gave carries `data` (null for an empty body). Without it
       // nothing of ours answered: the server unreachable, something else on its port (not JSON),
       // or the background gone (sendMessage's own {ok, error} during a reload or a worker restart),
