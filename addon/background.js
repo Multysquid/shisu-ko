@@ -1089,8 +1089,13 @@ function escapeHtml(text) {
 // said. Give it the whole sentence instead, carrying Yomitan's <b> around the looked-up word across.
 // Returns null when there is nothing to extend: unrelated text, or the sentence is already there.
 function extendSentenceField(existing, full) {
-  const text = String(full || "");
   const have = normalizeSentence(existing);
+  // A cue can hold two utterances, joined by the newline seam_for() put between them. Yomitan ends
+  // its sentence at that newline, so a fragment from the first row must not grow into the second:
+  // the seam is there precisely to keep the other speaker's line off the card. Grow inside the row
+  // the fragment came from; a cue without a seam is one row, and behaves as it always did.
+  const rows = String(full || "").split("\n");
+  const text = rows.find((row) => normalizeSentence(row).includes(have)) || String(full || "");
   const want = normalizeSentence(text);
   if (!have || !want || have.length >= want.length || !want.includes(have)) return null;
   const bold = (/<b[^>]*>([\s\S]*?)<\/b>/i.exec(String(existing)) || [])[1];

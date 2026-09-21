@@ -1055,11 +1055,27 @@ test("escapeHtml keeps the server's line break as a line break on the card", () 
   assert.equal(sandbox.escapeHtml("1<2\n&"), "1&lt;2<br>&amp;");
 });
 
-test("extendSentenceField carries a line break into the grown sentence", () => {
+// A merged cue can hold two utterances either side of the seam. Yomitan ends its sentence at the
+// newline, so growing its fragment past it would put the other speaker's line on the card -- which
+// is the one thing the seam exists to prevent.
+test("extendSentenceField grows a fragment inside its own row, never across the seam", () => {
   const { sandbox } = loadBackground();
   assert.equal(
-    sandbox.extendSentenceField("<b>体</b>動かない", "体動かない\n待って!"),
-    "<b>体</b>動かない<br>待って!"
+    sandbox.extendSentenceField("これは<b>猫</b>です。", "これは猫です。とても可愛い\n待って!"),
+    "これは<b>猫</b>です。とても可愛い"
+  );
+});
+
+test("extendSentenceField leaves a fragment that already holds its whole row alone", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.extendSentenceField("<b>体</b>動かない", "体動かない\n待って!"), null);
+});
+
+test("extendSentenceField is unchanged for a cue without a seam", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(
+    sandbox.extendSentenceField("これは<b>猫</b>です。", "これは猫です。とても可愛い。"),
+    "これは<b>猫</b>です。とても可愛い。"
   );
 });
 
