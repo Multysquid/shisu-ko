@@ -219,6 +219,10 @@
     // getProgressState().current; video.currentTime restarts from an arbitrary point on every load.
     live: false,
     liveOffset: 0, // media clock minus video.currentTime, refreshed on every sync
+    // What the server calls the session (`live` in every /sync answer). The player's API above
+    // answers only in Firefox and is not read through an ad; this one is for the status line
+    // alone and never moves the clock.
+    serverLive: false,
   };
 
   // ------------------------------------------------------------ helpers
@@ -754,6 +758,7 @@
     state.pausedSince = state.video && state.video.paused ? Date.now() : 0;
     state.live = false;
     state.liveOffset = 0;
+    state.serverLive = false;
     state.contentPlayhead = id ? startTimeFromUrl(location.href) : 0;
     clearResumeTimer();
     renderTranscript();
@@ -934,6 +939,7 @@
     // neither key, which reads as "still listening".
     state.languagePaused = data.language_paused === true;
     state.heard = typeof data.heard === "string" ? data.heard : null;
+    if (typeof data.live === "boolean") state.serverLive = data.live; // an older server sends no key: unchanged
     if (typeof data.duration === "number") state.duration = data.duration;
     if (Array.isArray(data.covered)) state.covered = data.covered;
     if (Array.isArray(data.cues) && data.cues.length) mergeCues(data.cues);
@@ -1149,10 +1155,6 @@
     }
   }
 
-  function coveredUntil(t) {
-    return coveredEnd(state.covered, t);
-  }
-
   // What the status line should say, and whether it is an error. Pure: a plain view in,
   // { text, isError } out.
   //
@@ -1213,6 +1215,21 @@
             const ahead = view.ahead;
             if (ahead === null) text = "Transcribing…";
             else if (ahead - t < 8 && ahead < view.duration - 1) text = `Transcribing… (ready to ${formatTime(ahead)})`;
+            // Covered to the end (the "done" reading, a second of slack for the decoder's own idea
+            // of the length) with not one cue: a silent clip, an instrumental. The line used to fall
+            // silent here too, which looks like a failure. Not an error, and a progress message like
+            // "Transcribing…", so it obeys the setting. A live stream's cues keep coming: never there.
+            // And `ahead` is the end of the range the playhead sits in, which need not begin at the
+            // start: a video resumed near its end (the saved position, a t= link) gets one window
+            // from the playhead on and nothing before it, the server never planning backwards, so
+            // the verdict about the whole video needs that range to run from the start as well
+            // (the first window opens half a second before the playhead).
+            else if (
+              ahead >= view.duration - 1 && view.duration > 0 && view.cueCount === 0 && !view.live &&
+              view.coveredFrom !== null && view.coveredFrom <= 0.5
+            ) {
+              text = "No speech found in this video";
+            }
             break;
           }
           default:
@@ -1230,6 +1247,7 @@
     const s = state.settings;
     // An ad runs on its own clock; the video's position is what the server works around.
     const t = isAdPlaying() ? state.contentPlayhead : playhead();
+    const range = coveredRange(state.covered, t);
     const { text, isError } = statusText({
       enabled: s.enabled,
       showStatus: s.showStatus,
@@ -1245,7 +1263,12 @@
       modelError: state.modelError,
       duration: state.duration,
       t,
-      ahead: coveredUntil(t),
+      ahead: range ? range[1] : null,
+      coveredFrom: range ? range[0] : null,
+      cueCount: state.cues.length,
+      // The player's own API says live only in Firefox, and not through an ad; the server's flag
+      // says it everywhere, so a stream's waiting screen never reads as a video without speech.
+      live: state.live || state.serverLive,
     });
     // Only touch the DOM when something changed: every mutation wakes other extensions'
     // observers (Bitwarden re-walks the whole page after each one).

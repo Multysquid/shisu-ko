@@ -916,7 +916,8 @@ test("renderText marks the card's state only with cardStatus on, in spans holdin
   const { api, sandbox } = withIndex({ cardStatus: true });
   const el = sandbox.document.createElement("span");
   api.renderText(el, cue(0, LINE));
-  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"]);
+  // の and です take the colour of the word they attach to (a run of their own, without its pitch).
+  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"]);
   assert.equal(el.textContent, LINE); // the DOM text is the line, for Yomitan
   assert.equal(el.childNodes[1].childNodes[0].nodeType, 3);
   api.renderText(el, cue(1, "字幕")); // drawn again: the old children go
@@ -936,7 +937,7 @@ test("renderText marks both with both colours on", () => {
   const { api, sandbox } = withIndex({ cardStatus: true, pitchAccent: true });
   const el = sandbox.document.createElement("span");
   api.renderText(el, cue(0, LINE));
-  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new,pitch=heiban}:字幕", "です"]);
+  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new,pitch=heiban}:字幕", "shisuko-word{status=new}:です"]);
   api.renderText(el, cue(1, ""));
   assert.deepEqual(nodes(el), []);
 });
@@ -956,7 +957,7 @@ test("setSubtitle and transcriptLine draw their text through renderText", () => 
   assert.equal(line.dataset.id, "0");
   const text = line.childNodes[1];
   assert.equal(text.className, "shisuko-linetext");
-  assert.deepEqual(nodes(text), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"]);
+  assert.deepEqual(nodes(text), ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"]);
   assert.equal(api.state.lineById.get(0), line);
 
   api.setSubtitle(null);
@@ -1148,7 +1149,7 @@ test("a transcript built anew and the line on screen draw the runs of the last d
   api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "字幕" }, { id: 2, start: 5, end: 6, text: "はい" }]);
   assert.equal(rebuilds.count, 1);
   assert.deepEqual(counts, { matched: 3, segmented: 3 });
-  const look = ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"];
+  const look = ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"];
   assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), look);
   api.setSubtitle(api.cueById(0)); // the cue of a line already drawn
   assert.deepEqual(nodes(api.state.subText), look);
@@ -1175,8 +1176,8 @@ test("a transcript built anew and the line on screen draw the runs of the last d
   setIndex(api, words.buildIndex([["字幕", "learning", null]]));
   api.refreshWordMarks();
   assert.equal(rebuilds.count, 2);
-  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), ["これは日本語の", "shisuko-word{status=learning}:字幕", "です"]);
-  assert.deepEqual(nodes(api.state.subText), ["これは日本語の", "shisuko-word{status=learning}:字幕", "です"]);
+  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), ["これは日本語の", "shisuko-word{status=learning}:字幕", "shisuko-word{status=learning}:です"]);
+  assert.deepEqual(nodes(api.state.subText), ["これは日本語の", "shisuko-word{status=learning}:字幕", "shisuko-word{status=learning}:です"]);
   assert.deepEqual(counts, { matched: 8, segmented: 3 });
 });
 
@@ -1266,13 +1267,13 @@ test("a cue drawn while the transcript is hidden keeps nothing of the index it w
   // matched against the index of now, and the look it gets is good until the next index.
   const counts = countingWords(sandbox);
   api.setSubtitle(api.cueById(0));
-  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=new}:字幕", "です"]);
+  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"]);
   assert.deepEqual(counts, { matched: 1, segmented: 0 });
   api.setSubtitle(api.cueById(0));
   assert.deepEqual(counts, { matched: 1, segmented: 0 });
   setIndex(api, words.buildIndex([["字幕", "learned", null]]));
   api.refreshWordMarks(); // the line on screen holds 字幕: drawn again under the index of now
-  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=learned}:字幕", "です"]);
+  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=learned}:字幕", "shisuko-word{status=learned}:です"]);
   assert.deepEqual(counts, { matched: 2, segmented: 0 });
   setIndex(api, null);
   api.refreshWordMarks();
@@ -1379,7 +1380,7 @@ test("pollWordIndex keeps an unchanged index, moves the stamp for the same words
   assert.equal(asks[3].since, 2000);
   assert.equal(api.state.wordIndexAt, 3000);
   assert.equal(api.state.wordIndex.size, 1);
-  assert.deepEqual(nodes(api.state.subText), ["これは", "shisuko-word{status=learning}:日本語", "の字幕です"]);
+  assert.deepEqual(nodes(api.state.subText), ["これは", "shisuko-word{status=learning}:日本語", "shisuko-word{status=learning}:の", "字幕です"]);
 });
 
 test("pollWordIndex drops the index when the background says off, and logs other failures once a minute", async () => {
@@ -1592,6 +1593,9 @@ function view(patch) {
       duration: 1200,
       t: 100,
       ahead: null,
+      coveredFrom: null,
+      cueCount: 40,
+      live: false,
     },
     patch
   );
@@ -1659,6 +1663,109 @@ test("statusText ranks the verdicts about the server above the local ones", () =
   // And the language pause over a model load and over "Transcribing…".
   assert.equal(says(api, { languagePaused: true, modelLoading: "large-v3" }).text,
     "Shisu-ko paused: the speech is not in the subtitle language");
+});
+
+// A session that is done with nothing to show used to look exactly like a broken one: the line
+// fell silent at the covered end whatever the cue count.
+test("statusText says when nothing was heard in a video covered to its end", () => {
+  const { api } = loadContent();
+  const silent = { text: "No speech found in this video", isError: false };
+  const nothing = { text: null, isError: false };
+  const done = { ahead: 1200, coveredFrom: 0, cueCount: 0 }; // the whole video, and not one cue
+  assert.deepEqual(says(api, done), silent);
+  assert.deepEqual(says(api, { ...done, ahead: 1199.5 }), silent); // the "done" reading: a second of slack
+  assert.deepEqual(says(api, { ...done, coveredFrom: 0.5 }), silent); // the first window starts half a second before the playhead
+  assert.deepEqual(says(api, { ...done, cueCount: 3 }), nothing); // cues: caught up, nothing to say
+  assert.deepEqual(says(api, { ...done, cueCount: 40 }), nothing);
+  // Not covered to the end yet: the work in progress, as before, however few cues there are.
+  assert.deepEqual(says(api, { ahead: null, cueCount: 0 }), { text: "Transcribing…", isError: false });
+  assert.deepEqual(says(api, { ahead: 105, coveredFrom: 0, cueCount: 0 }), { text: "Transcribing… (ready to 1:45)", isError: false });
+  assert.deepEqual(says(api, { ahead: 400, coveredFrom: 0, cueCount: 0 }), nothing); // minutes ahead, the end still out
+  // A live stream's cues keep coming, and a length still unknown decides nothing.
+  assert.deepEqual(says(api, { ...done, live: true }), nothing);
+  assert.deepEqual(says(api, { t: 0, ahead: 0, coveredFrom: 0, duration: 0, cueCount: 0 }), nothing);
+  // A progress message, not an error: it obeys the setting like "Transcribing…" does.
+  assert.deepEqual(says(api, { ...done, showStatus: false }), nothing);
+  // And below every verdict that outranks the status switch.
+  assert.equal(says(api, { ...done, standby: true }).text, "Shisu-ko: subtitles are running in another tab");
+  assert.equal(says(api, { ...done, modelLoading: "large-v3" }).text,
+    "Loading model large-v3… (a first use downloads it)");
+});
+
+// Covered "to the end" is the end of the range the playhead sits in, which need not start at the
+// start: a video resumed near its end (YouTube's saved position, a t= link) gets one window from
+// the playhead to the end and nothing before it, and an outro without a word there says nothing
+// about the eighteen minutes of speech the server never looked at.
+test("statusText claims no speech only when the covered range is the whole video", () => {
+  const { api } = loadContent();
+  const nothing = { text: null, isError: false };
+  assert.deepEqual(says(api, { t: 1150, ahead: 1200, coveredFrom: 1099.5, cueCount: 0 }), nothing);
+  assert.deepEqual(says(api, { t: 1150, ahead: 1200, coveredFrom: 1, cueCount: 0 }), nothing); // the first second missing
+  assert.deepEqual(says(api, { t: 1150, ahead: 1200, coveredFrom: null, cueCount: 0 }), nothing); // a view without the start
+});
+
+test("updateStatus reads the cue count and the live flag off the state", () => {
+  const { api } = loadContent();
+  const el = statusElement();
+  api.state.statusEl = el;
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 10, paused: true };
+  api.state.serverStatus = "ready";
+  api.state.duration = 34;
+  api.state.covered = [[0, 34]];
+  api.state.cues = [];
+  api.updateStatus();
+  assert.equal(el.textContent, "No speech found in this video");
+  assert.ok(!el.classes.has("shisuko-status-error"));
+  assert.ok(!el.classes.has("shisuko-hidden"));
+
+  api.state.live = true; // a 歌枠 between songs: its cues are still to come
+  api.updateStatus();
+  assert.ok(el.classes.has("shisuko-hidden"));
+
+  api.state.live = false;
+  api.state.cues = [cue(0, "一")];
+  api.updateStatus();
+  assert.ok(el.classes.has("shisuko-hidden")); // a cue arrived: nothing to say any more
+
+  // Resumed at 1100 s of 1200: the server's one window runs from the playhead to the end, and an
+  // outro without a word in it is no verdict about the rest.
+  api.state.cues = [];
+  api.state.duration = 1200;
+  api.state.covered = [[1099.5, 1200]];
+  api.state.video.currentTime = 1150;
+  api.updateStatus();
+  assert.ok(el.classes.has("shisuko-hidden"));
+});
+
+// The player's own API says live only in Firefox (wrappedJSObject) and not through an ad; the
+// server says it in every /sync answer, everywhere.
+test("sync takes the server's live flag for the status line, and a new video forgets it", async () => {
+  const { api, sandbox } = loadContent();
+  await settled(); // the load's own discovery, which finds no player in this document
+  const el = statusElement();
+  api.state.statusEl = el;
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 1150, paused: true };
+  const answer = (patch) => Object.assign({ status: "ready", session: "s1", duration: 1200, covered: [[0, 1200]], cues: [] }, patch);
+  serverAnswering(sandbox, [answer({ live: true }), answer({ live: false }), answer({ live: true }), answer({ session: "s2" })]);
+  // A stream's waiting screen: covered to the buffer's end with no cue yet, on a browser whose
+  // player never says live (Chrome), or before the first sync outside a pre-roll ad (Firefox).
+  await api.sync();
+  assert.equal(api.state.live, false);
+  assert.ok(el.classes.has("shisuko-hidden"));
+  await api.sync(); // the same numbers for a video: the verdict
+  assert.equal(el.textContent, "No speech found in this video");
+  assert.ok(!el.classes.has("shisuko-hidden"));
+  await api.sync();
+  assert.ok(el.classes.has("shisuko-hidden"));
+  // The next video is asked about anew: an answer without the key (an older server) leaves the
+  // flag where the new video put it, off.
+  sandbox.location.href = "https://www.youtube.com/watch?v=zyxwvu9876";
+  api.onVideoChanged("zyxwvu9876");
+  await settled();
+  assert.equal(el.textContent, "No speech found in this video");
+  assert.ok(!el.classes.has("shisuko-hidden"));
 });
 
 // ------------------------------------------------------------------ standby
