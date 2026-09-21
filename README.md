@@ -199,7 +199,7 @@ comes back.
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
 | Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
-| ← / → | Jump to the previous / next subtitle. Left replays the current line once you are more than a second into it. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
+| ← / → | Jump to the start of the previous / next subtitle. In a gap between lines, Left goes back to the line that just ended. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
 Chrome at `chrome://extensions/shortcuts`.

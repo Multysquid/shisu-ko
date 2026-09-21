@@ -69,8 +69,6 @@
   const HOVER_POLL_INTERVAL_MS = 300;
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
   const MIN_BLANK_S = 0.3;
-  // Left this far into a line replays it instead of stepping back to the one before.
-  const CUE_REPLAY_S = 1.0;
   const CUE_LEAD_IN_S = 0.15;
   // A playhead less than this far past a covered end is the server catching up, not a seek into
   // an untranscribed stretch: the server's own --window, the 40 s of speech it takes at a time. A
@@ -1045,10 +1043,14 @@
   // minutes to it is not what the key means. The playhead's range is the one it sits in, or the
   // one that ended less than COVERED_LAG_S before it (rangeBehind): a live stream's playhead runs
   // past the covered end most of the time, and so does a plain video's while a window is still
-  // being transcribed, and the line just heard is still the previous line there. Left replays the
-  // current line once the viewer is more than a second into it, the way asbplayer does, and steps
-  // back to the line before it otherwise; before the first line it lands on the start of the
-  // video. Every target starts a shade early so the first syllable survives.
+  // being transcribed, and the line just heard is still the previous line there.
+  //
+  // Left steps one line back and lands on its start: inside a line, the line before it; in the
+  // gap after a line, that line itself, which is the last thing heard and the one the viewer
+  // wants again. Before the first line it lands on the start of the video. Right takes the start
+  // of the next line. Left used to replay the current line once the viewer was a second into it,
+  // asbplayer's rule, but a subtitle line runs three to six seconds, so past that first second --
+  // nearly always -- Left restarted the line already playing and read as a dead key.
   function jumpTarget(cues, t, direction, covered) {
     const list = cues || [];
     if (!list.length) return null;
@@ -1063,23 +1065,31 @@
         hi = mid - 1;
       }
     }
-    let to;
+    let j; // the line to land on
     if (direction > 0) {
-      const next = list[idx + 1];
-      to = next ? leadIn(next.start) : null;
+      j = idx + 1;
     } else {
       const cur = list[idx];
-      const prev = idx > 0 ? list[idx - 1] : null;
-      if (cur && t - cur.start > CUE_REPLAY_S) to = leadIn(cur.start);
-      else to = prev ? leadIn(prev.start) : 0;
+      // Inside a line, step past it to the one before; in the gap after a line, that line is
+      // itself the step back, since nothing has been heard since.
+      j = cur && t <= cur.end ? idx - 1 : idx;
     }
+    let to;
+    if (direction < 0 && j < 0) to = 0; // nothing before the first line but the start of the video
+    else if (j < 0 || j >= list.length) to = null;
+    else to = leadIn(list[j].start, j > 0 ? list[j - 1].end : null);
     if (to === null || covered === undefined) return to;
     const range = coveredRange(covered, t) || rangeBehind(covered, t);
     return range && coveredRange(covered, to) === range ? to : null;
   }
 
-  function leadIn(start) {
-    return Math.max(0, start - CUE_LEAD_IN_S);
+  // A seek lands a shade before the line so its first syllable survives, but the lead-in may only
+  // eat silence. `normalise_gaps` on the server closes every gap under 0.5 s to 0.1 s, shorter
+  // than the lead-in itself, so reaching back through one lands inside the previous line and
+  // flashes its tail before the line that was asked for. Where there is no room, land on the line.
+  function leadIn(start, prevEnd) {
+    const want = start - CUE_LEAD_IN_S;
+    return Math.max(0, prevEnd !== null && prevEnd !== undefined && want < prevEnd ? start : want);
   }
 
   function onKeyDown(ev) {

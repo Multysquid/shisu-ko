@@ -1180,6 +1180,14 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
   `jumpTarget()` answers null, leaving YouTube's own seek alone, when there is no cue at all or
   the playhead and the target do not sit in the same covered range (`coveredRange()`): the last
   known line before an untranscribed stretch is not the previous line.
+- Left steps one line back wherever the playhead sits in the current line: inside a line, the line
+  before it; in the gap after one, that line again. It used to replay the current line past
+  `CUE_REPLAY_S` (1 s) into it, asbplayer's rule, but a line runs three to six seconds, so that
+  was nearly always and Left restarted what was already playing. And `leadIn()` takes the previous
+  cue's end as a floor: `normalise_gaps` closes every gap under 0.5 s to 0.1 s, shorter than the
+  0.15 s lead-in, so the old unclamped seek landed inside the previous line and flashed its last
+  frames before sweeping back into the line the viewer had just left. The lead-in may eat silence
+  and nothing else.
 
 ## Making changes
 

@@ -141,17 +141,36 @@ const JUMP_CUES = [
   { id: 2, start: 20, end: 22, text: "さん" },
 ];
 
-test("jumpTarget replays the current line once the viewer is a second into it", () => {
+test("jumpTarget steps back a line however far into the current one the viewer is", () => {
   const { api } = loadContent();
-  assert.equal(api.jumpTarget(JUMP_CUES, 6.5, -1), 4.85); // 5 - the 0.15 s lead-in
-  assert.equal(api.jumpTarget(JUMP_CUES, 9, -1), 4.85); // still the last line that started
+  // Left used to replay the current line past a second in. A line runs three to six seconds, so
+  // that was nearly always, and Left restarted what was already playing instead of going back.
+  assert.equal(api.jumpTarget(JUMP_CUES, 5.5, -1), 0); // 0.5 s into cue 1
+  assert.equal(api.jumpTarget(JUMP_CUES, 6, -1), 0); // 1.0 s in
+  assert.equal(api.jumpTarget(JUMP_CUES, 6.5, -1), 0); // 1.5 s in: still the line before, not a replay
+  assert.equal(api.jumpTarget(JUMP_CUES, 20.5, -1), 4.85); // 5 - the 0.15 s lead-in
 });
 
-test("jumpTarget steps back to the line before when the current one just started", () => {
+test("jumpTarget in the gap after a line steps back to that line, the last thing heard", () => {
   const { api } = loadContent();
-  assert.equal(api.jumpTarget(JUMP_CUES, 5.5, -1), 0); // 0.5 s in: the viewer meant the line before
-  assert.equal(api.jumpTarget(JUMP_CUES, 6, -1), 0); // exactly 1.0 s in is not yet a replay
-  assert.equal(api.jumpTarget(JUMP_CUES, 20.5, -1), 4.85);
+  assert.equal(api.jumpTarget(JUMP_CUES, 9, -1), 4.85); // cue 1 ended at 7: back to its own start
+  assert.equal(api.jumpTarget(JUMP_CUES, 3, -1), 0); // cue 0 ended at 2
+});
+
+test("the lead-in eats silence only, never the tail of the line before", () => {
+  const { api } = loadContent();
+  // What the server actually emits: normalise_gaps closes every gap under 0.5 s to 0.1 s, which
+  // is shorter than the 0.15 s lead-in. Seeking to start - 0.15 landed inside the previous line,
+  // so the viewer saw its last frames and was swept straight back into the line they left.
+  const tight = [
+    { id: 0, start: 65.08, end: 71.0, text: "a" },
+    { id: 1, start: 71.1, end: 74.1, text: "b" },
+    { id: 2, start: 74.76, end: 79.1, text: "c" },
+  ];
+  assert.equal(api.jumpTarget(tight, 76, -1), 71.1); // the line before, landed on exactly: 70.95 is cue 0
+  assert.equal(api.jumpTarget(tight, 73, 1), 74.61); // 0.66 s of silence ahead: the lead-in fits
+  // 65.08 - 0.15 in binary floating point; cue 0 has no neighbour behind it to clamp against.
+  assert.ok(Math.abs(api.jumpTarget(tight, 73, -1) - 64.93) < 1e-9);
 });
 
 test("jumpTarget lands on the start of the video before the first line", () => {
