@@ -366,3 +366,16 @@ def test_instance_lock_reads_only_a_held_lock_as_held(tmp_path, monkeypatch, cap
     lock_call_raises(monkeypatch, errno.EACCES if os.name == "nt" else errno.EWOULDBLOCK)
     assert server.try_lock(server.instance_lock_path(8790)) is None, "what a held lock raises"
     assert server.hold_instance_lock(8790) is False
+
+
+# --------------------------------------------------------------------------- Hugging Face defaults
+
+def test_hugging_face_notices_are_off_before_the_library_loads():
+    """The xet backend, the "set a HF_TOKEN" nag (an X-HF-Warning header the Hub sends, logged
+    twice) and the Windows symlink warning are switched off through the environment the module
+    sets on import, so the library, imported later by load_model(), starts with them."""
+    import os
+
+    assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+    assert os.environ["HF_HUB_VERBOSITY"] == "error"
+    assert os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] == "1"

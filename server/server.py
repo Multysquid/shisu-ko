@@ -113,6 +113,14 @@ def add_nvidia_dll_dirs() -> list:
 # The Hugging Face "xet" transfer backend has stalled on some Windows machines; plain HTTPS
 # downloads are slower to start but reliable. Set HF_HUB_DISABLE_XET=0 to opt back in.
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+# Two notices the model download prints for every viewer and neither of which asks for
+# anything a viewer should do: the Hub sends "You are sending unauthenticated requests ...
+# set a HF_TOKEN" as a warning header, which huggingface_hub logs through its own handler
+# and through ours (twice on screen), and on Windows without Developer Mode it warns that
+# its cache cannot use symlinks (it works, it just keeps a copy). Errors still come
+# through: a failed download is reported by friendly_model_error() with its own words.
+os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 NVIDIA_DIRS = add_nvidia_dll_dirs()
 
@@ -2442,8 +2450,11 @@ def main() -> None:
             pass
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("faster_whisper").setLevel(logging.WARNING)
-    for noisy in ("httpx", "httpcore", "huggingface_hub", "urllib3", "filelock"):
+    for noisy in ("httpx", "httpcore", "urllib3", "filelock"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # huggingface_hub reads HF_HUB_VERBOSITY (set above) when it configures its logger on
+    # import, later than this; the same level here covers the records logged before that.
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 

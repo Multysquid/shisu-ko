@@ -581,6 +581,11 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 - Windows command lines are limited to about 32 KB. Put long scripts in files instead of
   inline heredocs when running tools from a shell.
 - Hugging Face's xet transfer backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`.
+  It also sets `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the
+  library is imported: the Hub's "set a HF_TOKEN" nag arrives as an `X-HF-Warning` header that
+  huggingface_hub logs through its own bare handler and ours (twice on screen), and Windows
+  without Developer Mode gets a symlink `UserWarning` per model. Download failures still reach
+  the viewer through `friendly_model_error()`.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube. The Docker image
   ships Deno; the native setup relies on what is installed.
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
