@@ -31,10 +31,15 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 - **Sentence mining by itself.** The moment Yomitan adds a card, a screenshot and an MP3 clip of
   the whole sentence go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
   does the same on demand, into the newest card or into your Downloads folder.
-- **Your hardware, your model.** Whisper large-v3 by default. The popup switches to any other
-  model without restarting the server: a faster-whisper size or a Hugging Face repo id of a
-  CTranslate2 model, such as `kotoba-tech/kotoba-whisper-v2.0-faster` (Japanese-specialised,
-  about 6x faster) or a small CPU model. `--model` only sets the default.
+- **Word colours** (optional). With Anki running, every word of a line that has a card in your
+  deck is coloured by the card's state, green to red, and can carry an overbar in the colour of
+  its pitch accent, read from the card. The deck follows your mining, and a verb is found in its
+  conjugations.
+- **Your hardware, your model.** Setup asks whether you want Whisper large-v3 or small and
+  downloads it. The popup switches to any other model without restarting the server: a
+  faster-whisper size or a Hugging Face repo id of a CTranslate2 model, such as
+  `kotoba-tech/kotoba-whisper-v2.0-faster` (Japanese-specialised, about 6x faster) or a small
+  CPU model. `--model` only sets the default.
 - **Native, Nix or Docker.** A one-time setup script on Windows, Linux and macOS, a Nix flake,
   or a container with GPU support. All of them share the same model folder. When the native
   server is not running, a button in the popup starts it (Firefox).
@@ -47,7 +52,8 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 - For the Docker server: Docker with the NVIDIA Container Toolkit (Docker Desktop on Windows
   has it built in). The image already contains Deno.
 - An NVIDIA GPU with about 4 GB of free VRAM for large-v3. With less free memory the server
-  switches to int8 weights by itself; without a GPU use a small model on the CPU.
+  switches to int8 weights by itself; without a GPU pick the small model at setup and run on
+  the CPU.
 - Optional: [Yomitan](https://yomitan.wiki/) for lookups, [Anki](https://apps.ankiweb.net/)
   with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159) add-on for mining.
 
@@ -59,9 +65,14 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 **Linux/macOS:** `bash server/setup.sh` once, then `server/run.sh`.
 
 Setup creates an isolated Python environment in `~/.shisu-ko/venv` and installs faster-whisper,
-yt-dlp and the CUDA runtime libraries; nothing else on the system is touched. The first start
-downloads the Whisper large-v3 model (about 3 GB) into `~/.shisu-ko/models`. The server is ready
-when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
+yt-dlp and the CUDA runtime libraries; nothing else on the system is touched. It then asks which
+Whisper model the server should use, `1` for large-v3 (best quality, about 3 GB, wants a GPU with
+4 GB or more free) or `2` for small (about 500 MB, fine on a CPU, less accurate), downloads it
+into `~/.shisu-ko/models` with a progress bar and remembers the choice in
+`~/.shisu-ko/config.json`. When it says that everything is ready, close its window and start
+`run.cmd` / `run.sh`. The choice is kept even when the download fails or is stopped with Ctrl+C:
+the first start then downloads the chosen model itself, without the progress bar. The server is
+ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
 restarts itself if it ever crashes.
 
 From then on the toolbar popup can start it for you: while the server is offline, the status
@@ -69,12 +80,13 @@ line in the popup's header shows a **Start server** button. The first click asks
 permission to "exchange messages with programs other than Firefox"; allow it, and the button
 launches `server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background
 with its output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
-The button passes no options: the server starts with its defaults (large-v3, the GPU when there
-is one, no cookies), exactly as a bare `run.cmd` / `run.sh` start would. The popup's model
-field switches the model once that default one is up; anything else you usually append to
-`run.cmd` / `run.sh` (`--device cpu`, `--cookies-from-browser`, `--js-runtime`, ...) needs a start
-by hand, see [Server options](#server-options). Firefox only for now: Chrome wants the installed
-extension's id in the launcher's manifest. Docker and Nix users start the server as before.
+The button passes no options: the server starts with its defaults (the model chosen at setup,
+else large-v3; the GPU when there is one; no cookies), exactly as a bare `run.cmd` / `run.sh`
+start would. The popup's model field switches the model once that default one is up; anything
+else you usually append to `run.cmd` / `run.sh` (`--device cpu`, `--cookies-from-browser`,
+`--js-runtime`, ...) needs a start by hand, see [Server options](#server-options). Firefox only
+for now: Chrome wants the installed extension's id in the launcher's manifest. Docker and Nix
+users start the server as before.
 
 Setup registers that launcher with Firefox, and so does every `run.cmd` / `run.sh` start. An
 existing install therefore gets the button after one or two starts by hand: the start that
@@ -233,8 +245,9 @@ The first time, Anki shows a dialog asking whether to allow the extension; click
 names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types;
 change them in the popup to match yours. An optional sentence field is filled with the subtitle
 text only when it is empty, so it never overwrites what Yomitan wrote. An optional word field
-names the field holding the expression, used to tell two similar lines apart; left empty, the
-note's first field is read. If Anki is not running,
+names the field holding the expression, used to tell two similar lines apart and, by the
+[word colours](#word-colours), to read each card's word; left empty, the note's first field is
+read. If Anki is not running,
 mining by hand saves the files to Downloads instead (can be turned off).
 
 **Downloads.** With **Send screenshot and audio to** set to Downloads, the files land in
@@ -242,6 +255,48 @@ mining by hand saves the files to Downloads instead (can be turned off).
 
 DRM-protected videos block screenshots; the audio clip still works. The Shisu-ko server uses
 port 8790 precisely so that AnkiConnect can keep its default 8765.
+
+## Word colours
+
+Two optional colourings, both off by default, both in the popup's **Word colours** section. They
+need Anki running with AnkiConnect, the same as mining, and share its permission dialog: click
+**Yes** once. Nothing leaves your computer; the extension only reads your deck.
+
+**Colour words by their Anki card** colours each word of a subtitle line, and of the transcript
+panel, by the state of its card: green for a card you have learned (in review), yellow for one you
+are still learning, orange for a suspended card, red for a new one. A word with no card keeps the
+text colour. The cards come from one deck. Left on *Automatic*, that is the deck your last mined
+card went to: nothing is looked up until you have mined a card, and the first mine then names the
+deck (the hint under the **Deck** select says which, or "no card mined yet"). Choose a deck in
+the select to look at that one instead; its subdecks count. Words are taken from the note's word
+field (the popup's **Word field**, else the note's first field), and a verb or adjective is found
+in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
+食べたことがある and 食べ in 食べに行く, 書く colours 書かない and 書いて, 美しい colours
+美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり. A word is not
+coloured inside a compound (食べ物 for 食べる, 日本語 for 日本, 走者 for 走る), and a card for a
+particle, the copula or an auxiliary (は, のは, から, でも, だ, です, ます, ない, たい, ん …) never
+colours anything, since it would paint every line the same way. Two cards for one word show the
+one with the least progress; a suspended card only counts when there is no other.
+
+**Overbar by pitch accent** draws a bar over each word that has a card, in the colour of its pitch
+accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka (the colours Migaku and
+Yomitan use). The pattern is read from the card's pitch accent field in whichever form Yomitan
+wrote it: a category name (`{pitch-accent-categories}`), a position such as `[2]`
+(`{pitch-accent-positions}`) or the drawn graph (`{pitch-accents}`). A position needs the word's
+mora count to tell odaka from nakadaka; it comes from the graph, else from the card's reading
+field (a field named reading or furigana, not the sentence's), else from the word itself when it
+is kana, and without any of them the word counts as nakadaka. The field is found by itself: the
+first one whose name contains "pitch" or "accent" and holds a readable value, unless you name one
+under **Pitch accent field** in the *Anki, clips and server* drawer. Verbs and adjectives, which
+Yomitan files under kifuku, get no bar rather than a wrong one. Both colourings can be on at once:
+the text colour is the card's state, the bar its pitch.
+
+The deck is looked at again every 30 seconds while a video is open, and only the lines whose
+colours changed are redrawn, so a card you review in Anki changes colour within a minute and a
+card you have just mined shows red within seconds. The words stay ordinary page text, so Yomitan
+scans across the colours as before. When Anki is closed the colours stay as they were last read,
+or off when nothing was read yet; a deck that no longer exists colours nothing; either way the
+hint under the deck select says what stands in the way, and nothing is ever toasted on the video.
 
 ## Live streams
 
@@ -265,8 +320,8 @@ DVR disabled cannot be followed, since the server needs the numbered audio segme
 ![Popup, dark theme](docs/images/popup-dark.png)
 
 The switch in the header is the master switch. Off means nothing happens on YouTube pages: no
-overlay, no requests to the server, no Anki watching and no key handling, until it is switched
-on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
+overlay, no requests to the server, no Anki watching, no word colours and no key handling, until
+it is switched on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
 answers, and with which model and device; while it does not answer, a **Start server** button
 on that line launches it with the server's default options (Firefox, see
 [Start the server](#1-start-the-server)); the model field below takes effect once it is up. The
@@ -292,6 +347,10 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Left/Right jump between subtitles | Arrow keys move between cues instead of seeking five seconds |
 | Transcript panel | List of all cues so far, with jump and mine buttons |
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
+| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
+| Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
+| Overbar by pitch accent | Draws a bar over each word that has a card, in the colour of its pitch accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka, read from the card's pitch accent field |
+| Pitch accent field | In the Anki, clips and server drawer: the note field holding Yomitan's pitch accent; empty means the first field named pitch or accent that holds a readable value |
 | Font size, keep line after speech | Presentation; the linger time keeps short lines readable |
 | Hide YouTube's own captions | Avoids two subtitle layers |
 | Show progress messages on the video | The status badge; errors are always shown |
@@ -315,8 +374,9 @@ box, an outline, and the transcript docked left:
 The **Transcription model** drawer picks the Whisper model the server runs. The field takes a
 faster-whisper size (`large-v3`, `large-v3-turbo`, `distil-large-v3`, `medium`, `small`, ...)
 or the Hugging Face repo id `owner/name` of a CTranslate2 model
-(`kotoba-tech/kotoba-whisper-v2.0-faster`); empty means the server's own `--model`, which the
-placeholder shows. Models already downloaded are offered as suggestions. The change applies while
+(`kotoba-tech/kotoba-whisper-v2.0-faster`); empty means the server's own default (`--model`, else
+the model chosen at setup in `~/.shisu-ko/config.json`, else large-v3), which the placeholder
+shows. Models already downloaded are offered as suggestions. The change applies while
 a video plays: a model that is not on disk yet is downloaded from Hugging Face first, while the
 current model keeps subtitling, and once the swap is done the video's transcript starts over with
 the new model. Meanwhile the badge on the video says "Loading model X…"; a name the server cannot
@@ -326,8 +386,8 @@ during a switch, and the hint under the field carries the server's verdict on th
 
 The last drawer, **Anki, clips and server**, holds where mined material goes (Anki's newest
 card or the Downloads folder, with an optional Downloads fallback when Anki is unreachable), the
-AnkiConnect URL, the image, audio and sentence field names, the audio padding around the
-sentence, the clip format (MP3 or WAV), the Shisu-ko server URL (default
+AnkiConnect URL, the image, audio, sentence, word and pitch accent field names, the audio
+padding around the sentence, the clip format (MP3 or WAV), the Shisu-ko server URL (default
 `http://127.0.0.1:8790`) and the **Check for updates** link with the result of the last check.
 
 ## How it works
@@ -342,7 +402,8 @@ Firefox (addon/)                                 Local server (server/), http://
 |  - screenshot via <canvas>       |  GET /clip  |    windows at the playhead, then ahead of it   |
 +----------------------------------+ ----------> | 4. /clip cuts sentence audio from the source   |
         |                                        +------------------------------------------------+
-        | AnkiConnect (http://127.0.0.1:8765): storeMediaFile + updateNoteFields on the newest card
+        | AnkiConnect (http://127.0.0.1:8765): storeMediaFile + updateNoteFields on the newest card;
+        | findNotes + notesInfo on one deck for the word colours
         v
       Anki
 ```
@@ -388,13 +449,15 @@ it again; the server never downloads anything itself, and the extension never in
 Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `compose.yaml`.
 The popup's **Start server** button runs `run.cmd` / `run.sh` without any of them, so it always
 starts the defaults below (the model can still be switched from the popup afterwards); a server
-that needs `--device cpu`, cookies or another option is started by hand.
+that needs `--device cpu`, cookies or another option is started by hand. Without `--model` the
+server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3.
 
 | Option | Effect |
 |---|---|
 | `--model kotoba-tech/kotoba-whisper-v2.0-faster` | Default model (here the Japanese-specialised distilled one, about 6x faster and lighter on memory than large-v3). The popup overrides the default with any faster-whisper size or Hugging Face repo id, without a restart |
 | `--model large-v3-turbo` | OpenAI's faster large model as the default |
 | `--model small --device cpu` | CPU-only operation |
+| `--download-model small` | Download the model now, with a progress bar, and make it the default of later starts (what setup runs after its environment check); exits instead of starting the server, with code 2 on a failure or Ctrl+C, which `run.cmd` / `run.sh` do not restart on |
 | `--compute-type int8_float16` | Halves GPU memory use; chosen by itself when less than 4.5 GB is free |
 | `--cookies-from-browser firefox` | Age-restricted or members-only videos, or when YouTube asks for a sign-in |
 | `--cookies /path/cookies.txt` | Same, with an exported cookies file (use this inside Docker) |
@@ -475,14 +538,14 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
-| **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads large-v3 (3 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
+| **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads the default model unless setup already did (large-v3 is 3 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
 | The banner or **Update** says the server cannot update itself | The server was not started by `run.cmd` / `run.sh` (Docker, Nix, `python server.py` by hand: it has no launcher to run `update.py` after the exit), was started with `--no-update` or `SHISUKO_NO_UPDATE`, or is a 0.8.0 server, which predates the button. The banner names the first of those causes whatever the actual one, because the server only reports that it cannot. Update it the way it was started: `docker compose build`, `nix run` with the new revision, or a plain restart of `run.cmd` / `run.sh`, which updates before every start. A `run.sh` that updated itself from before 0.9.0 keeps running its old loop, so its first server is refused too; restart `run.sh` once by hand (`run.cmd` reads its new loop as soon as it has updated and needs no restart). |
 | "The server restarted but still runs X; look at its window: update.py said why" | The launcher ran `update.py` but it could not update: local changes git would overwrite, a diverged branch, a detached HEAD, no network, or a release zip that could not be downloaded. Its message is in the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS); fix that and click **Update** again, or update by hand (`git pull`, or unpack the release). |
 | **Update** ends with "No answer from the server 120 s after the update" | The server exited for the update but nothing answered within two minutes: the new version is still loading its model (a CPU load takes minutes, and a new default model is downloaded first), or it did not start (the new version crashed, or `update.py` could not reinstall the requirements). Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS). A server that is still loading answers by itself in a while and the popup's status line follows; otherwise fix what the log says and click **Start server**, which is back on the status line. |
 | No update notification although GitHub has a newer release | The notification comes from one place only: the check when Firefox starts (or the extension is installed or updated), and only when the server is already running at that moment, started by `run.cmd` / `run.sh` and able to update itself. With the usual order, Firefox first and the server started later by hand or with **Start server**, there is none: the popup's own check (on opening, when the last one is over a day old or failed, and on **Check for updates** in the Anki, clips and server drawer) sets the toolbar badge and the banner but never notifies, and a profile that has never opened the popup checks nothing on its own. The line under **Check for updates** says why a check failed: offline, or GitHub's limit of sixty unauthenticated requests an hour per address (shared with everything else on your connection that asks GitHub's API). The notification is shown once per browser session; **Not now** hides the banner until Firefox restarts, and the toolbar badge stays either way. |
 | Firefox keeps the old extension after an update, or its menu button shows a notice that Shisu-ko requires new permissions | 0.9.0 adds the `notifications` permission, and Firefox holds an update that adds a permission until you approve it: open the notice on the application menu (≡) or Add-ons and themes and allow "Display notifications to you". A `.xpi` opened by hand asks in its install dialog instead. |
 | Server says "Another server is already starting or running on port 8790 (it holds ~/.shisu-ko/server-8790.lock). Stop it first." and stops (exit code 2) | A second server was started while one is loading or running: `run.cmd` double-clicked twice, or a start by hand while a server the popup launched is still in its update check (the **Start server** button itself looks at the lock first and reports a loading server as already starting). Close the window and let the first one finish; it holds the lock until it exits, and the file needs no cleaning up. If no server is running and the message persists, a stale `server.py` process still holds it; end that process (Task Manager, `pkill -f server.py`). |
-| First start sits at "Loading Whisper model" for a long time | The 3 GB download runs at your connection speed. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
+| First start sits at "Loading Whisper model" for a long time | A model that setup did not download (large-v3 is 3 GB) is fetched at your connection speed, without a progress bar in the server window; `setup.cmd` / `setup.sh` and `server.py --download-model NAME` show one. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
 | "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
 | "Shisu-ko: model X: unknown model size" or "… was not found on Hugging Face" | The name in the popup's Transcription model field is not a faster-whisper size or an existing `owner/name` repo. Fix the name there; the previous model keeps running meanwhile. |
 | "Shisu-ko: model X: … not a CTranslate2/faster-whisper model" | The repo holds a PyTorch checkpoint, not converted weights. Convert it with `ct2-transformers-converter`, or pick a `*-ct2` or `faster-whisper` repo of the same model. |
@@ -522,12 +585,15 @@ addon/                Firefox extension (Manifest V3, plain JS, no build step)
   background.js       server proxy, settings, AnkiConnect watching, Downloads handling, server start,
                       release check (GitHub), badge and notification, the server's update
   settings.js         the one place settings and their defaults are declared
+  match.js, words.js  shared by background.js and content.js: matching a card to its subtitle;
+                      the word colours (reading a note's word and pitch, finding words in a line)
   popup.*             settings UI with the server status, the Start and Update buttons and the update
                       banner, also the preferences page
-  tests/              Node tests for background.js, popup.js and the pure helpers of content.js
+  tests/              Node tests for background.js, popup.js, match.js, words.js and the pure helpers
+                      of content.js
 server/
   server.py           HTTP server: yt-dlp + faster-whisper + live follower + clip cutting
-  setup.cmd/.sh       one-time environment setup     run.cmd/.sh   start (with auto-restart)
+  setup.cmd/.sh       setup, downloads the model     run.cmd/.sh   start (with auto-restart)
   update.py           self-update run by run.cmd/.sh, first and after the server exits with code 4
                       (POST /update): git fast-forward or newest release
   native_host.py      native-messaging host behind the popup's Start server button (stdlib only);
@@ -603,7 +669,13 @@ The update check is covered on both sides too: `background.test.js` feeds a fake
 to `checkForUpdate`, the version helpers and `decideUpdate`, the badge and the one notification
 per session, the `/update` request with its record, and the `/health` polls that end it;
 `popup.test.js` walks the banner through every verdict, Update to "Updated to 0.9.0", the old
-version coming back, the 120 s deadline, Not now and Check for updates.
+version coming back, the 120 s deadline, Not now and Check for updates. The word colours are
+covered in `words.test.js` (reading a note's fields and pitch accent, the card states, the
+conjugation matcher with its boundaries and the words it must not colour), `background.test.js`
+(the deck's five searches, the index and its time to live, the deck of the last mined card, Anki
+away or refusing, a hostile note), `content.test.js` (the spans a line is drawn with, the poll, a
+deck change, the refresh that redraws only the changed lines) and `popup.test.js` (the deck list,
+its hints and when Anki is asked).
 
 ## Acknowledgements
 

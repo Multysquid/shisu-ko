@@ -6,7 +6,8 @@ Shisu-ko shows live Japanese subtitles on YouTube in Firefox. A small server on 
 - **Text a dictionary can read.** Subtitles are real page text, so [Yomitan](https://yomitan.wiki/) or any popup dictionary scans them. Hovering a line pauses the video, the dictionary popup keeps it paused, and moving back over the video resumes it.
 - **A transcript panel** with every line so far. A timestamp jumps there, a pickaxe mines it.
 - **Sentence mining without pressing anything.** The moment Yomitan adds a card, Shisu-ko attaches a screenshot of the frame you were reading and an MP3 clip of the whole sentence, through AnkiConnect. The pickaxe on a line, or Alt+Shift+M, does the same on demand, into the newest card or into your Downloads folder.
-- **Your hardware, your model.** Whisper large-v3 by default on an NVIDIA GPU; the popup switches to the Japanese-specialised kotoba-whisper (about 6x faster), to a small model on the CPU or to any other faster-whisper model, without restarting the server.
+- **Word colours, if you want them.** With Anki running, every word of a line that has a card in your deck is coloured by the card's state (green learned, yellow learning, orange suspended, red new), and can carry an overbar in the colour of its pitch accent, read from the card's pitch accent field. The deck follows your mining, a verb is found in its conjugations, and the text stays scannable. Both are off by default.
+- **Your hardware, your model.** Whisper large-v3 or small, chosen and downloaded at setup, on an NVIDIA GPU or the CPU; the popup switches to the Japanese-specialised kotoba-whisper (about 6x faster) or to any other faster-whisper model, without restarting the server.
 - **Your fonts.** The subtitle font is a preset (gothic, rounded, mincho) or any font installed on your computer, with position, colour, box and outline adjustable.
 - **A Start button for the server.** When the server is not running, the popup starts it for you; Firefox asks once for permission to talk to the small launcher that the server's setup registers.
 - **Updates without leaving the browser.** The popup tells you when a newer release is out, and one click makes the server update itself and restart; the extension itself is updated by Firefox from this listing.
@@ -19,7 +20,7 @@ The extension does nothing on its own. Download the server from the project page
 - Linux and macOS: `bash server/setup.sh` once, then `server/run.sh`.
 - Also available as a Nix flake and as a Docker image with GPU support.
 
-Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScript runtime for YouTube), and an NVIDIA GPU with about 4 GB of free VRAM for large-v3; without a GPU, use a small model on the CPU. Optional: Yomitan for lookups, Anki with the AnkiConnect add-on for mining.
+Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScript runtime for YouTube), and an NVIDIA GPU with about 4 GB of free VRAM for large-v3; without a GPU, pick the small model at setup and run on the CPU. Optional: Yomitan for lookups, Anki with the AnkiConnect add-on for mining and the word colours.
 
 **Shortcuts**
 
@@ -30,6 +31,6 @@ Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScri
 
 **Privacy**
 
-The extension talks to the server on your own computer and, if you use mining, to Anki on your own computer. Its one remote request is an anonymous look at GitHub for the newest release, once a day (a check that failed, offline for instance, is tried again the next time the popup opens) and when you click Check for updates. It has no account, no analytics and no remote code. The privacy policy on this page lists exactly what is exchanged with those programs.
+The extension talks to the server on your own computer and, if you use mining or the word colours, to Anki on your own computer. Its one remote request is an anonymous look at GitHub for the newest release, once a day (a check that failed, offline for instance, is tried again the next time the popup opens) and when you click Check for updates. It has no account, no analytics and no remote code. The privacy policy on this page lists exactly what is exchanged with those programs.
 
 Shisu-ko is free software under the MIT license. Source code, setup guide, server options and troubleshooting: https://github.com/Multysquid/shisu-ko

@@ -10,7 +10,10 @@ once per second while a video plays, receives subtitle cues back and renders the
 player as plain DOM text (textContent), so
 popup dictionaries such as Yomitan can scan them. Optionally it sends a screenshot of the video
 frame and an MP3 clip of the sentence to Anki through the AnkiConnect add-on
-(http://127.0.0.1:8765), or saves them to Downloads/shisu-ko-mining/.
+(http://127.0.0.1:8765), or saves them to Downloads/shisu-ko-mining/. Two further options, off
+by default, read one Anki deck through AnkiConnect to colour the words of a line that have a
+card by the card's state and to draw an overbar in the colour of the card's pitch accent; the
+text stays text nodes, inside inline spans that carry only two data attributes.
 
 Nothing is sent to us or to any third party. The extension only ever contacts youtube.com (as a
 content script), the local server, the local AnkiConnect and, for its update check, GitHub's
@@ -28,12 +31,17 @@ The demo recording in the README shows the expected behaviour: https://github.co
 1. Get the server (Ubuntu 24.04, Python 3.10+, Node 20+ on PATH for yt-dlp):
      git clone https://github.com/Multysquid/shisu-ko && cd shisu-ko
      bash server/setup.sh          # creates ~/.shisu-ko/venv and installs faster-whisper, yt-dlp, numpy
-                                   # (if it stops at "venv": sudo apt install python3-venv)
-     server/run.sh --model small --device cpu
-   The first start downloads the "small" Whisper model (about 500 MB) into ~/.shisu-ko/models.
+                                   # (if it stops at "venv": sudo apt install python3-venv);
+                                   # it then asks "Which Whisper model should the server use?":
+                                   # type 2 (small, about 500 MB), and it downloads that model into
+                                   # ~/.shisu-ko/models with a progress bar and keeps the choice in
+                                   # ~/.shisu-ko/config.json
+     server/run.sh --device cpu    # "small" is now the default model, from config.json
    The server is ready when it prints "Listening on http://127.0.0.1:8790".
    (--model base or --model tiny are faster still; Japanese accuracy is lower but subtitles
-   appear the same way. On CPU a 20-second window takes roughly 5-15 s with "small".)
+   appear the same way. On CPU a 20-second window takes roughly 5-15 s with "small". If setup's
+   download failed or was interrupted, the first start fetches the chosen model itself, without
+   the progress bar.)
 
 2. Install the extension: about:debugging#/runtime/this-firefox > Load Temporary Add-on > the zip.
 
@@ -59,7 +67,7 @@ The demo recording in the README shows the expected behaviour: https://github.co
    https://www.youtube.com/@ANNnewsCH/streams). Subtitles trail the sound by a few seconds.
 
 7. The switch in the popup header (Alt+Shift+S) turns everything off: no overlay, no requests to
-   the server, no key handling, until it is switched on again.
+   the server or to Anki, no key handling, until it is switched on again.
 
 8. Optional, the "Start server" button: stop the server (Ctrl+C in its terminal) and open the
    popup. The status line says "Server offline" and shows "Start server". Clicking it asks for
@@ -67,18 +75,19 @@ The demo recording in the README shows the expected behaviour: https://github.co
    Firefox"); after "Allow", the extension asks the native-messaging host "shisuko" (registered
    by setup.sh in step 1, ~/.mozilla/native-messaging-hosts/shisuko.json) to run server/run.sh
    without any options, and the status line goes to "Starting server". The server therefore
-   starts with server.py's defaults (--model large-v3, --device auto), not with the
-   --model small --device cpu of step 1: on a machine without a GPU it first downloads large-v3
-   (about 3 GB) into ~/.shisu-ko/models and then loads it on the CPU, which takes minutes,
-   longer than the 90 s the popup waits. Expect the status line to fall back to "Server offline"
-   with the hint "No answer from the server after 90 s: look at /home/<user>/.shisu-ko/server.log
-   before starting it again; a first use downloads the model, which takes minutes" and the
-   button to return. Clicking it again is harmless: the host sees the server's lock file and
-   answers that it is already starting, so nothing is launched twice and the popup waits again.
-   The status line reaches "Server online" once server.log prints "Listening on
-   http://127.0.0.1:8790" (the server's output goes there when the button started it). The
-   model can then be changed in the popup's "Transcription model" field, for example to "small",
-   without restarting. Declining the permission only puts a hint on the status line.
+   starts with server.py's defaults: the model chosen at setup (config.json; "small" after
+   step 1, already on disk) and --device auto, which falls back to the CPU on a machine without
+   a GPU. The status line reaches "Server online" once server.log prints "Listening on
+   http://127.0.0.1:8790" (the server's output goes there when the button started it). Had
+   large-v3 been chosen at setup instead, a machine without a GPU would load its 3 GB on the
+   CPU, which takes minutes, longer than the 90 s the popup waits: the status line then falls
+   back to "Server offline" with the hint "No answer from the server after 90 s: look at
+   /home/<user>/.shisu-ko/server.log before starting it again; a first use downloads the model,
+   which takes minutes" and the button returns. Clicking it again is harmless: the host sees the
+   server's lock file and answers that it is already starting, so nothing is launched twice and
+   the popup waits again. The model can be changed in the popup's "Transcription model" field,
+   for example to "base", without restarting. Declining the permission only puts a hint on the
+   status line.
 
 9. Optional, the update check: expand "Anki, clips and server" in the popup and click "Check for
    updates". The line under it reads "Newest release: <release>, checked just now" (or why the
@@ -91,9 +100,29 @@ The demo recording in the README shows the expected behaviour: https://github.co
    --no-update, answers 409 and the banner says it cannot update itself. With a checkout at
    the newest release nothing but the result line shows.
 
+10. Optional, the word colours (needs Anki with AnkiConnect and a deck with a few Japanese
+    words in it): in the popup's "Word colours" section tick "Colour words by their Anki card"
+    and pick the deck in the "Deck" select (Anki asks once whether to allow the extension; the
+    list is fetched then, and the hint under the select reads "Looking at <deck>" for the
+    automatic entry, or nothing for a chosen one). Left on "Automatic", the deck is the one the
+    last card mined in step 5 went to, and nothing is looked up before a card was mined. On the
+    video, every word of a subtitle that has a card in that deck turns green (a card in review),
+    yellow (learning), orange (suspended) or red (new), in the transcript panel as well; a verb
+    is found in its conjugations. The deck is read again every 30 s while a video is open, so
+    suspending a card in Anki changes its colour within a minute. "Overbar by pitch accent"
+    draws a line over each such word in the colour of the pattern in the card's pitch accent
+    field (blue heiban, red atamadaka, orange nakadaka, green odaka), if the note has one. With
+    both off, nothing is asked of Anki beyond step 5. Inspecting a subtitle shows the text as
+    text nodes inside <span class="shisuko-word" data-status=... data-pitch=...>, nothing else.
+
 PERMISSIONS
 
-- storage: the settings (browser.storage.local).
+- storage: the settings (browser.storage.local), beside them the deck the last mined card went
+  to ("ankiDeckSeen": the deck name, the note id and a time, what the word colours' automatic
+  deck means) and the result of the update check (below); browser.storage.session holds a few
+  records for the browser session (the launch and update records below, and the words and
+  pitch accents read from the deck for the word colours, "deckNotes", so a restarted
+  background page need not read the deck again).
 - downloads: the Downloads fallback for mined screenshot/audio files (browser.downloads.download
   with a blob: URL created in the background script; the URL is revoked when the download ends).
 - tabs: the popup calls browser.tabs.query({url: <youtube origins>}) to reload the open YouTube
@@ -165,9 +194,18 @@ CODE THAT MAY NEED A WORD
   (only from the popup's Update button or a click on the update notification; the server
   answers {ok, restarting, version} and exits so that its own launcher runs the project's
   update.py and starts it again, or 409 {ok: false, error} when it cannot); anki():
-  AnkiConnect JSON
-  requests (requestPermission, findNotes, storeMediaFile, updateNoteFields, and the fields of
-  the one note being filled).
+  AnkiConnect JSON requests. For mining: requestPermission, findNotes ("added:1"),
+  storeMediaFile, updateNoteFields, notesInfo for the one note being filled, and after it
+  findCards / getDecks for that note, to remember its deck. For the word colours (only while
+  one of the two options is on; the "word colours" section of background.js): deckNames for
+  the popup's deck list, findNotes on the one deck with is:suspended / -is:suspended / is:new /
+  is:learn / is:review clauses (five searches, and a sixth, edited:<days>, on a refresh, with
+  notesModTime on its result, so that only edited notes are read again), notesInfo on those
+  notes in chunks of 200, of which the word field, the pitch accent field and the modification
+  time are kept, and deckNamesAndIds only for a deck named "current" or "filtered", which
+  Anki's search reads as keywords. The deck's index is kept for 30 s and asked for by a tab
+  every 30 s while a video is open and the tab visible. words.js, shared by background.js and
+  content.js, reads the fields and finds the words in a line; it is pure, without DOM.
 - background.js, startServer(): the only use of nativeMessaging (above). It remembers a
   launch in browser.storage.session (the host's answer and a deadline 90 s ahead) so a reopened
   popup does not start a second server while the first is still loading its model; the record
@@ -183,7 +221,10 @@ CODE THAT MAY NEED A WORD
   request), so a reopened popup follows the restart instead of asking for a second one;
   none of it is written to disk.
 - The content script never uses innerHTML or similar: youtube.com enforces Trusted Types, so
-  all DOM is built with createElement/textContent.
+  all DOM is built with createElement/textContent. The word colours are the one markup inside
+  a subtitle's text: renderText() puts the text in as text nodes, a word with a card inside an
+  inline <span class="shisuko-word"> with data-status and/or data-pitch, and content.css colours
+  it; the values come from a fixed list of eight words, never from the note.
 
 DATA COLLECTION DECLARATION
 
@@ -192,7 +233,8 @@ transmits nothing about the user off the device: its peers besides youtube.com a
 programs on the same computer that the user installed for this purpose (the companion server
 and Anki), and what they receive (the id and playback position of the video being watched; a
 screenshot and an audio clip of the sentence being mined) is the add-on's stated primary
-function. The one remote request, the anonymous release check against GitHub's public API
+function; what the add-on reads from Anki for the word colours (one deck's notes) stays on the
+device, in memory and in the extension's storage. The one remote request, the anonymous release check against GitHub's public API
 described under PERMISSIONS, carries no data about the user, the browser or the videos
 watched. The privacy policy on the listing describes this in full.
 

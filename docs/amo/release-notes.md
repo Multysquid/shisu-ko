@@ -2,6 +2,8 @@ First version on addons.mozilla.org. Earlier versions were self-distributed thro
 
 Since 0.3:
 
+- **Word colours.** Two options in the popup, both off by default. "Colour words by their Anki card" colours every word of a subtitle, and of the transcript, that has a card in your deck by the card's state: green learned, yellow learning, orange suspended, red new; a verb or adjective is found in its conjugations. "Overbar by pitch accent" draws a bar over each such word in the colour of its pitch accent pattern (blue heiban, red atamadaka, orange nakadaka, green odaka), read from the card's pitch accent field as Yomitan writes it. The deck is the one your last mined card went to, or the one you choose; it is read again every half minute while a video is open, and the text stays scannable by Yomitan. Needs Anki with AnkiConnect, like mining.
+- Setup asks which Whisper model to use, large-v3 or small, and downloads it with a progress bar; the server starts on that model unless told otherwise.
 - Live streams get the same subtitles, transcript and mining as videos; the cues follow the stream's own clock, so they stay aligned after seeking and whatever your playback latency is.
 - The switch in the popup header (Alt+Shift+S) is a master switch: off means nothing happens on YouTube pages until it is switched on again.
 - A new card is matched to its subtitle by sentence and word (the note's word field, or the one named in the popup), and the screenshot and audio of every sentence are prepared while it plays, so the card is filled the moment it appears.
