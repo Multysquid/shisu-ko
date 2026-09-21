@@ -1045,6 +1045,40 @@ test("extendSentenceField writes the transcription as text, with only its own <b
   assert.equal(sandbox.extendSentenceField("Look at <b>the cat</b>.", "Look at the cat. 1<2 & \"so\" it's"), "Look at the cat. 1&lt;2 &amp; &quot;so&quot; it&#39;s");
 });
 
+// The server joins two merged utterances with a newline, and the overlay, Yomitan and match.js all
+// read it as a line break. HTML would collapse it into a space, so the card would lose the only
+// mark saying where one utterance ended and the next began.
+test("escapeHtml keeps the server's line break as a line break on the card", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.escapeHtml("体動かない\n待って!"), "体動かない<br>待って!");
+  assert.equal(sandbox.escapeHtml("a\r\nb"), "a<br>b");
+  assert.equal(sandbox.escapeHtml("1<2\n&"), "1&lt;2<br>&amp;");
+});
+
+// A merged cue can hold two utterances either side of the seam. Yomitan ends its sentence at the
+// newline, so growing its fragment past it would put the other speaker's line on the card -- which
+// is the one thing the seam exists to prevent.
+test("extendSentenceField grows a fragment inside its own row, never across the seam", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(
+    sandbox.extendSentenceField("これは<b>猫</b>です。", "これは猫です。とても可愛い\n待って!"),
+    "これは<b>猫</b>です。とても可愛い"
+  );
+});
+
+test("extendSentenceField leaves a fragment that already holds its whole row alone", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.extendSentenceField("<b>体</b>動かない", "体動かない\n待って!"), null);
+});
+
+test("extendSentenceField is unchanged for a cue without a seam", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(
+    sandbox.extendSentenceField("これは<b>猫</b>です。", "これは猫です。とても可愛い。"),
+    "これは<b>猫</b>です。とても可愛い。"
+  );
+});
+
 test("addToAnki escapes the sentence it writes into an empty field", async () => {
   const storage = makeMemoryStorage({ settings: { ankiSentenceField: "Sentence" } });
   const anki = ankiFetch({

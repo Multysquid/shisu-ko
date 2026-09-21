@@ -118,13 +118,21 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
   `load_cache()` brings them back from there after a switch back. A record carries `"lyrics"`,
   the rule its covered ranges were made under (`--lyrics` as the server ran, see "How the server
-  schedules work"): a server before 0.11.3, or `--lyrics off`, marked a sung stretch covered
-  with nothing in it, so `load_cache()` under `--lyrics auto` gives a record without
-  `"lyrics": "auto"` its blank stretches back (`unheard_stretches()`: the parts of `covered` of
-  at least 1.5 s, `plan_window()`'s own floor, that no speech interval and no cue touches, taken
+  schedules work"): a 0.11.2 server (format 3 without the key), or `--lyrics off`, marked a sung
+  stretch covered with nothing in it, so `load_cache()` under `--lyrics auto` gives a record
+  without `"lyrics": "auto"` its blank stretches back (`unheard_stretches()`: the parts of
+  `covered` that no speech interval and no cue touches, under two floors: 1.5 s, `plan_window()`'s
+  own floor, at either end of a covered range, where a video's music sits, and
+  `LYRICS_MIN_STRETCH_S` (4 s) between two heard things, `load_cache()` passing
+  `inner_seconds=LYRICS_MIN_STRETCH_S`, since every pause of a talk is a hole of a second or two
+  and a window per pause would fetch, walk and rewrite the record dozens of times over; taken
   out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session, no
-  longer covered to its end, is fetched and planned again over them). `CACHE_FORMAT` stays 2:
-  the record is migrated, not dropped.
+  longer covered to its end, is fetched and planned again over them). `CACHE_FORMAT` is 3
+  (bumped by 0.11.2 for the cue geometry, see "How the server schedules work") and the format
+  check in `load_cache()` runs before this migration, so it reaches only a format-3 record
+  without the key: one written by 0.11.2, or by this version under `--lyrics off`. A format-2
+  record, from 0.11.0 or 0.11.1, is dropped whole by the format check and the video is
+  transcribed again from the start, which brings it under the lyrics rule as well.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
@@ -138,27 +146,84 @@ A segment touching the end of a window is dropped and the covered range ends whe
 began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
 
-Cue building (`docs/subtitle-quality.md` is the rationale): the server runs Silero VAD itself on each
-window (`detect_speech()`, with `VAD_PARAMS`: min speech 250 ms, min silence 300 ms) and passes the
-same options to faster-whisper. Segments go through gates before becoming cues: no words, VAD overlap under 0.5,
-faster-whisper's own word-anomaly score, repetition loops, and a gated phrase blocklist.
+Cue building (`docs/subtitle-quality.md` is the rationale and the measurements): the server runs
+Silero VAD itself on each window (`detect_speech()`, with `VAD_PARAMS`: min speech 250 ms, min
+silence 300 ms) and passes the same options to faster-whisper.
+
+`repair_lead_words()` runs first, before the gates. faster-whisper anchors a segment's first word to
+the segment's own start, and segment starts run flush with the previous segment's end, so one or two
+characters end up stranded in the previous utterance, seconds ahead of the sentence they open
+(measured: the gap after word[0] has p90 0.72 s and a worst case of 9.2 s, while every later position
+has p90 0.00 s). It only ever slides such a head **forward**, only while it is short, and only out of
+an interval it does not already share with the rest of the segment: moving one backwards drops it on
+the previous utterance, where `cue_overlaps()` then deletes a whole good cue. It runs before
+`hallucination_reason()` because an unrepaired head makes the segment's span cover a silence it never
+contained, and the VAD and anomaly gates then delete real speech — 29 lines in 17 minutes of the
+sample, against 8 once repaired.
+
+Segments go through gates before becoming cues: no words, VAD overlap under 0.5, faster-whisper's own
+word-anomaly score, repetition loops, and a gated phrase blocklist.
+
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
-following silence, merges fragments below `--min-cue-seconds`, and closes gaps under 0.5 s. Every cue
-carries `seg`, the id of the Whisper segment it came from, so the extension can rejoin a sentence for
-mining. Cue caches are format 2; older caches are ignored. `server/tools/cue_stats.py` and
-`retranscribe.py` measure a cache before and after a change; keep them working (`retranscribe.py`
-wraps `build_window_cues()`, so its wrapper takes every argument, `lyrics` included).
+following silence, merges fragments below `--min-cue-seconds`, and closes gaps under 0.5 s.
+
+Every cut asks `may_break(head, tail)` first, because a pause is not a word boundary: Japanese
+speakers pause inside words, VAD confirms the silence, and the splitter used to obey (言 | ってた,
+広 | い, 動 | いた). The rules are kinsoku shori plus one piece of script evidence: nothing opens a
+line with a small kana, っ, ー, 々 or a closing mark; neither side may be shorter than
+`MIN_PIECE_CHARS`; hiragana after a **kanji** is okurigana; nothing opens on a particle. Katakana is
+deliberately outside the okurigana rule — katakana words are self-delimiting, so the hiragana after
+カメラ does open a word. A speaker's own 。！？ or 、 outranks every guess. `split_for_break()`
+applies the same rules when a buffer runs past the hard limits, including to the seam against the
+word that follows it. `may_break()` is asked about a prospective line, not one Whisper word:
+Whisper's words are sub-tokens, often one character, so `group_words()` gathers just enough of what
+follows (`tail_text()`) to reach `MIN_PIECE_CHARS` before asking.
+
+`breaks_word()` is the narrow half of `may_break()`, and the two must stay apart. `may_break()` also
+says no on taste — a short piece, a line opening on a particle — which is right for the splitter,
+where refusing a cut costs nothing. `merge_segments()` reads its predicate as "a word is broken here"
+and overrules its own length budget to close it, so it must ask `breaks_word()`, which answers only
+on evidence. Wiring the merge to `may_break()` produced a 41-character, 8.1-second cue on the first
+live run, forced together only because と is a particle.
+
+`merge_segments()` is the last step of `build_window_cues()`, and must run **before**
+`normalise_gaps()`: closing every gap to `min_gap` first would hide the pause the seam is judged on.
+`build_cues()` runs once per Whisper segment, so `merge_adjacent()` only ever saw one segment's cues,
+and in a two-person conversation 94% of neighbouring cues come from different segments — which left
+the anti-flicker rule dead code and the median cue seven characters long. The cross-segment merge
+closes a broken word whatever the budget says (inside `cross_chars` and `cross_ceiling`), lets a cue
+shorter than `reach_chars` reach `cross_reach` for a partner, and joins the halves through
+`seam_for()`: `""` inside one sentence, `"\n"` where a viewer would see a new line. Three readers act
+on that newline — `.shisuko-sub` is `white-space: pre-wrap` so the overlay renders the second row,
+Yomitan ends its sentence there, and `match.js`'s `TERMINATORS` splits on it. A seam that would leave
+a row under `MIN_PIECE_CHARS`, or a third row, gives way to a plain join rather than the merge being
+refused; refusing leaves the stub alone on screen.
+
+Every cue still carries `seg`, the id of the Whisper segment it came from, and a merge re-stamps
+every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
+not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
+mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment, and a stale
+id would mis-group it. Cue caches are format 3; older caches are ignored, which is the only way a
+geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
+`retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
+compare two cue builders on identical Whisper output; keep them working (`retranscribe.py` wraps
+`build_window_cues()`, so its wrapper takes every argument, `lyrics` included; `dump_words.py`
+decides every window as `process()` does, `wants_lyrics()` and then `sung_in_target()` on an idle
+`App` like `retranscribe.py`'s, decodes a sung one without the detector and writes `"lyrics": true`
+into its record, its own `--lyrics off` sending every window through the detector; `replay_cues.py`
+passes a record's `lyrics` through, building on `lyrics_spans()` and the lyrics gates).
 
 Sung lyrics (P0.3 of the doc): singing over music is no speech to Silero, so `process()` decides
 `wants_lyrics()` after the detector and the language watch: with `--lyrics auto` (default; `off`
 is the switch), less than `LYRICS_MAX_SPEECH_S` (1 s) of detected speech in the window and an
 `rms()` of at least `LYRICS_MIN_RMS` (0.02), and then, that holding, a target-language verdict on
 the window from `Transcriber.sung_in_target()` (the language head over the window's own samples,
-`speech_samples(audio, [[start, end]], start)`, at most `LANGUAGE_DETECT_SECONDS` of them;
-`args.language` at `LANGUAGE_MIN_PROB` or more; one encoder pass; asked whatever
-`--language-patience` says, since it guards a decode, not the pause; never a vote:
-`language_vote()` never hears of it, so a foreign song never pauses a video; a head that raises
+`speech_samples(audio, [[start, end]], start)`, the window's first `LANGUAGE_DETECT_SECONDS` (30 s)
+and, when those are refused and the window is longer, its last 30 s, so a song starting after an
+instrumental intro in a window's last seconds is not refused on the intro alone: two encoder
+passes at most; `args.language` at `LANGUAGE_MIN_PROB` or more on either; asked whatever
+`--language-patience` says, since it guards a decode, not the pause; a head that raises
 sends the window down the lyrics path, since a detector failure must never silence a video, one
 that hears another language or is unsure leaves it with the detector, which decodes nothing of a
 window Silero heard nothing in: rain, a crowd, an English song under a montage stay blank), the
@@ -170,29 +235,56 @@ word probability under `LYRICS_MIN_WORD_PROB` (0.35); "anomaly" (`is_segment_ano
 "repetition"; "blocklist" (any phrase, unconditionally, since no VAD evidence can rescue it). The
 thresholds are measured, not guessed, and the doc holds the numbers: a rap verse and an 18-voice
 chorus score `no_speech_prob` 0.59 and 0.80 with every line right, so that gate only refuses what
-the decoder is all but sure of. `lyrics_spans(segs, offset)`, the word spans of the segments that
-pass, stands in for the speech intervals: `process()` passes them as `speech` (nothing is trimmed,
-starts snap to the segment, the lead-out reaches into the gap to the next one) and stores them in
-`Session.speech`, so the sync's speech list and the cache carry the sung lines (nothing else reads
-them today; `/clip` slices the audio by the times the client sends); the log line gains
-` [lyrics]`. The language watch is untouched: without speech intervals it casts no vote, so a
-foreign song never pauses a video. Live streams take the same path (a 歌枠 gets its lyrics).
+the decoder is all but sure of. `lyrics_spans(segs, offset, limits)`, the padded word runs of the
+segments that pass, stands in for the speech intervals, in the detector's own shape: a segment's
+words are cut into runs at every gap of at least `pause_split`, every run is padded by
+`speech_pad_ms` on both sides, as Silero pads what it hears, so the cue builder sees the breaths
+(a whole, unpadded segment span hid them: the lead-out ate a breath, `merge_segments()` glued two
+lines into one row, and a pause inside a segment never split), and a stranded first word
+(`stranded_head()`: the anchoring artifact of `repair_lead_words()`, a head of at most
+`LEAD_REPAIR_CHARS` characters followed by a gap of `LEAD_REPAIR_GAP`) starts no run, its run
+beginning a pad before the next word, so the repair slides the head onto that onset as it does on
+the talk path. `process()` passes them as `speech` and stores them in `Session.speech`, so the
+sync's speech list and the cache carry the sung lines (nothing else reads them today; `/clip`
+slices the audio by the times the client sends); the log line gains ` [lyrics]`. A song shares a
+window with the line announcing it (a 歌枠's MC line): `wants_lyrics()` judges the window whole,
+the second of speech sends it the detector's way, and nothing of the singing is decoded, so
+`process()` leaves the `unsung_stretches()` of a talk window (loud, `rms()` at least
+`LYRICS_MIN_RMS`, unheard, `unheard_stretches()` of the window at `LYRICS_MIN_STRETCH_S`, 4 s,
+under both floors) out of `covered` when the window holds `LYRICS_MAX_SPEECH_S` or more of
+detected speech, and only then (a window the head refused, or `--lyrics off`, is covered whole,
+or it would be planned for ever); the planner brings each back as a window of its own, where the
+rule sees next to no speech and judges it alone, and the log line gains
+` [N s heard nothing in, planned again]`. `App.cache_record(s)` is the record `save_cache()`
+writes (`"lyrics"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
+`write_results()` writes the same. The language watch is untouched: without speech intervals it
+casts no vote, and the head's verdict in `sung_in_target()` never reaches `language_vote()`, so
+a foreign song never pauses a video. Live streams take the same path (a 歌枠 gets its lyrics).
 `server/tests/test_lyrics.py` (a fake model recording what `transcribe()` was asked for and a
 patched `detect_speech`, like `test_language.py`) covers `rms()` on silence and a tone, the
 decision (`wants_lyrics()`: no speech and loud, quiet, speech heard, `--lyrics off`), every gate
 of `lyrics_reason()` with scripted segments (a confident line passes; empty, unsure on each of
 the three scores, a repetition loop, a sign-off phrase, an anomaly rejected), `lyrics_spans()`
-and the cues `build_window_cues()` builds on a lyrics window (snapped to the segments, the
-lead-out into the gap, the `seg` ids), the four paths through `process()` with the recorded
-kwargs, a rejected line taking no segment id and no span, the log text, a lyrics window casting
-no language vote, the head's verdict (another language, an unsure head, the target language, a
-raising head, asked whatever the patience, not asked for talk, silence or `--lyrics off`), a
-live stream, `subtract_intervals()`, `unheard_stretches()`, `load_cache()` on a record from
-before the rule (a music video offered again, a talk video keeping its cues and giving back its
-blank stretch, a record under the rule untouched, one written with `--lyrics off` offered again
+(the padded runs, a segment cut at a pause, a stranded first word starting no run) and the cues
+`build_window_cues()` builds on a lyrics window (snapped to the segments, the lead-out into the
+gap, the `seg` ids; a breath between two sung lines keeping them apart, a pause inside a segment
+splitting the lines, a stranded first word slid onto its line), the four paths through
+`process()` with the recorded kwargs, a rejected line taking no segment id and no span, the log
+text, a lyrics window casting no language vote, the song after the MC line, the one before it
+and a bridge between two lines planned again rather than covered blank (`unsung_stretches()`;
+a short or quiet stretch staying covered, a window the head refused covered whole), the head's
+verdict (another language, an unsure head, the target language, a song starting in the last
+seconds of a long window, a raising head, asked whatever the patience, not asked for talk,
+silence or `--lyrics off`), a live stream, `subtract_intervals()`, `unheard_stretches()` (and
+its inner floor), `load_cache()` on a record from before the rule (a music video offered again,
+a talk video keeping its cues and giving back its blank stretch, a talk record giving back its
+long holes and its ends but not its pauses, a format-2 record dropped by the format check and
+not migrated, a record under the rule untouched, one written with `--lyrics off` offered again
 under `auto`, `--lyrics off` loading an old record untouched), `save_cache()` writing the rule
-and its own record reloading as covered, `parse_args(["--lyrics", "off"])` and
-`retranscribe.py`'s own `--lyrics`.
+and its own record reloading as covered, `parse_args(["--lyrics", "off"])`, `retranscribe.py`'s
+own `--lyrics` and its record of the cache shape, `replay_cues.py` taking a lyrics window
+through the lyrics gates, and `dump_words.py` deciding the lyrics path per window (with
+`faster_whisper` faked in `sys.modules`) and marking the record.
 
 Language watch: when `--language-patience` is above 0 (default 60) every window's speech-only
 samples (`speech_samples()`, capped at 30 s) go through `model.detect_language()` before
@@ -438,6 +530,30 @@ answers the dialog. Whatever is written into a note's HTML fields goes through `
 the sentence that fills an empty sentence field, and every text part `extendSentenceField()`
 puts around its own `<b>`.
 
+### What a mined card gets
+
+The cue that was on screen, and nothing more. `sentenceForCue(cue)` in `content.js` is the one place
+that decides it; it returns `{start, end, text, cueIds: [cue.id]}`, and `clipParams()` in
+`background.js` takes the audio bounds from that, so the sentence field and the clip always describe
+the same span the viewer read and heard.
+
+It used to rejoin every cue sharing a `seg` within 1.5 s, on the premise that a Whisper segment is a
+sentence. It is not, and there is no second signal to fall back on. Whisper punctuates a fluent
+narrator barely at all (7 marks in 3095 characters on one measured video), so every split inside such
+a segment came from `--max-cue-chars` and the rejoin undid all of them: a card mined off a 3 s line
+got 9 s of audio and a clause that was never displayed. The VAD is a worse witness, not a better one
+— Silero cuts at 300 ms of silence, a breath, and that narrator ran 14.26 s across three cues between
+breaths, so deferring to it would have made the card longer again. `extendSentenceField()` still
+grows Yomitan's fragment when Yomitan cut inside the cue, but never past the cue.
+
+A merged cue can hold two utterances either side of the newline `seam_for()` put between them, and
+Yomitan ends its sentence at that newline, so the grow stops at the row the fragment came from.
+`normalize()` strips whitespace, so the seam is invisible to the comparison and
+`extendSentenceField()` has to split on it itself; without that it put the other speaker's line on
+the card, which is the one thing the seam exists to prevent. A cue without a seam is one row and
+behaves as it always did. `escapeHtml()` writes the newline as `<br>`, since HTML would otherwise
+collapse it into a space and the card would lose the boundary entirely.
+
 ### Matching a card to its subtitle (`addon/match.js`)
 
 `SHISUKO_MATCH` is a plain script loaded after `settings.js` and, with `words.js` behind it,
@@ -584,7 +700,14 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   読|んで|く|れ|た, which it cuts), where くれる begins and かけて ends; `starts` itself is never
   written (the content script keeps it per cue), the set is copied when there is something to
   add. `matchAt()` takes the longest span, the exact word on
-  a tie: exact words longest first (`bounded` ones must end at a boundary or the end of the text,
+  a tie, and a kana-only (`bounded`) exact word over a form of itself that adds particles alone
+  (`particlesOnly()`: a walk over `particleLens()` from the word's end to the form's), so a kana
+  noun ending in a verb's kana (いくつ, きょう, けっこう, ふつう, ほんとう, whose stem is in the
+  tables) ends before its copula and carries no です in its pitch overbar (いくつ|です|か, the
+  copula a particle of its own with the status), a kana verb's んだ / でしょう being coloured by
+  the particle chain instead (わかる|ん|だ, おいしい|です), while a form that adds more than
+  particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is one
+  run): exact words longest first (`bounded` ones must end at a boundary or the end of the text,
   the others anywhere `endsWord()` admits: the end, a boundary, or not right before a kanji,
   katakana or ー, so 関 is not coloured in 関係, 飲み not in 飲み物, while 見た ends before 犬 and
   電話 before 番号); then every stem length from `maxStemLen` down, `continuationEnd()` giving the
@@ -609,7 +732,9 @@ marks the words of every line. Everything in words.js is pure, without DOM.
     ず ん ら り れ っ なかっ なけれ, the ichidan stem being the 連用形; the godan rows わいうえおっ,
     かきくけこいっ, がぎぐげごい, さしすせそ, たちつてとっ, なにぬねのん, ばびぶべぼん, まみむめもん),
     so 走 in 走者 is not 走る. 行く's い is skipped (`text[pos - 1] === "行"`): its 音便 is っ alone,
-    and 行い, 行います, 行いたい are 行う's.
+    and 行い, 行います, 行いたい are 行う's; and っ is admitted after 行 alone, since every other く
+    verb takes い (歩いた, 書いた), so its っ is another word's: あるって is ある and the quotative
+    って, not あるく's, and はたらって, 書って are no forms.
   - `tailEnds()` then consumes up to `MAX_TAILS` (5) pieces of `TAIL_PIECES` (た て で だ ない …
     ます まし ませ ん たい … れる られる せる させる ば う よう ろ る い けれ ず ちゃ じゃ てる でる てい
     でい いる いた いて います いない ましょ でし でしょ です たら だら たり だり ても でも ながら なさい
@@ -718,7 +843,10 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   かけら, かけに行く, the one-kana stems staying exact), a kana verb's form ending inside the
   segment ICU made of its ending and a particle (and the exact bounded word not), くれる after
   the て ICU fused with its く (the caller's `starts` left as it was), a kana word whose stem is
-  a particle getting no forms, and a long line against a large deck.
+  a particle getting no forms, the っ of a く verb admitted after 行 alone (あるって, はたらって
+  and 書って staying plain, あるいて, 書いた and 行った found), a kana word found whole winning
+  over a form of it that adds particles alone (いくつ|です|か, きょう|です, わかる|ん|だ, わかるまい
+  and 食べるでしょう as one run), and a long line against a large deck.
 
 ### The background index (`addon/background.js`, "word colours" section)
 
@@ -1322,6 +1450,14 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
   `jumpTarget()` answers null, leaving YouTube's own seek alone, when there is no cue at all or
   the playhead and the target do not sit in the same covered range (`coveredRange()`): the last
   known line before an untranscribed stretch is not the previous line.
+- Left steps one line back wherever the playhead sits in the current line: inside a line, the line
+  before it; in the gap after one, that line again. It used to replay the current line past
+  `CUE_REPLAY_S` (1 s) into it, asbplayer's rule, but a line runs three to six seconds, so that
+  was nearly always and Left restarted what was already playing. And `leadIn()` takes the previous
+  cue's end as a floor: `normalise_gaps` closes every gap under 0.5 s to 0.1 s, shorter than the
+  0.15 s lead-in, so the old unclamped seek landed inside the previous line and flashed its last
+  frames before sweeping back into the line the viewer had just left. The lead-in may eat silence
+  and nothing else.
 
 ## Making changes
 

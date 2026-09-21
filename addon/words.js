@@ -645,8 +645,11 @@ const SHISUKO_WORDS = (() => {
     for (let len = Math.min(first.maxLen, text.length - pos); len >= 1; len--) {
       const piece = text.slice(pos, pos + len);
       if (!first.pieces.has(piece)) continue;
-      // 行く is the one く verb whose 音便 is っ alone (行った): 行い is 行う's (行いたい, 行いました).
+      // 行く is the one く verb whose 音便 is っ alone (行った): 行い is 行う's (行いたい, 行いました),
+      // and every other く verb takes い (歩いた, 書いた), so its っ is another word's (あるって is
+      // ある and the quotative って, not あるく's; はたらって is no form).
       if (piece === "い" && kind === "く" && text[pos - 1] === "行") continue;
+      if (piece === "っ" && kind === "く" && text[pos - 1] !== "行") continue;
       tailEnds(text, pos + len, firstRole(kind, piece), MAX_TAILS, ends);
     }
     let best = -1;
@@ -654,7 +657,13 @@ const SHISUKO_WORDS = (() => {
     return best;
   }
 
-  // The longest word found at `i`; on a tie the exact word beats a conjugation.
+  // The longest word found at `i`; on a tie the exact word beats a conjugation. A kana-only word
+  // found whole also beats a form of itself that adds particles alone (the form is then the word
+  // and its tails: です, でしょう, んだ): a kana noun ending in a verb's kana has a stem to the
+  // tables (いくつ, きょう, けっこう, ふつう, ほんとう), and its copula would else join its run and
+  // carry its pitch overbar (いくつです), while a kana verb loses nothing, since the particles
+  // after its dictionary form take its colour as a chain (わかる|ん|だ, おいしい|です), as after
+  // a する verb's noun (勉強|です). A kanji word keeps the form (食べるでしょう is one run).
   function matchAt(text, i, index, starts) {
     const remaining = text.length - i;
     let end = i;
@@ -668,15 +677,17 @@ const SHISUKO_WORDS = (() => {
       found = entry;
       break;
     }
+    const exact = found;
+    const exactEnd = end;
     for (let len = Math.min(index.maxStemLen, remaining); len >= 1; len--) {
       const list = index.stems.get(text.slice(i, i + len));
       if (!list) continue;
       for (const { entry, kind } of list) {
         const stop = continuationEnd(text, i, i + len, kind, starts, entry.bounded);
-        if (stop > end) {
-          end = stop;
-          found = entry;
-        }
+        if (stop <= end) continue;
+        if (entry === exact && entry.bounded && particlesOnly(text, exactEnd, stop, starts)) continue;
+        end = stop;
+        found = entry;
       }
     }
     return found ? { end, entry: found } : null;
@@ -709,6 +720,13 @@ const SHISUKO_WORDS = (() => {
   // The lengths of the particles at `pos` that a colour may run on to: the shapes not refused.
   function particleLens(text, pos, starts) {
     return particleShapes(text, pos, starts).filter((len) => !refusedParticle(text, pos, len));
+  }
+
+  // Whether the text from `from` to `to` is such particles in a row and nothing else (です, ですか,
+  // でしょう, んだ; `to` is a form's end, a few pieces past `from` at most).
+  function particlesOnly(text, from, to, starts) {
+    if (from >= to) return from === to;
+    return particleLens(text, from, starts).some((len) => particlesOnly(text, from + len, to, starts));
   }
 
   // Whether what begins at `at` reads as a word rather than as kana ICU has cut up: the end of

@@ -29,7 +29,7 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   over the video resumes it.
 - **Transcript panel** with every line so far. A timestamp jumps there, a pickaxe mines it.
 - **Sentence mining by itself.** The moment Yomitan adds a card, a screenshot and an MP3 clip of
-  the whole sentence go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
+  the line you were reading go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
   does the same on demand, into the newest card or into your Downloads folder.
 - **Word colours** (optional). With Anki running, every word of a line that has a card in your
   deck is coloured by the card's state, green to red, and can carry an overbar in the colour of
@@ -199,7 +199,7 @@ comes back.
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
 | Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
-| ← / → | Jump to the previous / next subtitle. Left replays the current line once you are more than a second into it. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
+| ← / → | Jump to the start of the previous / next subtitle. In a gap between lines, Left goes back to the line that just ended. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
 Chrome at `chrome://extensions/shortcuts`.
@@ -214,11 +214,12 @@ and its timestamps seek the video.
 
 ## Sentence mining
 
-Mining captures two things for the sentence you are looking at: a screenshot of the video frame
-and an MP3 clip of the sentence audio, cut from the original track with a little padding on both
-sides. A long sentence is shown as several short subtitle lines, but mining always works on the
-whole sentence: the clip spans it, and the card's sentence field is grown from the single line
-Yomitan copied to the full sentence, keeping the bold around the word you looked up.
+Mining captures two things for the line you are looking at: a screenshot of the video frame and an
+MP3 clip of that line's audio, cut from the original track with a little padding on both sides.
+The line on screen is the whole of it — the card's sentence and its clip always describe the same
+seconds you just read and heard. Where Yomitan copied only part of the line, because it stopped at
+a 。 inside it, the sentence field is grown back to the line, keeping the bold around the word you
+looked up.
 
 Both are prepared while you watch. Each line that plays has its clip, and with auto-attach on its
 frame, made ready in the background, so making a card attaches them at once, and still attaches
@@ -497,7 +498,7 @@ server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3
 | `--lookahead 0` | Transcribe to the end of the video instead of stopping 15 minutes ahead |
 | `--window 60` | Longer windows are slightly more efficient, shorter ones react faster to seeking (default 40) |
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
-| `--max-cue-seconds 6` / `--min-cue-seconds 0.8` | Longest and shortest cue; shorter ones are extended or merged |
+| `--max-cue-seconds 7` / `--min-cue-seconds 0.8` | Longest and shortest cue (defaults 7, Netflix's own maximum, and 0.8); shorter ones are extended or merged |
 | `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
 | `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop (0 = never listen for it, transcribe everything) |
 | `--lyrics off` | Transcribe a window in which the speech detector hears under a second of speech with the detector as before (blank when it heard nothing). The default `auto` transcribes such a window without the detector when its audio is not silent (sung lyrics, speech over music) and Whisper hears the target language in it, under stricter gates |
@@ -575,7 +576,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
 | Badge says "the speech is not in the subtitle language" | The server heard a minute of another language and stopped; it starts again when the subtitle language returns. For a video that really does mix languages, start the server with `--language-patience 0`. |
 | Badge says "No speech found in this video" | The whole video, from its start, was transcribed and nothing was heard: a silent clip, an instrumental, a song Whisper does not hear as Japanese, or, with `--lyrics off`, any song. |
-| A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before that gets its lines on the next visit: the server reads its saved result, sees the stretches nothing was heard in and transcribes those again (no need to delete anything from `~/.shisu-ko/cache`). A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
+| A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before that gets its lines on the next visit: the server transcribes it again where nothing was heard (a result saved by 0.11.2) or from the start (older results); nothing needs deleting from `~/.shisu-ko/cache`. A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |

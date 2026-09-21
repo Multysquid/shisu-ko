@@ -60,7 +60,7 @@ def parse_args(argv=None):
     p.add_argument("--window", type=float, default=40.0)
     p.add_argument("--first-window", type=float, default=20.0)
     p.add_argument("--max-cue-chars", type=int, default=30)
-    p.add_argument("--max-cue-seconds", type=float, default=6.0)
+    p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8)
     p.add_argument("--limit-seconds", type=float, default=0.0, help="only transcribe the first N seconds")
     p.add_argument("--cpu-threads", type=int, default=0)
@@ -121,17 +121,19 @@ def run_video(app, worker, args, video_id: str, src: Path, out_dir: Path) -> dic
         worker.process(s, window[0], window[1])
     took = time.time() - t0
     print(f"[{video_id}] {len(s.cues)} cues in {took:.0f}s ({s.duration / max(took, 1e-3):.0f}x realtime)", flush=True)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"{video_id}.new.cues.json").write_text(json.dumps({
-        "video_id": video_id, "title": s.title, "duration": s.duration,
-        "format": server.CACHE_FORMAT, "model": args.model, "language": args.language,
-        "cues": s.cues, "covered": [list(iv) for iv in s.covered],
-        "speech": [[round(a, 2), round(b, 2)] for a, b in s.speech],
-    }, ensure_ascii=False), encoding="utf-8")
-    (out_dir / f"{video_id}.speech.json").write_text(
-        json.dumps([[round(a, 2), round(b, 2)] for a, b in s.speech]), encoding="utf-8")
+    write_results(app, s, out_dir)
     return {"cues": len(s.cues), "seconds": s.duration}
+
+
+def write_results(app, s, out_dir: Path) -> None:
+    """<video_id>.new.cues.json, in the shape save_cache() writes (the "lyrics" key included, so
+    the file is a record made under the rule to load_cache() if it is ever put in the cache
+    directory, not one to migrate), and <video_id>.speech.json."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{s.video_id}.new.cues.json").write_text(
+        json.dumps(app.cache_record(s), ensure_ascii=False), encoding="utf-8")
+    (out_dir / f"{s.video_id}.speech.json").write_text(
+        json.dumps([[round(a, 2), round(b, 2)] for a, b in s.speech]), encoding="utf-8")
 
 
 def main(argv=None) -> int:

@@ -17,6 +17,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const extension = resolve(process.env.SHISUKO_CHROME_DIST || join(root, "dist", "chrome"));
 const videoId = "smoke123";
 const secondVideoId = "smoke456";
+const regressionVideoId = "smoke789";
 
 function json(res, body, status = 200) {
   res.writeHead(status, { "content-type": "application/json", "access-control-allow-origin": "*" });
@@ -30,8 +31,22 @@ async function listen(handler) {
 }
 
 const clipBytes = Buffer.from("RIFFSMOKE-WAVE-DATA", "ascii");
+const mediaBytes = (() => {
+  const sampleRate = 8000;
+  const data = Buffer.alloc(44 + sampleRate * 20 * 2);
+  const dataSize = data.length - 44;
+  data.write("RIFF", 0); data.writeUInt32LE(36 + dataSize, 4);
+  data.write("WAVEfmt ", 8); data.writeUInt32LE(16, 16);
+  data.writeUInt16LE(1, 20); data.writeUInt16LE(1, 22);
+  data.writeUInt32LE(sampleRate, 24); data.writeUInt32LE(sampleRate * 2, 28);
+  data.writeUInt16LE(2, 32); data.writeUInt16LE(16, 34);
+  data.write("data", 36); data.writeUInt32LE(dataSize, 40);
+  return data;
+})();
+const mediaDataUrl = `data:audio/wav;base64,${mediaBytes.toString("base64")}`;
 const tinyJpeg = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AYf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AYf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
 const anki = { notes: new Map(), media: [], updates: [] };
+const clipRequests = [];
 async function requestBody(req) {
   let body = "";
   for await (const chunk of req) body += chunk;
@@ -67,10 +82,17 @@ const api = await listen(async (req, res) => {
     // Cues come with the first request only, the way the real server answers a `since` cursor. A
     // tab returning from standby with a reset cursor would therefore go blank instead of keeping
     // the cue it already had, which is what the standby round trip must not do.
-    const cues = body.since ? [] : [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }];
+    const regressionCues = [
+      { id: 10, start: 2, end: 4, text: "前の字幕", seg: 7 },
+      { id: 11, start: 4.5, end: 6, text: "狙った字幕", seg: 7 },
+      { id: 13, start: 6.1, end: 7, text: "つなぎの字幕", seg: 7 },
+      { id: 12, start: 8, end: 10, text: "次の字幕", seg: 7 },
+    ];
+    const cues = body.since ? [] : id === regressionVideoId ? regressionCues : [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }];
     return json(res, { ...head, cues });
   }
   if (url.pathname === "/clip") {
+    clipRequests.push({ video_id: url.searchParams.get("video_id"), start: Number(url.searchParams.get("start")), end: Number(url.searchParams.get("end")) });
     res.writeHead(200, { "content-type": "audio/wav", "content-length": clipBytes.length });
     return res.end(clipBytes);
   }
@@ -145,20 +167,21 @@ try {
   assert.ok(healthCount > 0, "popup health check must reach the fixture server");
   await popup.close();
 
-  const openWatch = async (id) => {
+  const openWatch = async (id, options = {}) => {
     const tab = await context.newPage();
     await tab.route("https://www.youtube.com/watch**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: html }));
     await tab.goto(`https://www.youtube.com/watch?v=${id}`);
-    await tab.evaluate(async () => {
+    await tab.evaluate(async ({ mediaUrl }) => {
       const video = document.querySelector("video");
+      if (mediaUrl) video.src = mediaUrl;
       const canvas = document.createElement("canvas");
       canvas.width = 900; canvas.height = 520;
       const ctx = canvas.getContext("2d");
       ctx.fillStyle = "#234"; ctx.fillRect(0, 0, canvas.width, canvas.height);
       video.muted = true;
-      video.srcObject = canvas.captureStream(10);
+      if (!mediaUrl) video.srcObject = canvas.captureStream(10);
       await video.play();
-    });
+    }, { mediaUrl: options.media ? mediaDataUrl : null });
     await tab.locator(".shisuko-subtext").waitFor({ timeout: 10000 });
     return tab;
   };
@@ -202,6 +225,7 @@ try {
   await ankiPopup.waitForTimeout(400);
   anki.notes.clear();
   assert.equal((await send({ type: "ankiPoll" })).newNoteId, null, "first Anki poll establishes baseline");
+
   anki.notes.set(101, {
     Picture: { value: "" }, SentenceAudio: { value: "" }, Sentence: { value: "これはテスト字幕です" },
   });
@@ -311,6 +335,50 @@ try {
   assert.equal(await visible(firstStatus), true, "the language-paused line must show even with showStatus off");
   languagePaused = false;
   await poll(() => visible(firstStatus), (shown) => !shown, 8000);
+
+  // Four displayed cues share one Whisper segment. A finite local WAV makes trusted keyboard
+  // events seek the packaged media element, and the second transcript row drives the full UI mine.
+  const regressionPopup = await context.newPage();
+  await regressionPopup.goto(`chrome-extension://${extensionId}/popup.html`);
+  await regressionPopup.locator("details").last().locator("summary").click();
+  await regressionPopup.locator("#ankiUrl").fill(`http://127.0.0.1:${api.port}/anki`);
+  await regressionPopup.locator("#mineTarget").selectOption("anki");
+  await regressionPopup.locator("#autoMine").uncheck();
+  await regressionPopup.locator("#clipPaddingMs").focus();
+  await regressionPopup.keyboard.press("Home");
+  await regressionPopup.locator("#ankiImageField").fill("Picture");
+  await regressionPopup.locator("#ankiAudioField").fill("SentenceAudio");
+  await regressionPopup.locator("#ankiSentenceField").fill("");
+  await regressionPopup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
+  await regressionPopup.locator("#enabled").check();
+  await regressionPopup.waitForTimeout(700);
+  const regressionSend = (msg) => regressionPopup.evaluate((value) => browser.runtime.sendMessage(value), msg);
+  anki.notes.clear();
+  assert.equal((await regressionSend({ type: "ankiPoll" })).newNoteId, null, "regression Anki poll establishes baseline");
+  const regression = await openWatch(regressionVideoId, { media: true });
+  await regression.evaluate(() => { const video = document.querySelector("video"); video.pause(); video.currentTime = 5; });
+  await poll(() => regression.locator(".shisuko-subtext").textContent(), (value) => value.includes("狙った字幕"), 10000);
+  const seek = async (time, key, expected) => {
+    await regression.evaluate((value) => { document.querySelector("video").currentTime = value; }, time);
+    await regression.keyboard.press(key);
+    await poll(() => regression.locator("video").evaluate((video) => ({ time: video.currentTime, seeking: video.seeking })), (state) => !state.seeking && Math.abs(state.time - expected) < 0.01);
+  };
+  await seek(5.75, "ArrowLeft", 1.85);
+  await seek(5.5, "ArrowRight", 6.1);
+  await seek(7.5, "ArrowLeft", 6.1);
+  await seek(6.5, "ArrowRight", 7.85);
+  anki.notes.set(404, { Sentence: { value: "<b>狙った</b>" }, Picture: { value: "" }, SentenceAudio: { value: "" } });
+  await regression.locator(".shisuko-line").nth(1).hover();
+  await regression.locator(".shisuko-line-mine").nth(1).click();
+  const selectedClip = await poll(() => clipRequests.find((request) => request.video_id === regressionVideoId && request.start === 4.5 && request.end === 6), Boolean, 10000);
+  await poll(() => anki.updates.at(-1), (update) => update?.id === 404, 10000);
+  assert.equal(anki.updates.at(-1).fields.Sentence, "<b>狙った</b>字幕");
+  assert.match(anki.updates.at(-1).fields.SentenceAudio, /\[sound:shisuko_smoke789_4500\.wav\]/);
+  assert.doesNotMatch(anki.updates.at(-1).fields.Sentence, /前の字幕|つなぎの字幕|次の字幕/);
+  assert.deepEqual(selectedClip, { video_id: regressionVideoId, start: 4.5, end: 6 });
+  assert.ok(anki.media.some((item) => item.filename === "shisuko_smoke789_4500.wav" && Buffer.from(item.data, "base64").equals(clipBytes)));
+  await regression.close();
+  await regressionPopup.close();
 
   console.log(`browser smoke passed (syncs=${syncCount}, downloads=${records.length}, ` +
     `${[...syncSeen].map(([id, count]) => `${id}=${count}`).join(" ")})`);

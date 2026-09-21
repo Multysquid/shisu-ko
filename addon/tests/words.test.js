@@ -993,6 +993,24 @@ test("markWords never ends a span right after the 音便 kana", () => {
   assert.equal(mark("引っかかった", [["引く", "learned", null]], [0, 1, 2, 3, 4, 5]), "引っかかった");
 });
 
+test("markWords admits the っ of a く verb after 行 alone", () => {
+  // 行く is the one く verb whose 音便 is っ (行った); every other takes い (歩いた, 書いた). A kana
+  // く verb whose stem is a word of its own would else be found in that word and the quotative
+  // after it: ICU cuts ある|って|言|っ|た, and あるって is ある and って, not 歩く.
+  const walk = [["あるく", "learned", null]];
+  assert.equal(mark("あるって言った", walk), "あるって言った");
+  assert.equal(mark("あるって言った", walk, new Set([0, 2, 4, 5, 6])), "あるって言った");
+  assert.equal(mark("ここにあるって", walk), "ここにあるって");
+  assert.equal(mark("はたらって", [["はたらく", "learned", null]]), "はたらって");
+  assert.equal(mark("書って", [["書く", "learned", null]]), "書って");
+  // The い forms and 行く's っ, in the word alone and in a compound ending in 行く.
+  assert.equal(mark("あるいて", walk), "あるいて(learned,null)");
+  assert.equal(mark("あるいた", walk), "あるいた(learned,null)");
+  assert.equal(mark("書いた", [["書く", "learned", null]]), "書いた(learned,null)");
+  assert.equal(mark("行った", [["行く", "learned", null]]), "行った(learned,null)");
+  assert.equal(mark("連れて行った", [["連れて行く", "learned", null]]), "連れて行った(learned,null)");
+});
+
 test("markWords never ends a span right after かっ", () => {
   // かっ, なかっ and たかっ only exist before た: the かっ of かっこいい after a form is that word's.
   assert.equal(mark("あの時見たかっこいい人", [["見る", "learned", null]]), "あの時 | 見た(learned,null) | かっこいい人");
@@ -1422,6 +1440,32 @@ test("markWords ends a kana verb's form inside the segment ICU made of its endin
   // particles, and NOT_BEFORE keeps た from ending the form before them.
   assert.equal(mark("かけたらしい", [["かける", "new", null]]), "かけたらしい");
   assert.equal(mark("かけたくさん", [["かける", "new", null]]), "かけたくさん");
+});
+
+test("markWords takes a kana word found whole over a form of it that adds particles alone", () => {
+  // A kana noun ending in a verb's kana has a stem to the tables (いく + つ), so the copula after
+  // it reads as a form's tail (いくつ + です): the word itself, at a boundary, wins over that, and
+  // the copula is a particle of its own, with the status and without the overbar. ICU cuts
+  // いくつ|です|か, けっこう|です, いくつ|で|しょう, いくつ|で|した.
+  const some = [["いくつ", "new", "heiban"]];
+  assert.equal(mark("いくつですか", some), "いくつ(new,heiban) | です(new,null) | か(new,null)");
+  assert.equal(mark("いくつですか", some, new Set([0, 3, 5])), "いくつ(new,heiban) | です(new,null) | か(new,null)");
+  assert.equal(mark("いくつですか", some, [0, 1, 2, 3, 4, 5]), "いくつ(new,heiban) | です(new,null) | か(new,null)");
+  assert.equal(mark("いくつでしょう", some), "いくつ(new,heiban) | でしょう(new,null)");
+  assert.equal(mark("いくつでした", some), "いくつ(new,heiban) | でした(new,null)");
+  assert.equal(mark("けっこうです", [["けっこう", "new", "heiban"]]), "けっこう(new,heiban) | です(new,null)");
+  assert.equal(mark("きょうです", [["きょう", "new", "atamadaka"]]), "きょう(new,atamadaka) | です(new,null)");
+  assert.equal(mark("ふつうですね", [["ふつう", "learned", "heiban"]]), "ふつう(learned,heiban) | です(learned,null) | ね(learned,null)");
+  assert.equal(mark("ほんとうです", [["ほんとう", "new", "heiban"]]), "ほんとう(new,heiban) | です(new,null)");
+  // A kana verb or adjective loses nothing: the particles after its dictionary form take its
+  // colour as a chain, and a form that adds more than particles still wins.
+  assert.equal(mark("わかるんだ", [["わかる", "new", "heiban"]]), "わかる(new,heiban) | ん(new,null) | だ(new,null)");
+  assert.equal(mark("おいしいです", [["おいしい", "new", "heiban"]]), "おいしい(new,heiban) | です(new,null)");
+  assert.equal(mark("わかるまい", [["わかる", "new", "heiban"]]), "わかるまい(new,heiban)");
+  assert.equal(mark("わかりました", [["わかる", "new", "heiban"]]), "わかりました(new,heiban)");
+  // Another word's form still overtakes the word found whole, and a kanji word keeps the form.
+  assert.equal(mark("あるいて", [["ある", "new", null], ["あるく", "learned", null]]), "あるいて(learned,null)");
+  assert.equal(mark("食べるでしょう", [["食べる", "new", "heiban"]]), "食べるでしょう(new,heiban)");
 });
 
 test("markWords finds くれる after the て ICU fused with its く", () => {
