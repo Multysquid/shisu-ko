@@ -627,11 +627,18 @@ function nodes(el) {
   });
 }
 
+// An index put in the way pollWordIndex() does it: every index held, and none, has a serial of
+// its own, which is what dates a cue's look (a look never holds the index it was found under).
+function setIndex(api, index) {
+  api.state.wordIndex = index;
+  api.state.wordIndexSerial++;
+}
+
 // The deck's index as a poll would have left it. An async test gives it only after settled():
 // the settings loaded at start-up replace whatever was put in state.settings before.
 function giveIndex(api, settings) {
   Object.assign(api.state.settings, settings);
-  api.state.wordIndex = words.buildIndex(DECK);
+  setIndex(api, words.buildIndex(DECK));
   api.state.wordIndexAt = 1000;
   api.state.wordIndexKey = JSON.stringify(DECK);
 }
@@ -648,6 +655,28 @@ function subtitleBox(api, sandbox) {
   api.state.subText = sandbox.document.createElement("span");
 }
 
+// A watch page whose player discover() has found: the only kind of tab the deck index is asked from.
+function watching(api) {
+  api.state.video = { currentTime: 0, paused: true };
+  api.state.videoId = "abcdef1234";
+}
+
+// The overlay parts applySettings() and a shown transcript touch, and a count of the panel's rebuilds.
+function overlay(api, sandbox) {
+  subtitleBox(api, sandbox);
+  api.state.root = sandbox.document.createElement("div");
+  api.state.transcriptEl = sandbox.document.createElement("div");
+  const list = sandbox.document.createElement("div");
+  api.state.transcriptList = list;
+  const rebuilds = { count: 0 };
+  const replace = list.replaceChildren;
+  list.replaceChildren = (...nodes) => {
+    rebuilds.count++;
+    return replace(...nodes);
+  };
+  return rebuilds;
+}
+
 // The background's answers to the cardStatus asks, handed out in order and the asks kept; every
 // other message still goes to the loader's stub.
 function backgroundAnswering(sandbox, answers) {
@@ -660,6 +689,25 @@ function backgroundAnswering(sandbox, answers) {
     return answers.shift();
   };
   return asks;
+}
+
+// How often content.js asks the matcher from now on: markWords() once per line matched against
+// the index, wordStarts() once per line segmented. The harness leaves words.js's export writable
+// for this wrapper; content.js reads the global at every call.
+function countingWords(sandbox) {
+  const real = sandbox.SHISUKO_WORDS;
+  const counts = { matched: 0, segmented: 0 };
+  sandbox.SHISUKO_WORDS = Object.assign({}, real, {
+    wordStarts: (...args) => {
+      counts.segmented++;
+      return real.wordStarts(...args);
+    },
+    markWords: (...args) => {
+      counts.matched++;
+      return real.markWords(...args);
+    },
+  });
+  return counts;
 }
 
 test("wordColoursOn needs the master switch and one of the two colours", () => {
@@ -677,33 +725,33 @@ test("wordColoursOn needs the master switch and one of the two colours", () => {
 test("renderText writes plain text while both colours are off, or without an index", () => {
   const { api, sandbox } = withIndex({});
   const el = sandbox.document.createElement("span");
-  api.renderText(el, LINE);
+  api.renderText(el, cue(0, LINE));
   assert.deepEqual(nodes(el), [LINE]);
   api.state.settings.cardStatus = true;
   api.state.settings.enabled = false;
-  api.renderText(el, LINE);
+  api.renderText(el, cue(0, LINE));
   assert.deepEqual(nodes(el), [LINE]);
   api.state.settings.enabled = true;
-  api.state.wordIndex = null;
-  api.renderText(el, LINE);
+  setIndex(api, null);
+  api.renderText(el, cue(0, LINE));
   assert.deepEqual(nodes(el), [LINE]);
 });
 
 test("renderText marks the card's state only with cardStatus on, in spans holding text nodes", () => {
   const { api, sandbox } = withIndex({ cardStatus: true });
   const el = sandbox.document.createElement("span");
-  api.renderText(el, LINE);
+  api.renderText(el, cue(0, LINE));
   assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"]);
   assert.equal(el.textContent, LINE); // the DOM text is the line, for Yomitan
   assert.equal(el.childNodes[1].childNodes[0].nodeType, 3);
-  api.renderText(el, "字幕"); // drawn again: the old children go
+  api.renderText(el, cue(1, "字幕")); // drawn again: the old children go
   assert.deepEqual(nodes(el), ["shisuko-word{status=new}:字幕"]);
 });
 
 test("renderText marks the pitch only with pitchAccent on, and joins the text around it", () => {
   const { api, sandbox } = withIndex({ pitchAccent: true });
   const el = sandbox.document.createElement("span");
-  api.renderText(el, LINE);
+  api.renderText(el, cue(0, LINE));
   // 日本語 has a card but no pitch: with the state not shown it is text like the rest.
   assert.deepEqual(nodes(el), ["これは日本語の", "shisuko-word{pitch=heiban}:字幕", "です"]);
   assert.equal(el.textContent, LINE);
@@ -712,9 +760,9 @@ test("renderText marks the pitch only with pitchAccent on, and joins the text ar
 test("renderText marks both with both colours on", () => {
   const { api, sandbox } = withIndex({ cardStatus: true, pitchAccent: true });
   const el = sandbox.document.createElement("span");
-  api.renderText(el, LINE);
+  api.renderText(el, cue(0, LINE));
   assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new,pitch=heiban}:字幕", "です"]);
-  api.renderText(el, "");
+  api.renderText(el, cue(1, ""));
   assert.deepEqual(nodes(el), []);
 });
 
@@ -741,40 +789,275 @@ test("setSubtitle and transcriptLine draw their text through renderText", () => 
   assert.ok(api.state.subBox.classList.contains("shisuko-hidden"));
 });
 
-test("refreshWordMarks redraws the line on screen and rebuilds the transcript while it is shown", () => {
+test("refreshWordMarks redraws the line on screen and, in a transcript that is up, only the lines that changed", () => {
   const { api, sandbox } = loadContent();
   api.state.settings.cardStatus = true;
   api.state.settings.showTranscript = true;
-  subtitleBox(api, sandbox);
-  api.state.transcriptList = sandbox.document.createElement("div");
-  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "字幕" }]);
+  const rebuilds = overlay(api, sandbox);
+  const list = api.state.transcriptList;
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "字幕" }, { id: 2, start: 5, end: 6, text: "はい" }]);
   api.setSubtitle(api.cueById(0));
-  const before = api.state.lineById.get(0);
+  assert.equal(rebuilds.count, 1);
+  const lines = [0, 1, 2].map((id) => api.state.lineById.get(id));
+  const textOf = (i) => lines[i].childNodes[1];
   assert.deepEqual(nodes(api.state.subText), [LINE]); // no index yet
-  assert.deepEqual(nodes(before.childNodes[1]), [LINE]);
+  assert.deepEqual(nodes(textOf(0)), [LINE]);
+  const plain = lines.map((line, i) => textOf(i).childNodes[0]);
+  list.scrollTop = 123;
 
-  api.state.wordIndex = words.buildIndex(DECK);
+  setIndex(api, words.buildIndex(DECK));
   api.refreshWordMarks();
   assert.equal(nodes(api.state.subText).length, 5);
-  assert.equal(api.state.transcriptList.childNodes.length, 2);
-  const after = api.state.lineById.get(0);
-  assert.notEqual(after, before); // a full rebuild
-  assert.equal(nodes(after.childNodes[1]).length, 5);
-  assert.deepEqual(nodes(api.state.lineById.get(1).childNodes[1]), ["shisuko-word{status=new}:字幕"]);
+  assert.equal(rebuilds.count, 1); // the lines stay: only their text is drawn again
+  assert.equal(list.childNodes.length, 3);
+  for (const [i, line] of lines.entries()) assert.equal(api.state.lineById.get(i), line);
+  assert.equal(api.state.activeLineEl, lines[0]);
+  assert.equal(list.scrollTop, 123); // nothing re-centres the panel
+  assert.equal(nodes(textOf(0)).length, 5);
+  assert.deepEqual(nodes(textOf(1)), ["shisuko-word{status=new}:字幕"]);
+  assert.equal(textOf(2).childNodes[0], plain[2]); // no word of the deck in it: not touched
   assert.equal(api.state.transcriptDirty, false);
   assert.equal(api.state.transcriptAppendFrom, null);
 
+  // The same look again: nothing is touched. One card reviewed: the line on screen and the
+  // lines with that word are drawn again, the others keep their nodes.
+  const drawn = [0, 1, 2].map((i) => textOf(i).childNodes[0]);
+  api.refreshWordMarks();
+  assert.deepEqual([0, 1, 2].map((i) => textOf(i).childNodes[0]), drawn);
+  setIndex(api, words.buildIndex([["日本語", "learned", null], ["字幕", "learning", "heiban"]]));
+  api.refreshWordMarks();
+  assert.equal(nodes(api.state.subText)[3], "shisuko-word{status=learning}:字幕");
+  assert.notEqual(textOf(0).childNodes[0], drawn[0]);
+  assert.deepEqual(nodes(textOf(1)), ["shisuko-word{status=learning}:字幕"]);
+  assert.equal(textOf(2).childNodes[0], drawn[2]);
+  assert.equal(rebuilds.count, 1);
+
+  // Lines still pending (they came while the panel was hidden): the panel is rebuilt whole.
+  api.state.transcriptDirty = true;
+  api.refreshWordMarks();
+  assert.equal(rebuilds.count, 2);
+  assert.notEqual(api.state.lineById.get(0), lines[0]);
+  assert.equal(api.state.transcriptDirty, false);
+  const after = api.state.lineById.get(0);
+
   api.state.settings.showTranscript = false;
-  api.state.wordIndex = null;
+  setIndex(api, null);
   api.refreshWordMarks();
   assert.deepEqual(nodes(api.state.subText), [LINE]);
   assert.equal(api.state.lineById.get(0), after); // a hidden transcript is left for applySettings()
   assert.equal(api.state.transcriptDirty, false);
 });
 
-test("pollWordIndex asks only with a colour on, the tab visible and the interval past, one ask at a time", async () => {
+test("a word setting change takes the colours off a shown transcript's lines in place, without a rebuild", async () => {
+  const { api, sandbox, onSettingsChanged } = loadContent();
+  await settled();
+  watching(api);
+  giveIndex(api, { cardStatus: true, showTranscript: true });
+  const rebuilds = overlay(api, sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "字幕" }, { id: 2, start: 5, end: 6, text: "はい" }]);
+  api.setSubtitle(api.cueById(0));
+  assert.equal(rebuilds.count, 1);
+  assert.equal(nodes(api.state.subText).length, 5);
+  const lines = [0, 1, 2].map((id) => api.state.lineById.get(id));
+  const plainNode = lines[2].childNodes[1].childNodes[0];
+  backgroundAnswering(sandbox, [{ ok: true, unchanged: true }]);
+
+  onSettingsChanged({ settings: { newValue: { cardStatus: true, showTranscript: true, cardStatusDeck: "Vocab" } } }, "local");
+  assert.equal(rebuilds.count, 1); // nothing is built again: the lines that had a colour lose it where they are
+  for (const [i, line] of lines.entries()) assert.equal(api.state.lineById.get(i), line);
+  assert.deepEqual(nodes(api.state.subText), [LINE]);
+  assert.deepEqual(nodes(lines[0].childNodes[1]), [LINE]);
+  assert.deepEqual(nodes(lines[1].childNodes[1]), ["字幕"]);
+  assert.equal(lines[2].childNodes[1].childNodes[0], plainNode); // never had a colour: not touched
+  await settled();
+});
+
+test("a style setting written leaves a shown transcript's lines and the line on screen as they are", async () => {
+  const { api, sandbox, onSettingsChanged } = loadContent();
+  await settled();
+  watching(api);
+  giveIndex(api, { cardStatus: true, showTranscript: true });
+  const rebuilds = overlay(api, sandbox);
+  const styled = [];
+  api.state.root.style.setProperty = (name, value) => styled.push([name, value]);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "はい" }]);
+  api.setSubtitle(api.cueById(0));
+  assert.equal(rebuilds.count, 1);
+  const lines = [0, 1].map((id) => api.state.lineById.get(id));
+  const drawn = lines.map((line) => line.childNodes[1].childNodes[0]);
+  const shown = api.state.subText.childNodes[0];
+  const counts = countingWords(sandbox);
+  const base = Object.assign({}, api.state.settings);
+
+  // A slider dragged in the popup writes the settings several times a second.
+  for (const opacity of [40, 50, 60]) {
+    onSettingsChanged({ settings: { newValue: Object.assign({}, base, { subBackgroundOpacity: opacity }) } }, "local");
+  }
+  assert.equal(rebuilds.count, 1);
+  for (const [i, line] of lines.entries()) assert.equal(api.state.lineById.get(i), line);
+  assert.deepEqual(lines.map((line) => line.childNodes[1].childNodes[0]), drawn);
+  assert.equal(api.state.subText.childNodes[0], shown);
+  assert.deepEqual(counts, { matched: 0, segmented: 0 });
+  assert.ok(styled.some(([name, value]) => name === "--shisuko-sub-bg" && value === "rgba(0, 0, 0, 0.6)")); // the style itself landed
+
+  // The settings that decide what a line holds still build the panel again; the runs come from
+  // the last draw, so the master switch costs no matching either way.
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base, { enabled: false }) } }, "local");
+  assert.equal(rebuilds.count, 2);
+  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), [LINE]);
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base) } }, "local");
+  assert.equal(rebuilds.count, 3);
+  assert.equal(nodes(api.state.lineById.get(0).childNodes[1]).length, 5);
+  assert.deepEqual(counts, { matched: 0, segmented: 0 });
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base, { showTranscript: false }) } }, "local");
+  assert.equal(rebuilds.count, 3); // hidden: nothing to build
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base) } }, "local");
+  assert.equal(rebuilds.count, 4);
+  await settled();
+});
+
+test("a rebuilt transcript and the line on screen draw the runs of the last draw: nothing is matched or segmented again", () => {
+  const { api, sandbox } = withIndex({ cardStatus: true, showTranscript: true });
+  const rebuilds = overlay(api, sandbox);
+  const counts = countingWords(sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "字幕" }, { id: 2, start: 5, end: 6, text: "はい" }]);
+  assert.equal(rebuilds.count, 1);
+  assert.deepEqual(counts, { matched: 3, segmented: 3 });
+  const look = ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"];
+  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), look);
+  api.setSubtitle(api.cueById(0)); // the cue of a line already drawn
+  assert.deepEqual(nodes(api.state.subText), look);
+  assert.deepEqual(counts, { matched: 3, segmented: 3 });
+
+  // Lines pending: the panel is rebuilt whole, from what the last draw found.
+  api.state.transcriptDirty = true;
+  api.refreshWordMarks();
+  assert.equal(rebuilds.count, 2);
+  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), look);
+  assert.deepEqual(counts, { matched: 3, segmented: 3 });
+
+  // Another colour on: the runs differ, the word boundaries do not.
+  api.state.settings.pitchAccent = true;
+  api.state.transcriptDirty = true;
+  api.refreshWordMarks();
+  assert.equal(nodes(api.state.lineById.get(0).childNodes[1])[3], "shisuko-word{status=new,pitch=heiban}:字幕");
+  assert.deepEqual(counts, { matched: 6, segmented: 3 });
+
+  // A new index: matched again, segmented never.
+  setIndex(api, words.buildIndex([["字幕", "learning", null]]));
+  api.state.transcriptDirty = true;
+  api.refreshWordMarks();
+  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), ["これは日本語の", "shisuko-word{status=learning}:字幕", "です"]);
+  assert.deepEqual(nodes(api.state.subText), ["これは日本語の", "shisuko-word{status=learning}:字幕", "です"]);
+  assert.deepEqual(counts, { matched: 9, segmented: 3 });
+});
+
+test("one card reviewed: only the lines holding that word, or a form of it, are matched again", () => {
+  const { api, sandbox } = loadContent();
+  api.state.settings.cardStatus = true;
+  api.state.settings.showTranscript = true;
+  const rebuilds = overlay(api, sandbox);
+  const deck = [["日本語", "learned", null], ["字幕", "new", "heiban"], ["食べる", "new", null]];
+  const texts = [LINE, "字幕", "はい", "昨日食べた", "食事です"];
+  api.mergeCues(texts.map((text, id) => ({ id, start: id * 2, end: id * 2 + 1, text })));
+  api.setSubtitle(api.cueById(2));
+  setIndex(api, words.buildIndex(deck));
+  api.refreshWordMarks();
+  const textOf = (id) => api.state.lineById.get(id).childNodes[1];
+  assert.deepEqual(nodes(textOf(3)), ["昨日", "shisuko-word{status=new}:食べた"]); // found by its stem
+  assert.deepEqual(nodes(textOf(4)), ["食事です"]);
+  const drawn = texts.map((text, id) => textOf(id).childNodes[0]);
+  const counts = countingWords(sandbox);
+  const reindex = (entries) => {
+    counts.matched = 0;
+    setIndex(api, words.buildIndex(entries));
+    api.refreshWordMarks();
+  };
+
+  // 字幕 reviewed: the two lines holding it.
+  reindex([["日本語", "learned", null], ["字幕", "learning", "heiban"], ["食べる", "new", null]]);
+  assert.deepEqual(counts, { matched: 2, segmented: 0 });
+  assert.deepEqual(nodes(textOf(1)), ["shisuko-word{status=learning}:字幕"]);
+  assert.equal(nodes(textOf(0))[3], "shisuko-word{status=learning}:字幕");
+  assert.deepEqual([2, 3, 4].map((id) => textOf(id).childNodes[0]), [drawn[2], drawn[3], drawn[4]]);
+
+  // 食べる learned: the line holding 食べた, by the stem; the one holding 食事 is not looked at.
+  reindex([["日本語", "learned", null], ["字幕", "learning", "heiban"], ["食べる", "learned", null]]);
+  assert.deepEqual(counts, { matched: 1, segmented: 0 });
+  assert.deepEqual(nodes(textOf(3)), ["昨日", "shisuko-word{status=learned}:食べた"]);
+  assert.equal(textOf(4).childNodes[0], drawn[4]);
+
+  // A card deleted and one added: the lines holding either word, the line on screen among them.
+  reindex([["日本語", "learned", null], ["食べる", "learned", null], ["はい", "new", null]]);
+  assert.deepEqual(counts, { matched: 3, segmented: 0 });
+  assert.deepEqual(nodes(textOf(1)), ["字幕"]);
+  assert.deepEqual(nodes(textOf(2)), ["shisuko-word{status=new}:はい"]);
+  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=new}:はい"]);
+  assert.equal(textOf(4).childNodes[0], drawn[4]);
+
+  // The same words again: no line is looked at.
+  reindex([["日本語", "learned", null], ["食べる", "learned", null], ["はい", "new", null]]);
+  assert.deepEqual(counts, { matched: 0, segmented: 0 });
+
+  // More words changed than are worth looking for in every line: every line is matched again.
+  const many = [];
+  for (let i = 0; i < 65; i++) many.push([`語${i}`, "new", null]);
+  reindex([["日本語", "learned", null], ["食べる", "learned", null], ["はい", "new", null]].concat(many));
+  assert.deepEqual(counts, { matched: 5, segmented: 0 });
+  assert.deepEqual(nodes(textOf(2)), ["shisuko-word{status=new}:はい"]);
+  assert.equal(rebuilds.count, 1); // never a rebuild
+});
+
+test("a cue drawn while the transcript is hidden keeps nothing of the index it was drawn under", () => {
+  // The transcript hidden, as by default: a refresh visits the line on screen and no other cue,
+  // so what the other cues' looks hold stays held until the video changes. With a card reviewed
+  // in Anki every half minute, a look holding its index would pin one deck index per review.
+  const { api, sandbox } = loadContent();
+  api.state.settings.cardStatus = true;
+  subtitleBox(api, sandbox);
+  const texts = ["字幕です", "日本語です", "はい", "昨日食べた", "食事"];
+  api.mergeCues(texts.map((text, id) => ({ id, start: id * 2, end: id * 2 + 1, text })));
+  const indexes = [];
+  for (const [i] of texts.entries()) {
+    // One review per index, and one cue shown under each.
+    const status = i % 2 ? "learning" : "new";
+    setIndex(api, words.buildIndex([["字幕", status, null], ["日本語", "learned", null], [`語${i}`, "new", null]]));
+    indexes.push(api.state.wordIndex);
+    api.refreshWordMarks();
+    api.setSubtitle(api.cueById(i));
+  }
+  const stale = indexes.slice(0, -1);
+  for (const cue of api.state.cues) {
+    const look = api.state.cueLooks.get(cue);
+    assert.ok(look, cue.text);
+    for (const value of Object.values(look)) assert.ok(!stale.includes(value), `${cue.text} keeps an index of before`);
+  }
+  assert.equal(api.state.wordIndexDrawn, indexes[indexes.length - 1]); // the index of now is held where it is used
+
+  // A look from an index of before is not taken for the look of now: the cue shown again is
+  // matched against the index of now, and the look it gets is good until the next index.
+  const counts = countingWords(sandbox);
+  api.setSubtitle(api.cueById(0));
+  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=new}:字幕", "です"]);
+  assert.deepEqual(counts, { matched: 1, segmented: 0 });
+  api.setSubtitle(api.cueById(0));
+  assert.deepEqual(counts, { matched: 1, segmented: 0 });
+  setIndex(api, words.buildIndex([["字幕", "learned", null]]));
+  api.refreshWordMarks(); // the line on screen holds 字幕: drawn again under the index of now
+  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=learned}:字幕", "です"]);
+  assert.deepEqual(counts, { matched: 2, segmented: 0 });
+  setIndex(api, null);
+  api.refreshWordMarks();
+  assert.deepEqual(nodes(api.state.subText), [texts[0]]);
+  setIndex(api, words.buildIndex([["字幕", "learned", null]]));
+  api.refreshWordMarks(); // a new index after none: the look from two indexes ago is not reused
+  assert.deepEqual(counts, { matched: 3, segmented: 0 });
+});
+
+test("pollWordIndex asks only with a colour on, a video, the tab visible and the interval past, one ask at a time", async () => {
   const { api, sandbox } = loadContent();
   const asks = backgroundAnswering(sandbox, [{ ok: true, unchanged: true }, { ok: true, unchanged: true }]);
+  watching(api);
   await api.pollWordIndex();
   assert.equal(asks.length, 0); // both colours off
   api.state.settings.pitchAccent = true;
@@ -782,6 +1065,15 @@ test("pollWordIndex asks only with a colour on, the tab visible and the interval
   await api.pollWordIndex();
   assert.equal(asks.length, 0);
   sandbox.document.visibilityState = "visible";
+  // The home page, and a watch page's player kept in the DOM after leaving it: nothing to colour.
+  api.state.video = null;
+  await api.pollWordIndex();
+  assert.equal(asks.length, 0);
+  watching(api);
+  api.state.videoId = null;
+  await api.pollWordIndex();
+  assert.equal(asks.length, 0);
+  watching(api);
   await api.pollWordIndex();
   assert.equal(asks.length, 1);
   assert.deepEqual(plain(asks[0]), { type: "cardStatus", since: 0 });
@@ -819,6 +1111,7 @@ test("pollWordIndex asks only with a colour on, the tab visible and the interval
 test("pollWordIndex keeps an unchanged index, moves the stamp for the same words and rebuilds on new ones", async () => {
   const { api, sandbox } = loadContent();
   await settled();
+  watching(api);
   api.state.settings.cardStatus = true;
   subtitleBox(api, sandbox);
   api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
@@ -860,6 +1153,7 @@ test("pollWordIndex keeps an unchanged index, moves the stamp for the same words
 test("pollWordIndex drops the index when the background says off, and logs other failures once a minute", async () => {
   const { api, sandbox } = loadContent();
   await settled();
+  watching(api);
   giveIndex(api, { cardStatus: true });
   subtitleBox(api, sandbox);
   api.state.toastEl = sandbox.document.createElement("div");
@@ -897,6 +1191,7 @@ test("pollWordIndex drops the index when the background says off, and logs other
 test("a changed deck or colour starts the index over and asks for the new one at once, never while off", async () => {
   const { api, sandbox, onSettingsChanged } = loadContent();
   await settled();
+  watching(api);
   giveIndex(api, { cardStatus: true });
   subtitleBox(api, sandbox);
   api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
@@ -918,7 +1213,7 @@ test("a changed deck or colour starts the index over and asks for the new one at
   assert.equal(asks[0].since, 0);
   await settled(); // the answer is back
 
-  api.state.wordIndex = words.buildIndex(DECK);
+  setIndex(api, words.buildIndex(DECK));
   onSettingsChanged({ settings: { newValue: { cardStatus: false, cardStatusDeck: "Vocab" } } }, "local");
   assert.equal(api.state.wordIndex, null); // turned off: dropped, nothing asked
   assert.equal(asks.length, 1);
@@ -929,9 +1224,86 @@ test("a changed deck or colour starts the index over and asks for the new one at
   onSettingsChanged({ settings: { newValue: { pitchAccent: true, ankiPitchField: "Pitch" } } }, "local");
   assert.equal(asks.length, 2);
   await settled();
-  api.state.wordIndexAskedAt = 0;
+  setIndex(api, words.buildIndex(DECK));
+  api.state.wordIndexAskedAt = Date.now();
   onSettingsChanged({ settings: { newValue: { pitchAccent: true, ankiPitchField: "Pitch", ankiWordField: "Word" } } }, "local");
-  assert.equal(asks.length, 2); // the word field is the background's business (it drops its own cache)
+  assert.equal(api.state.wordIndex, null); // the words were read through the old field
+  assert.equal(asks.length, 3);
+  await settled();
+
+  // The same change reaches every YouTube tab; one without a video has nothing to colour.
+  api.state.video = null;
+  onSettingsChanged({ settings: { newValue: { pitchAccent: true, ankiPitchField: "Accent" } } }, "local");
+  assert.equal(asks.length, 3);
+});
+
+test("an answer to an ask from before a deck change is thrown away, and the new deck asked for", async () => {
+  const { api, sandbox, onSettingsChanged } = loadContent();
+  await settled();
+  watching(api);
+  api.state.settings.cardStatus = true;
+  subtitleBox(api, sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
+  api.setSubtitle(api.cueById(0));
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const asks = [];
+  sandbox.browser.runtime.sendMessage = async (msg) => {
+    if (msg.type !== "cardStatus") return { ok: true };
+    asks.push(msg);
+    if (asks.length > 1) return { ok: true, unchanged: true };
+    await gate; // the background is fetching a large deck
+    return { ok: true, deck: "Old", automatic: false, at: 1000, entries: DECK };
+  };
+  const pending = api.pollWordIndex();
+  assert.equal(asks.length, 1);
+  // The viewer picks another deck while that one is still being fetched.
+  onSettingsChanged({ settings: { newValue: { cardStatus: true, cardStatusDeck: "New" } } }, "local");
+  assert.equal(asks.length, 1); // an ask is out: no second one
+  release();
+  await pending;
+  assert.equal(api.state.wordIndex, null); // the old deck's words never colour the new deck's lines
+  assert.equal(api.state.wordIndexAt, 0);
+  assert.deepEqual(nodes(api.state.subText), [LINE]);
+  assert.equal(api.state.wordIndexInFlight, false);
+  await api.pollWordIndex(); // the next tick asks for the new deck from the start
+  assert.equal(asks.length, 2);
+  assert.equal(asks[1].since, 0);
+});
+
+test("a mined card makes the next ask go out soon, not at the interval", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  watching(api);
+  api.state.settings.cardStatus = true;
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
+  let clock = Date.now();
+  sandbox.Date = { now: () => clock };
+  const asks = [];
+  let mined = { ok: true, target: "anki", noteId: 1, message: "Added Picture to the newest Anki card" };
+  sandbox.browser.runtime.sendMessage = async (msg) => {
+    if (msg.type === "mine") return mined;
+    if (msg.type !== "cardStatus") return { ok: true };
+    asks.push(msg);
+    return { ok: true, unchanged: true };
+  };
+  await api.pollWordIndex();
+  assert.equal(asks.length, 1);
+  clock += 1000;
+  await api.mineCue(api.cueById(0), { auto: true, noteId: 1 });
+  await api.pollWordIndex();
+  assert.equal(asks.length, 1); // Anki has yet to tell the background the card's deck
+  clock += 1500;
+  await api.pollWordIndex();
+  assert.equal(asks.length, 2); // asked 2.5 s after the last one, not 30
+
+  // A mine that failed made no card: the interval stands.
+  mined = { ok: false, error: "no card" };
+  clock += 1000;
+  await api.mineCue(api.cueById(0), { auto: true, noteId: 1 });
+  clock += 5000;
+  await api.pollWordIndex();
+  assert.equal(asks.length, 2);
 });
 
 test("the master switch off: syncTick sends nothing, the deck index included", async () => {

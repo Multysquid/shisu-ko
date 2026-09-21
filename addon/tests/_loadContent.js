@@ -21,7 +21,7 @@ const EXPORTS =
   "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
   " premineAllowed, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown," +
   " modelForSync, fontStack, sync, updateStatus," +
-  " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, setSubtitle, transcriptLine };\n";
+  " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, setSubtitle, transcriptLine, mineCue };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
@@ -34,6 +34,18 @@ function instrument(source) {
     EXPORTS +
     source.slice(close)
   );
+}
+
+// words.js declares its export with `const`, which a vm script keeps in the context's lexical
+// scope, out of the sandbox's reach. Declared with `var` it is a property of the sandbox
+// (`sandbox.SHISUKO_WORDS`), so a test can put a counting wrapper in its place and see how often
+// content.js asks the matcher; content.js reads the global at every call, never a copy of it.
+const WORDS_DECLARATION = "const SHISUKO_WORDS = ";
+
+function writableWords(source) {
+  const at = source.indexOf(WORDS_DECLARATION);
+  if (at < 0 || (at > 0 && source[at - 1] !== "\n")) throw new Error(`words.js no longer declares its export as \`${WORDS_DECLARATION.trim()}\``);
+  return source.slice(0, at) + "var " + source.slice(at + "const ".length);
 }
 
 // Enough of a DOM node for what content.js builds: a class list, a data set, and children that
@@ -59,6 +71,7 @@ function stubNode(nodeType, tag) {
     tagName: tag,
     className: "",
     dataset: {},
+    style: { setProperty: () => {} },
     childNodes: [],
     classList: {
       add: (c) => classes.add(c),
@@ -130,7 +143,7 @@ function loadContent(overrides = {}) {
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
   new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
-  new vm.Script(fs.readFileSync(WORDS_PATH, "utf8"), { filename: WORDS_PATH }).runInContext(sandbox);
+  new vm.Script(writableWords(fs.readFileSync(WORDS_PATH, "utf8")), { filename: WORDS_PATH }).runInContext(sandbox);
   new vm.Script(instrument(fs.readFileSync(SOURCE_PATH, "utf8")), { filename: SOURCE_PATH }).runInContext(sandbox);
 
   const api = sandbox.__shisukoExports;
