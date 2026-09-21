@@ -63,6 +63,35 @@ test("saveSettings patches on top of the current settings and persists them", as
   assert.equal(again.serverUrl, sandbox.DEFAULT_SETTINGS.serverUrl);
 });
 
+// The popup's flush and the content script's Alt+Shift+S can land a millisecond apart. A save
+// reads the settings, merges its patch and writes; the second, reading during the first's write,
+// used to merge onto the settings from before it and write the first patch away.
+test("two saves in flight at once both keep their patch", async () => {
+  const base = makeMemoryStorage({ settings: { fontScale: 1, enabled: true } });
+  // The cross-process write takes its time; the second save arrives inside it.
+  const storage = { get: (key) => base.get(key), set: async (patch) => { await new Promise((r) => setTimeout(r, 5)); await base.set(patch); } };
+  const bg = loadBackground({ storage });
+  const first = bg.dispatch({ type: "saveSettings", settings: { fontScale: 2 } });
+  await new Promise((r) => setTimeout(r, 1));
+  const second = bg.dispatch({ type: "saveSettings", settings: { enabled: false } }, 7);
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.fontScale, 2);
+  assert.equal(a.enabled, true, "the first save answers with what it wrote");
+  assert.equal(b.fontScale, 2, "the second save merges onto the first, not onto what it overwrote");
+  assert.equal(b.enabled, false);
+  const stored = (await base.get("settings")).settings;
+  assert.equal(stored.fontScale, 2);
+  assert.equal(stored.enabled, false);
+  assert.equal((await bg.sandbox.getSettings()).fontScale, 2);
+  // A write that fails does not take the saves after it down with it.
+  storage.set = async () => {
+    throw new Error("quota");
+  };
+  await assert.rejects(bg.dispatch({ type: "saveSettings", settings: { fontScale: 3 } }), /quota/);
+  storage.set = (patch) => base.set(patch);
+  assert.equal((await bg.dispatch({ type: "saveSettings", settings: { fontScale: 4 } })).fontScale, 4);
+});
+
 test("getSettings reads storage once and serves the rest from memory", async () => {
   let gets = 0;
   const base = makeMemoryStorage({ settings: { fontScale: 1.5 } });
@@ -403,6 +432,364 @@ test("ankiPoll re-baselines after a failed poll instead of reporting a stale not
   assert.equal((await sandbox.ankiPoll()).newNoteId, 102);
 });
 
+// A video is playing, the viewer starts Anki a few seconds later and makes a card: the poll that
+// found no Anki must not count as a permission verdict, or the minute's wait for a viewer who
+// clicked No would keep the watcher off the network while the card is made. Nor may the very
+// next poll ask again: autoMine is on by default, so with Anki closed that is a refused
+// connection a second, per tab, for the whole session. A few seconds between attempts.
+test("ankiPoll asks again a few seconds after a poll found no Anki, not on the next poll", async () => {
+  let up = false;
+  let ids = [100, 101];
+  let refused = 0;
+  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => YOMITAN_NOTE });
+  const fetch = async (url, init) => {
+    if (!up) {
+      refused++;
+      throw new TypeError("NetworkError when attempting to fetch resource.");
+    }
+    return anki.fetch(url, init);
+  };
+  const bg = loadBackground({ fetch });
+  const retry = bg.sandbox.ANKI_PERMISSION_RETRY_MS;
+  assert.ok(retry >= 2000 && retry <= 10000, "a few seconds, not a poll and not a minute: " + retry);
+  const t0 = Date.now();
+  bg.setNow(t0);
+  const first = await bg.sandbox.ankiPoll();
+  assert.equal(first.ok, false);
+  assert.equal(first.offline, true);
+  assert.equal(refused, 1);
+  bg.setNow(t0 + 1000);
+  const second = await bg.sandbox.ankiPoll();
+  assert.equal(second.ok, false);
+  assert.equal(second.offline, true, "still Anki's absence, not a refusal by the viewer");
+  assert.equal(refused, 1, "the next poll does not ask again");
+  up = true;
+  bg.setNow(t0 + retry);
+  assert.deepEqual(plain(await bg.sandbox.ankiPoll()), { ok: true, newNoteId: null }, "the baseline, not a minute of 'denied'");
+  assert.deepEqual(anki.actions(), ["requestPermission", "findNotes"]);
+  ids = [100, 101, 102];
+  bg.setNow(t0 + retry + 1000);
+  assert.equal((await bg.sandbox.ankiPoll()).newNoteId, 102, "the card made a second later is reported");
+});
+
+// The regression: a poll a second with Anki closed sent a requestPermission a second.
+test("with Anki closed the watcher asks once per retry interval, not once per poll", async () => {
+  let requests = 0;
+  const fetch = async () => {
+    requests++;
+    throw new TypeError("NetworkError when attempting to fetch resource.");
+  };
+  const bg = loadBackground({ fetch });
+  const t0 = Date.now();
+  for (let second = 0; second <= 60; second++) {
+    bg.setNow(t0 + second * 1000);
+    assert.equal((await bg.sandbox.ankiPoll(1)).ok, false);
+  }
+  const retry = bg.sandbox.ANKI_PERMISSION_RETRY_MS;
+  assert.equal(requests, Math.floor(60000 / retry) + 1, `one request per ${retry} ms over a minute of polls, not 61`);
+});
+
+test("ankiPoll asks a viewer who clicked No again only after a minute", async () => {
+  const anki = ankiFetch({ requestPermission: { permission: "denied" }, findNotes: [100] });
+  const bg = loadBackground({ fetch: anki.fetch });
+  assert.equal(bg.sandbox.ANKI_PERMISSION_RECHECK_MS, 60000);
+  const t0 = Date.now();
+  bg.setNow(t0);
+  assert.match((await bg.sandbox.ankiPoll()).error, /denied access/);
+  bg.setNow(t0 + 1000);
+  assert.match((await bg.sandbox.ankiPoll()).error, /denied access/);
+  assert.equal(anki.calls.length, 1, "no second dialog within the minute");
+  bg.setNow(t0 + 60000);
+  await bg.sandbox.ankiPoll();
+  assert.equal(anki.calls.length, 2);
+});
+
+// Two visible YouTube tabs both poll, and whichever tick lands first used to take the note: the
+// tab the card was made in then never heard of it, and the other toasted a mismatch. The note
+// now stays on a ledger for every tab that polls within the window.
+test("a note found by one tab's poll is reported to the other tab that polls soon after", async () => {
+  let ids = [100];
+  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => YOMITAN_NOTE });
+  const bg = loadBackground({ fetch: anki.fetch });
+  assert.equal(bg.sandbox.ANKI_REPORT_WINDOW_MS, 60000);
+  const t0 = Date.now();
+  bg.setNow(t0);
+  await bg.dispatch({ type: "ankiPoll" }, 1); // the baseline
+  ids = [100, 101];
+  bg.setNow(t0 + 1000);
+  const other = await bg.dispatch({ type: "ankiPoll" }, 2); // the other window's tick lands first
+  assert.deepEqual(plain(other), { ok: true, newNoteId: 101, note: { sentence: "これは<b>猫</b>です。", word: "猫" } });
+  // The tab the card was made in polls next, inside the throttle even: it gets the same note,
+  // without another request, marked as one that may be another tab's.
+  bg.setNow(t0 + 1100);
+  const requests = anki.calls.length;
+  assert.deepEqual(plain(await bg.dispatch({ type: "ankiPoll" }, 1)), {
+    ok: true,
+    newNoteId: 101,
+    note: { sentence: "これは<b>猫</b>です。", word: "猫" },
+    replayed: true,
+  });
+  assert.equal(anki.calls.length, requests);
+  // Once per tab: the next ticks of both find nothing new.
+  bg.setNow(t0 + 2000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, null);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, null);
+  // A tab that first polls once the window has passed was not reading when the card was made.
+  bg.setNow(t0 + 1000 + 60001);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 3)).newNoteId, null);
+});
+
+// The tab the card was made in was mining the card before (its polls wait for a mine, which
+// can take longer than a few seconds) when the other tab found this one: a window as short as
+// the old 3 s lost the note to it.
+test("the ledger keeps a note for a tab whose next poll comes only after its mine", async () => {
+  let ids = [100];
+  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => YOMITAN_NOTE });
+  const bg = loadBackground({ fetch: anki.fetch });
+  const t0 = Date.now();
+  bg.setNow(t0);
+  await bg.dispatch({ type: "ankiPoll" }, 1);
+  ids = [100, 102];
+  bg.setNow(t0 + 2500);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 102);
+  bg.setNow(t0 + 6000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, 102);
+});
+
+// Two words looked up in one line make two cards a second apart, both found by the other tab
+// while this one mined the card before: a single remembered note would have lost the first.
+test("the ledger holds every note the other tab found, one per poll", async () => {
+  let ids = [100];
+  const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => YOMITAN_NOTE });
+  const bg = loadBackground({ fetch: anki.fetch });
+  const t0 = Date.now();
+  bg.setNow(t0);
+  await bg.dispatch({ type: "ankiPoll" }, 1);
+  ids = [100, 101];
+  bg.setNow(t0 + 1000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 101);
+  ids = [100, 101, 102];
+  bg.setNow(t0 + 2000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 102);
+  bg.setNow(t0 + 4000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, 101, "the older card first");
+  bg.setNow(t0 + 5000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, 102);
+  bg.setNow(t0 + 6000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, null);
+});
+
+// The other tabs match a card to a line of their own by its sentence. A card with a word alone
+// would be attached by every tab whose lines hold the word (a template whose sentence sits in a
+// field the popup does not name), and one whose fields could not be read would be attached the
+// playhead of every tab, into the same note: such a card goes to the tab that found it only.
+test("a note without a sentence to match is not handed to the other tabs", async () => {
+  const wordOnly = [{ fields: { Expression: { value: "猫", order: 0 }, Context: { value: "これは猫です。", order: 1 } } }];
+  const unreadable = () => {
+    throw new Error("Anki went away");
+  };
+  for (const notesInfo of [() => wordOnly, unreadable]) {
+    let ids = [100];
+    const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo });
+    const bg = loadBackground({ fetch: anki.fetch });
+    const t0 = Date.now();
+    bg.setNow(t0);
+    await bg.dispatch({ type: "ankiPoll" }, 1);
+    ids = [100, 101];
+    bg.setNow(t0 + 1000);
+    assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 101, "the tab that found it");
+    bg.setNow(t0 + 1100);
+    assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, null, "not the other");
+    assert.equal(bg.sandbox.ankiWatch.reports.length, 0);
+  }
+});
+
+// A card whose sentence is a few characters (はい。, うん, the word alone) is in the lines of
+// every video, mid-clause if not as a line: handed to a tab on another video, it was attached
+// that video's frame, clip and sentence. Such a card goes to the tab that found it alone.
+test("a card whose sentence is a few characters is not handed to the other tabs", async () => {
+  assert.equal(loadBackground().sandbox.ANKI_REPORT_MIN_CHARS, 6, "comparable()'s floor in match.js");
+  for (const [sentence, shared] of [["<b>はい</b>。", false], ["<b>猫</b>", false], ["嘘でしょ", false], ["これは<b>猫</b>です。", true]]) {
+    let ids = [100];
+    const anki = ankiFetch({ requestPermission: granted, findNotes: () => ids, notesInfo: () => noteFields(sentence) });
+    const bg = loadBackground({ fetch: anki.fetch });
+    const t0 = Date.now();
+    bg.setNow(t0);
+    await bg.dispatch({ type: "ankiPoll" }, 1);
+    ids = [100, 101];
+    bg.setNow(t0 + 1000);
+    const found = await bg.dispatch({ type: "ankiPoll" }, 2);
+    assert.equal(found.newNoteId, 101, "the tab that found it: " + sentence);
+    assert.equal(found.note.sentence, sentence);
+    bg.setNow(t0 + 1100);
+    assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, shared ? 101 : null, sentence);
+    assert.equal(bg.sandbox.ankiWatch.reports.length, shared ? 1 : 0, sentence);
+  }
+});
+
+// Once a tab has written into the card, a tab polling later must not be handed it: it would
+// match the same line (two tabs on one video) and write the card a second time.
+test("a mine that writes into the note takes it off the ledger", async () => {
+  let ids = [100];
+  const anki = ankiFetch({
+    requestPermission: granted,
+    findNotes: () => ids,
+    notesInfo: () => noteFields("これは<b>猫</b>です。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const fetch = async (url, init) => {
+    if (String(url).includes("/clip")) {
+      return { ok: true, status: 200, headers: { get: () => "audio/mpeg" }, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    }
+    return anki.fetch(url, init);
+  };
+  const bg = loadBackground({ fetch, ...instantTimers });
+  const t0 = Date.now();
+  bg.setNow(t0);
+  await bg.dispatch({ type: "ankiPoll" }, 1);
+  ids = [100, 101];
+  bg.setNow(t0 + 1000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 101);
+  bg.setNow(t0 + 1100);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, 101);
+  // A mismatch in one tab leaves the card for the others; a write takes it.
+  const mine = { type: "mine", videoId: "abc123abc123", cue: { start: 0, end: 1, text: "全然違う字幕です" }, noteId: 101, auto: true };
+  assert.equal((await bg.dispatch(mine, 2)).mismatch, true);
+  bg.setNow(t0 + 1200);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 3)).newNoteId, 101);
+  const wrote = await bg.dispatch({ ...mine, cue: { start: 0, end: 1, text: "これは猫です。" } }, 1);
+  assert.equal(wrote.ok, true, JSON.stringify(wrote));
+  bg.setNow(t0 + 1300);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 4)).newNoteId, null);
+  assert.deepEqual(plain(bg.sandbox.ankiWatch.reports.map((r) => [r.id, r.written])), [[101, true]]);
+});
+
+// An AnkiConnect that writes, and a /clip that answers when the test says so, one per video: a
+// mine is in flight between its request and that answer, as it is for seconds in the browser.
+function miningAnki(sentence) {
+  const state = { ids: [100], clips: {} };
+  const anki = ankiFetch({
+    requestPermission: granted,
+    findNotes: () => state.ids,
+    notesInfo: () => noteFields(sentence),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const fetch = (url, init) => {
+    const text = String(url);
+    if (!text.includes("/clip")) return anki.fetch(url, init);
+    const videoId = /video_id=([^&]+)/.exec(text)[1];
+    return new Promise((resolve) => {
+      state.clips[videoId] = () =>
+        resolve({ ok: true, status: 200, headers: { get: () => "audio/mpeg" }, arrayBuffer: async () => new Uint8Array([1]).buffer });
+    });
+  };
+  const bg = loadBackground({ fetch, ...instantTimers });
+  const mine = (tabId, videoId, text, noteId) =>
+    bg.dispatch({ type: "mine", videoId, cue: { start: 0, end: 1, text }, noteId, auto: true, imageDataUrl: "data:image/jpeg;base64,AAAA" }, tabId);
+  const settled = () => new Promise((r) => setImmediate(r));
+  const writes = () => anki.calls.filter((c) => c.action === "updateNoteFields").map((c) => c.params.note);
+  return { bg, anki, state, mine, settled, writes };
+}
+
+// The tab that found the note is mid-mine for seconds (the clip, four Anki round trips) when
+// the other tab's own tick lands: handed the note, that tab matched the same line and wrote the
+// card a second time, and on two videos sharing a line the card made in one ended up with the
+// other's frame and clip. A note a mine is writing into is handed to nobody until the mine is
+// over, and given back only when it wrote nothing.
+test("a note a tab is mining is not handed to another tab's poll while the mine runs", async () => {
+  const { bg, state, mine, settled, writes } = miningAnki("これは<b>猫</b>です。");
+  const t0 = Date.now();
+  bg.setNow(t0);
+  await bg.dispatch({ type: "ankiPoll" }, 1);
+  state.ids = [100, 101];
+  bg.setNow(t0 + 1000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, 101);
+  const first = mine(1, "videoAAAAAAA", "これは猫です。", 101);
+  await settled();
+  assert.equal(typeof state.clips.videoAAAAAAA, "function", "the mine is waiting for its clip");
+  // The other tab's tick, inside the mine: nothing for it, and nothing once the card is written.
+  bg.setNow(t0 + 1100);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, null);
+  state.clips.videoAAAAAAA();
+  assert.equal((await first).ok, true);
+  bg.setNow(t0 + 1200);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, null);
+  // A tab that was handed the note before the write, and mines only now, writes nothing either.
+  const late = await mine(3, "videoBBBBBBB", "これは猫です。", 101);
+  assert.equal(late.ok, true);
+  assert.equal(late.warning, true);
+  assert.match(late.message, /another tab/);
+  assert.equal(state.clips.videoBBBBBBB, undefined, "no clip was even fetched");
+  assert.equal(writes().length, 1, "note 101 written once");
+  assert.match(writes()[0].fields.Picture, /videoAAAAAAA/);
+  assert.match(writes()[0].fields.SentenceAudio, /videoAAAAAAA/);
+  // A mine that wrote nothing gives the note back: the next tab's tick is handed it.
+  state.ids = [100, 101, 102];
+  bg.setNow(t0 + 2000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, 102);
+  const mismatch = mine(1, "videoAAAAAAA", "全然違う字幕です", 102);
+  await settled();
+  bg.setNow(t0 + 2100);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, null, "held while the mine runs");
+  state.clips.videoAAAAAAA();
+  assert.equal((await mismatch).mismatch, true);
+  bg.setNow(t0 + 2200);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 102, "given back");
+  assert.equal(writes().length, 1);
+});
+
+// Both tabs were handed the note before either mine began (the other tab's poll landed first,
+// or the tab was paused and seeking back for its frame): the second mine waits for the first
+// and writes only when that one wrote nothing.
+test("a second mine for a note waits for the first and writes only when that one did not", async () => {
+  const { bg, state, mine, settled, writes } = miningAnki("これは<b>猫</b>です。");
+  const t0 = Date.now();
+  bg.setNow(t0);
+  await bg.dispatch({ type: "ankiPoll" }, 1);
+  state.ids = [100, 101];
+  bg.setNow(t0 + 1000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 101);
+  bg.setNow(t0 + 1100);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).replayed, true);
+  const second = mine(2, "videoBBBBBBB", "これは猫です。", 101);
+  await settled();
+  const first = mine(1, "videoAAAAAAA", "これは猫です。", 101);
+  await settled();
+  assert.equal(typeof state.clips.videoBBBBBBB, "function");
+  assert.equal(state.clips.videoAAAAAAA, undefined, "the second mine waits before it fetches anything");
+  state.clips.videoBBBBBBB();
+  assert.equal((await second).ok, true);
+  const waited = await first;
+  assert.equal(waited.ok, true);
+  assert.equal(waited.warning, true);
+  assert.equal(state.clips.videoAAAAAAA, undefined);
+  assert.equal(writes().length, 1);
+  assert.match(writes()[0].fields.Picture, /videoBBBBBBB/);
+  // The first mine wrote nothing (its line was not the card's after all): the waiting one writes.
+  state.ids = [100, 101, 102];
+  bg.setNow(t0 + 3000);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 2)).newNoteId, 102);
+  bg.setNow(t0 + 3100);
+  assert.equal((await bg.dispatch({ type: "ankiPoll" }, 1)).newNoteId, 102);
+  const wrong = mine(2, "videoBBBBBBB", "全然違う字幕です", 102);
+  await settled();
+  const right = mine(1, "videoAAAAAAA", "これは猫です。", 102);
+  await settled();
+  state.clips.videoBBBBBBB();
+  assert.equal((await wrong).mismatch, true);
+  await settled();
+  assert.equal(typeof state.clips.videoAAAAAAA, "function", "the waiting mine goes on");
+  state.clips.videoAAAAAAA();
+  const wrote = await right;
+  assert.equal(wrote.ok, true, JSON.stringify(wrote));
+  assert.equal(wrote.warning, undefined);
+  assert.equal(writes().length, 2);
+  assert.equal(writes()[1].id, 102);
+  assert.match(writes()[1].fields.Picture, /videoAAAAAAA/);
+});
+
 test("ankiPoll stays silent when autoMine is off", async () => {
   const storage = makeMemoryStorage({ settings: { autoMine: false } });
   const { sandbox } = loadBackground({ storage });
@@ -579,6 +966,34 @@ test("extendSentenceField refuses text that is not part of the sentence", () => 
   const { sandbox } = loadBackground();
   assert.equal(sandbox.extendSentenceField("まったく別の文です。", "これは猫です。とても可愛い。"), null);
   assert.equal(sandbox.extendSentenceField("", "これは猫です。"), null);
+});
+
+// A field is HTML to Anki, a transcription is text: "1<2" must stay "1<2" on the card, and the
+// server, whoever runs it, must not be able to put markup into the collection. The guard cannot
+// catch this (normalising strips tags before comparing), so the write itself has to escape.
+test("extendSentenceField writes the transcription as text, with only its own <b> as markup", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(
+    sandbox.extendSentenceField("これは<b>猫</b>です。", "これは猫です。<script>alert(1)</script>とても可愛い。"),
+    "これは<b>猫</b>です。&lt;script&gt;alert(1)&lt;/script&gt;とても可愛い。"
+  );
+  assert.equal(sandbox.extendSentenceField("Look at <b>the cat</b>.", "Look at the cat. 1<2 & \"so\" it's"), "Look at the cat. 1&lt;2 &amp; &quot;so&quot; it&#39;s");
+});
+
+test("addToAnki escapes the sentence it writes into an empty field", async () => {
+  const storage = makeMemoryStorage({ settings: { ankiSentenceField: "Sentence" } });
+  const anki = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => noteFields(""),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ storage, fetch: anki.fetch });
+  const settings = await sandbox.getSettings();
+  const res = await sandbox.addToAnki(settings, { text: "1<2 かな" }, MEDIA.image, MEDIA.audio, 555, { start: 10, end: 14, text: "1<2 かな Q&A <img src=x onerror=alert(1)> です。" });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const update = anki.calls.find((c) => c.action === "updateNoteFields");
+  assert.equal(update.params.note.fields.Sentence, "1&lt;2 かな Q&amp;A &lt;img src=x onerror=alert(1)&gt; です。");
 });
 
 test("addToAnki rewrites the sentence field to the whole sentence and says so", async () => {
@@ -822,6 +1237,31 @@ test("premine keeps the hovered sentence even when older ones are dropped", asyn
   assert.ok(keys.includes(0), "the sentence being looked up must survive: " + keys.join(","));
 });
 
+// The content script sends the line on screen with its frame, then the next line's clip request
+// with `ahead`. The order it gets back is its tie-break between two identical lines, so the
+// line that has not played yet must not come first merely for being the newest message.
+test("a sentence prepared ahead of its turn ranks behind the one on screen", async () => {
+  const mock = miningFetch();
+  const bg = loadBackground({ fetch: mock.fetch });
+  const t0 = Date.now();
+  bg.setNow(t0);
+  await bg.dispatch(premine(0, { imageDataUrl: jpeg("frame") }), 1);
+  bg.setNow(t0 + 1);
+  const res = await bg.dispatch(premine(1, { ahead: true }), 1);
+  assert.deepEqual(plain(res.held.map((e) => e.key)), [0, 1]);
+  // Its clip was still fetched: a lookup on it is paid for.
+  await settle();
+  assert.deepEqual(plain(bg.sandbox.heldFor(1)), [{ key: 0, cueIds: [0], image: true, audio: true }, { key: 1, cueIds: [1], image: false, audio: true }]);
+  // Once it plays it is the line read last.
+  bg.setNow(t0 + 2000);
+  await bg.dispatch(premine(1, { imageDataUrl: jpeg("frame") }), 1);
+  assert.deepEqual(plain(bg.sandbox.heldFor(1).map((e) => e.key)), [1, 0]);
+  // Hovering the earlier line brings it back to the front.
+  bg.setNow(t0 + 3000);
+  await bg.dispatch(premine(0, { imageDataUrl: jpeg("read"), hover: true }), 1);
+  assert.deepEqual(plain(bg.sandbox.heldFor(1).map((e) => e.key)), [0, 1]);
+});
+
 test("premine holds ten sentences across every tab", async () => {
   const mock = miningFetch();
   const { sandbox, dispatch } = loadBackground({ fetch: mock.fetch });
@@ -918,6 +1358,83 @@ test("a sentence survives being mined: two words from one line make two cards", 
   assert.equal((await dispatch(mineMsg(0), 1)).ok, true);
   assert.equal(mock.clips.length, 1, "the second card reuses the same clip");
   assert.deepEqual(plain(sandbox.heldFor(1)), [{ key: 0, cueIds: [0], image: true, audio: true }]);
+});
+
+// ------------------------------------------------------------------ mining deadlines
+
+// The content script holds its mining flag until the mine's answer arrives, so a request that
+// hangs (a container paused, a laptop asleep mid-request, a permission dialog nobody sees) used to
+// end manual mining, automatic mining and the Anki watch for that tab until a reload. The mock
+// below answers a hanging request only through its abort signal, and fires the background's
+// timers on the next turn instead of after their delay, keeping the delays for the assertions.
+function hangingFetch(handlers, hangs) {
+  const inner = miningFetch(handlers);
+  const delays = [];
+  const setTimeout = (fn, ms) => {
+    delays.push(ms);
+    return globalThis.setTimeout(fn, 0);
+  };
+  const fetch = (url, init) => {
+    const action = String(url).includes("/clip") ? "clip" : JSON.parse(init.body).action;
+    if (!hangs(action)) return inner.fetch(url, init);
+    if (action === "clip") inner.clips.push(String(url));
+    return new Promise((_resolve, reject) => {
+      const signal = init && init.signal;
+      if (!signal) return; // no deadline: this connection never answers
+      const abort = () => reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" }));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+  };
+  return { fetch, setTimeout, delays, clips: inner.clips, calls: inner.calls };
+}
+
+const settles = (promise) => Promise.race([promise, new Promise((resolve) => globalThis.setTimeout(() => resolve("hung"), 500).unref())]);
+
+test("a mine whose clip request hangs ends at the clip deadline", async () => {
+  const mock = hangingFetch(ankiOk, (action) => action === "clip");
+  const bg = loadBackground({ fetch: mock.fetch, setTimeout: mock.setTimeout });
+  assert.equal(bg.sandbox.CLIP_TIMEOUT_MS, 30000);
+  const res = await settles(bg.dispatch(mineMsg(0), 1));
+  assert.notEqual(res, "hung");
+  assert.equal(res.ok, false);
+  assert.match(res.error, /Whisper server timed out/);
+  assert.ok(mock.delays.includes(30000), "the clip deadline: " + mock.delays.join(","));
+});
+
+test("a mine whose AnkiConnect request hangs ends at that request's deadline", async () => {
+  // Automatic mines: a manual one would fall back to Downloads on the failure and answer ok.
+  const cases = [
+    ["requestPermission", 60000, mineMsg(0, { auto: true })], // the viewer may be looking for Anki's dialog
+    ["findNotes", 30000, mineMsg(0, { noteId: null, auto: true })],
+    ["notesInfo", 30000, mineMsg(0, { auto: true })],
+    ["storeMediaFile", 30000, mineMsg(0, { auto: true })],
+    ["updateNoteFields", 30000, mineMsg(0, { auto: true })],
+  ];
+  for (const [action, deadline, msg] of cases) {
+    const mock = hangingFetch({ ...ankiOk, findNotes: [555] }, (a) => a === action);
+    const bg = loadBackground({ fetch: mock.fetch, setTimeout: mock.setTimeout });
+    const res = await settles(bg.dispatch(msg, 1));
+    assert.notEqual(res, "hung", action);
+    assert.equal(res.ok, false, action);
+    assert.match(res.error, /did not answer in time/, action);
+    assert.ok(mock.delays.includes(deadline), `${action}: ${mock.delays.join(",")}`);
+  }
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.ANKI_PERMISSION_TIMEOUT_MS, 60000);
+  assert.equal(sandbox.ANKI_REQUEST_TIMEOUT_MS, 30000);
+});
+
+test("a mine that waits on a pre-mined clip still under way ends when that request does", async () => {
+  const mock = hangingFetch(ankiOk, (action) => action === "clip");
+  const bg = loadBackground({ fetch: mock.fetch, setTimeout: mock.setTimeout });
+  await bg.dispatch(premine(0, { imageDataUrl: jpeg("frame") }), 1);
+  assert.equal(mock.clips.length, 1);
+  // Dispatched before the pre-mine's request has come back: the mine waits on that request.
+  const res = await settles(bg.dispatch(mineMsg(0), 1));
+  assert.notEqual(res, "hung");
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.match(res.message, /no audio \(Whisper server timed out\)/);
 });
 
 // ------------------------------------------------------------------ downloads fallback
@@ -1663,8 +2180,6 @@ test("a notification click whose request fails says so in a notification of its 
     { handlers: {}, error: "Server unreachable" },
     // Restarted by hand without the launcher since the notification.
     { handlers: { health: healthOf("0.8.0", false), update: jsonResponse(409, { ok: false, error: "the server was not started by run.cmd / run.sh" }) }, error: "the server was not started by run.cmd / run.sh" },
-    // Updated another way since the notification.
-    { handlers: { health: healthOf("0.9.0", true), update: jsonResponse(200, { ok: true, restarting: true }) }, error: "the server already runs 0.9.0" },
   ];
   for (const { handlers, error } of cases) {
     const mock = updateFetch(handlers);
@@ -1686,6 +2201,42 @@ test("a notification click whose request fails says so in a notification of its 
   const popup = loadBackground({ storage, fetch: updateFetch({}).fetch, extensionVersion: "0.9.0" });
   assert.equal((await popup.dispatch({ type: "updateServer" })).ok, false);
   assert.equal(popup.notifications.length, 0);
+});
+
+// The viewer restarted run.cmd by hand (which updates) while the notification sat there, then
+// clicked it: nothing was posted and nothing failed, so "could not update" would be a lie.
+test("a notification click on a server updated another way clears it and says nothing", async () => {
+  const storage = makeMemoryStorage(freshCheck());
+  const mock = updateFetch({ health: healthOf("0.9.0", true), update: jsonResponse(200, { ok: true, restarting: true }) });
+  const bg = loadBackground({ storage, fetch: mock.fetch, extensionVersion: "0.9.0", ...instantTimers });
+  await bg.clickNotification("shisuko-update");
+  await settle();
+  assert.equal(mock.count("update"), 0, "nothing to post");
+  assert.ok(bg.notifications.some((n) => n.id === "shisuko-update" && n.cleared), "the stale notification is cleared");
+  assert.ok(!bg.notifications.some((n) => n.id === "shisuko-update-failed"), "nothing failed");
+  assert.ok(!bg.notifications.some((n) => n.id === "shisuko-updated"));
+  assert.equal((await bg.session.get("serverUpdate")).serverUpdate, undefined);
+  // The popup's own request is told the same, marked so the answer is not a refusal.
+  const res = await bg.dispatch({ type: "updateServer" });
+  assert.deepEqual(plain(res), { ok: false, upToDate: true, error: "the server already runs 0.9.0" });
+});
+
+test("the popup's status clears the notification once the server is seen at the release", async () => {
+  const storage = makeMemoryStorage(staleCheck());
+  let health = healthOf("0.8.0", true);
+  const mock = updateFetch({ github, health: () => health });
+  const bg = loadBackground({ storage, fetch: mock.fetch, extensionVersion: "0.9.0" });
+  await bg.startup();
+  assert.equal(bg.notifications.filter((n) => n.id === "shisuko-update").length, 1);
+  // The server is still behind: the offer stands.
+  await bg.dispatch({ type: "updateStatus", health: { version: "0.8.0", launcher: true } });
+  assert.ok(!bg.notifications.some((n) => n.cleared));
+  // Offline: it may come back at the old version, so the offer stands too.
+  await bg.dispatch({ type: "updateStatus", health: null });
+  assert.ok(!bg.notifications.some((n) => n.cleared));
+  // Restarted by hand at the release: the offer is withdrawn.
+  await bg.dispatch({ type: "updateStatus", health: { version: "0.9.0", launcher: true } });
+  assert.ok(bg.notifications.some((n) => n.id === "shisuko-update" && n.cleared));
 });
 
 // Between the old server's exit and the new one's port the native host sees neither /health nor

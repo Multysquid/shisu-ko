@@ -153,6 +153,10 @@ function loadBackground(overrides = {}) {
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
       " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
       " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
+      " globalThis.ANKI_PERMISSION_RECHECK_MS = ANKI_PERMISSION_RECHECK_MS; globalThis.ANKI_REPORT_WINDOW_MS = ANKI_REPORT_WINDOW_MS;" +
+      " globalThis.CLIP_TIMEOUT_MS = CLIP_TIMEOUT_MS; globalThis.ANKI_REQUEST_TIMEOUT_MS = ANKI_REQUEST_TIMEOUT_MS;" +
+      " globalThis.ANKI_PERMISSION_TIMEOUT_MS = ANKI_PERMISSION_TIMEOUT_MS; globalThis.ANKI_PERMISSION_RETRY_MS = ANKI_PERMISSION_RETRY_MS;" +
+      " globalThis.ANKI_REPORT_MIN_CHARS = ANKI_REPORT_MIN_CHARS;" +
       " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
       " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",

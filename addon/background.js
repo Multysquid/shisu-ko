@@ -45,11 +45,42 @@ const UPDATE_RUNNING_HINT = "The launcher restarts the server itself once update
 
 // Auto-mining watcher: poll AnkiConnect for a note Yomitan has just created.
 const ANKI_POLL_THROTTLE_MS = 250;   // several tabs may poll; one request per interval is enough
+// How long a permission verdict holds: a viewer who clicked No in Anki's dialog is asked again
+// after a minute. No verdict at all (the request threw: Anki is not running, or still starting)
+// is asked again after a few seconds: not on the next poll, which is a second away and, with
+// autoMine on by default, would send a refused connection a second for as long as Anki stays
+// closed, and not in a minute, which kept the watcher from a card made in the minute after
+// Anki was started.
 const ANKI_PERMISSION_RECHECK_MS = 60000;
+const ANKI_PERMISSION_RETRY_MS = 5000;
 const ANKI_POLL_TIMEOUT_MS = 5000;      // a hung poll would otherwise block the watcher for good
 const ANKI_BASELINE_MAX_AGE_MS = 10000; // a gap this long means the baseline can no longer be trusted
+// A note found by one tab's poll stays on a ledger this long for the tab the card was made in:
+// two visible YouTube tabs both poll, and the first tick to land would otherwise take the note
+// away from that tab. Which tab that is, the background cannot tell (it has no cues), so the note
+// is answered once to every tab that asks, each matches the card's sentence against its own
+// lines, and the tab whose mine then writes into the note takes it off the ledger. A minute,
+// not a few seconds: the tab the card was made in may be mid-mine (its polls wait for the mine,
+// and a mine can take a while: four tries for a clip the server is still fetching, 1.5 s apart,
+// then the Anki round trips), or the viewer may have left it for a moment.
+const ANKI_REPORT_WINDOW_MS = 60000;
+// The other tabs match a card to a line of their own by its sentence, and a short sentence
+// (はい, うん, the word alone) is in every video, mid-clause if not as a line: a tab on another
+// video would attach its own frame, clip and sentence to the card. Only a sentence long enough
+// to single out a line is replayed (the floor is comparable()'s in match.js); a shorter card
+// goes to the tab that found it alone, as every card did before there was a ledger.
+const ANKI_REPORT_MIN_CHARS = 6;
+// A mine waits for its answer with nothing else the tab can do (the content script holds its
+// mining flag until the message resolves), so every request on that path has a deadline: a
+// /clip stuck behind a paused container or a laptop's sleep would otherwise end mining, and the
+// Anki watch, for that tab until a reload. The clip is a few seconds of decoding on a busy
+// server; AnkiConnect's requestPermission waits for the viewer to answer Anki's dialog, so it
+// gets a minute, the other actions (a media upload, a field write) far less than that.
+const CLIP_TIMEOUT_MS = 30000;
+const ANKI_REQUEST_TIMEOUT_MS = 30000;
+const ANKI_PERMISSION_TIMEOUT_MS = 60000;
 
-const ankiWatch = { baseline: null, lastPollAt: 0, lastOk: false, permission: null, permissionCheckedAt: 0 };
+const ankiWatch = { baseline: null, lastPollAt: 0, lastOk: false, permission: null, permissionAskAt: 0, reports: [] };
 
 // Pre-mined sentences, keyed by tab, video and sentence. Memory only: this is material for a card
 // that may never be made, and none of it is worth a file on disk. The caps keep a long session
@@ -82,11 +113,22 @@ async function getSettings() {
   return cacheSettings(Object.assign({}, DEFAULT_SETTINGS, stored.settings || {}));
 }
 
-async function saveSettings(patch) {
-  const current = await getSettings();
-  const next = Object.assign({}, current, patch || {});
-  await browser.storage.local.set({ settings: next });
-  return cacheSettings(next);
+// A save is a read, a merge and a write, and the cache only learns of the write once it is done:
+// a second save landing during the first's storage write (the popup's flush and the content
+// script's Alt+Shift+S both come through here) would merge its patch onto the settings from
+// before the first and write the first patch away. One save at a time, in the order they came.
+let saveChain = Promise.resolve();
+
+function saveSettings(patch) {
+  const save = saveChain.then(async () => {
+    const current = await getSettings();
+    const next = Object.assign({}, current, patch || {});
+    await browser.storage.local.set({ settings: next });
+    return cacheSettings(next);
+  });
+  // A failed write must not fail every save after it.
+  saveChain = save.catch(() => {});
+  return save;
 }
 
 browser.storage.onChanged.addListener((changes, area) => {
@@ -680,6 +722,9 @@ async function updateStatus(msg) {
     serverOnline: !!server,
   });
   await applyBadge(decision);
+  // A server seen at the release no longer needs the update the notification offers; a viewer
+  // who restarted run.cmd by hand would otherwise find the offer still up.
+  if (decision.server === "current") await clearNotification(UPDATE_NOTIFICATION);
   const snoozed = await sessionGet(SNOOZE_KEY);
   return {
     latest: check.latest || null,
@@ -730,8 +775,9 @@ async function requestUpdate() {
   const to = check && check.latest && typeof check.latest.version === "string" ? check.latest.version : null;
   const server = serverInfo(healthRes.ok ? healthRes.data : null);
   const from = server ? server.version : null;
-  // The notification can be clicked long after the server was updated another way.
-  if (from && to && compareVersions(from, to) >= 0) return { ok: false, error: `the server already runs ${from}` };
+  // The notification can be clicked long after the server was updated another way: nothing to
+  // post, and nothing failed either, which `upToDate` tells the click apart from a refusal.
+  if (from && to && compareVersions(from, to) >= 0) return { ok: false, upToDate: true, error: `the server already runs ${from}` };
   const res = await apiRequest("/update", {});
   if (!res.ok) {
     return { ok: false, error: res.error || "the server refused", refused: !res.offline && !!(res.data && res.data.error), offline: !!res.offline };
@@ -783,9 +829,11 @@ if (browser.notifications && browser.notifications.onClicked && typeof browser.n
     clearNotification(id);
     // The click asked for something and has no popup to answer in, so a request that did not
     // get through says so here: the notification would otherwise just vanish as if it had
-    // worked. Checks stay silent; this is the one path the viewer set off.
+    // worked. Checks stay silent; this is the one path the viewer set off. A server already at
+    // the release (updated another way while the notification sat there) is no failure: the
+    // stale notification is gone with the clear above, and that is all there was to do.
     return updateServer({ watch: true })
-      .then((res) => (res.ok ? undefined : notify(UPDATE_FAILED_NOTIFICATION, "Shisu-ko could not update the server", String(res.error || "the server gave no answer"))))
+      .then((res) => (res.ok || res.upToDate ? undefined : notify(UPDATE_FAILED_NOTIFICATION, "Shisu-ko could not update the server", String(res.error || "the server gave no answer"))))
       .catch(() => {});
   });
 }
@@ -810,29 +858,34 @@ async function fetchClip(settings, videoId, start, end, attempts) {
   const format = settings.clipFormat === "wav" ? "wav" : "mp3";
   const url = `${base}/clip?video_id=${encodeURIComponent(videoId)}&start=${start.toFixed(3)}&end=${end.toFixed(3)}&format=${format}`;
   for (let attempt = 0; attempt < tries; attempt++) {
-    let res;
+    // One deadline per attempt, over the request and its body: a connection that hangs instead
+    // of failing would otherwise never settle, and neither would the mine waiting on it.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CLIP_TIMEOUT_MS);
     try {
-      res = await fetch(url);
-    } catch (err) {
-      return { ok: false, error: "Whisper server unreachable" };
-    }
-    if (res.status === 503) {
-      if (attempt + 1 >= tries) break;
-      await sleep(1500);
-      continue;
-    }
-    if (!res.ok) {
-      let message = `HTTP ${res.status}`;
-      try {
-        message = (await res.json()).error || message;
-      } catch (err) {
-        /* keep the status text */
+      const res = await fetch(url, { signal: controller.signal });
+      if (res.status === 503) {
+        if (attempt + 1 >= tries) break;
+        await sleep(1500);
+        continue;
       }
-      return { ok: false, error: message };
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`;
+        try {
+          message = (await res.json()).error || message;
+        } catch (err) {
+          /* keep the status text */
+        }
+        return { ok: false, error: message };
+      }
+      const mime = (res.headers.get("Content-Type") || "audio/mpeg").split(";")[0].trim();
+      const buffer = await res.arrayBuffer();
+      return { ok: true, base64: bytesToBase64(buffer), mime, ext: mime === "audio/wav" ? "wav" : "mp3" };
+    } catch (err) {
+      return { ok: false, error: err && err.name === "AbortError" ? "Whisper server timed out" : "Whisper server unreachable" };
+    } finally {
+      clearTimeout(timer);
     }
-    const mime = (res.headers.get("Content-Type") || "audio/mpeg").split(";")[0].trim();
-    const buffer = await res.arrayBuffer();
-    return { ok: true, base64: bytesToBase64(buffer), mime, ext: mime === "audio/wav" ? "wav" : "mp3" };
   }
   return { ok: false, error: "The server is still fetching this video's audio, try again in a moment" };
 }
@@ -906,11 +959,12 @@ function evictPremined(tabId) {
   }
 }
 
-// What this tab holds, newest first, without the payloads: the content script only needs to know
-// whether a sentence already has its image and its audio.
+// What this tab holds, the sentence read last first and the ones only prepared ahead of their turn
+// last, without the payloads: the content script only needs to know whether a sentence already
+// has its image and its audio, and the order is its tie-break between two identical lines.
 function heldFor(tabId) {
   return tabEntries(tabId)
-    .sort((a, b) => b.touched - a.touched)
+    .sort((a, b) => b.seen - a.seen || b.touched - a.touched)
     .map((entry) => ({ key: entry.key, cueIds: entry.cueIds, image: !!entry.image, audio: !!entry.audio }));
 }
 
@@ -933,10 +987,15 @@ async function premineSentence(msg, tabId) {
   const id = premineId(tabId, videoId, key);
   let entry = premined.get(id);
   if (!entry) {
-    entry = { tabId, videoId, key, cueIds: [], sentence: null, image: null, audio: null, clip: null, audioPromise: null, pinned: false, touched: 0 };
+    entry = { tabId, videoId, key, cueIds: [], sentence: null, image: null, audio: null, clip: null, audioPromise: null, pinned: false, touched: 0, seen: 0 };
     premined.set(id, entry);
   }
   entry.touched = Date.now();
+  // The next sentence's clip is asked for while this one plays (`ahead`): that sentence has not
+  // been read yet, so it keeps its place behind the ones that have (heldFor above), or a card
+  // that fits two identical lines would go to the line that has not played. `touched` still
+  // counts for eviction: the material is as fresh either way.
+  if (!msg.ahead) entry.seen = entry.touched;
   if (Array.isArray(msg.cueIds)) entry.cueIds = msg.cueIds.slice();
   entry.sentence = { start: sentence.start, end: sentence.end, text: String(sentence.text || "") };
 
@@ -973,7 +1032,8 @@ async function premineSentence(msg, tabId) {
 async function anki(url, action, params, timeoutMs) {
   // No Content-Type header on purpose: a "simple" request needs no CORS preflight, which
   // matters for the very first requestPermission call from a not-yet-allowed origin.
-  // requestPermission blocks until the viewer answers Anki's dialog, so it gets no timeout.
+  // requestPermission blocks until the viewer answers Anki's dialog, so the watcher gives it no
+  // timeout; a mine, which the tab waits on, gives it a long one.
   const controller = new AbortController();
   const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
@@ -1007,6 +1067,14 @@ function sentenceOf(msg) {
   return { start: cue.start, end: cue.end, text: cue.text };
 }
 
+// A field is HTML to Anki's reviewer, and a transcription is text: "1<2" or "A&B" written as it
+// is would lose characters on the card, and the server, which the viewer names by URL, could put
+// markup, or a script, into the collection through it. The overlay shows the same text through
+// textContent; this is the one place it is written into HTML.
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 // Yomitan copies the sentence from the one cue it scanned, so the card keeps a fragment of what was
 // said. Give it the whole sentence instead, carrying Yomitan's <b> around the looked-up word across.
 // Returns null when there is nothing to extend: unrelated text, or the sentence is already there.
@@ -1018,8 +1086,8 @@ function extendSentenceField(existing, full) {
   const bold = (/<b[^>]*>([\s\S]*?)<\/b>/i.exec(String(existing)) || [])[1];
   const word = normalizeSentence(bold || "");
   const at = word ? text.indexOf(word) : -1;
-  if (at < 0) return text;
-  return text.slice(0, at) + "<b>" + word + "</b>" + text.slice(at + word.length);
+  if (at < 0) return escapeHtml(text);
+  return escapeHtml(text.slice(0, at)) + "<b>" + escapeHtml(word) + "</b>" + escapeHtml(text.slice(at + word.length));
 }
 
 // The two fields that say what a card is about. The word is whatever the viewer configured, else
@@ -1043,23 +1111,73 @@ function noteSummary(info, settings) {
   return { sentence: read(sentenceName), word };
 }
 
+// `permissionAskAt` is when the next request may go: a minute after a verdict, a few seconds
+// after none (ANKI_PERMISSION_RECHECK_MS / ANKI_PERMISSION_RETRY_MS).
 async function ankiPermission(url) {
   if (ankiWatch.permission === "granted") return true;
   const now = Date.now();
-  if (ankiWatch.permissionCheckedAt && now - ankiWatch.permissionCheckedAt < ANKI_PERMISSION_RECHECK_MS) return false;
-  ankiWatch.permissionCheckedAt = now;
-  const perm = await anki(url, "requestPermission", {});
+  if (now < ankiWatch.permissionAskAt) return false;
+  // Set before the request: it blocks on Anki's dialog, and the polls landing meanwhile must
+  // not each queue a dialog of their own.
+  ankiWatch.permissionAskAt = now + ANKI_PERMISSION_RECHECK_MS;
+  let perm;
+  try {
+    perm = await anki(url, "requestPermission", {});
+  } catch (err) {
+    // No verdict came (Anki not running, or still starting). The minute's wait is for a viewer
+    // who clicked No; here it would turn Anki's absence into a minute of "denied" during which
+    // a card it makes is never looked at. A few seconds instead: Anki is noticed soon after it
+    // starts, and a closed Anki costs a refused connection every few seconds, not every poll.
+    ankiWatch.permissionAskAt = now + ANKI_PERMISSION_RETRY_MS;
+    throw err;
+  }
   ankiWatch.permission = (perm && perm.permission) || "denied";
   return ankiWatch.permission === "granted";
 }
 
+// The oldest note on the ledger this tab has not been given yet, or null. Every note is answered
+// once per tab (the ledger is a list: two cards made from one line while their tab was mining
+// the card before must both reach it, one per poll), and `replayed` tells the content script
+// that the note may be another tab's: a line of its own that matches the card's sentence is
+// its only reason to act on it. A note a mine is writing into right now (`mine`, see mineCue())
+// is handed to nobody: the tab that found it is mid-mine for seconds (the clip, the Anki round
+// trips) when the other tab's tick lands, and two tabs on one video, or on two sharing the
+// line, would both match, and the later write would put its frame and clip on the card. A mine
+// that wrote nothing gives the note back; one that wrote keeps it from every tab (`written`).
+function replayReport(tabId, now) {
+  ankiWatch.reports = ankiWatch.reports.filter((report) => now - report.at <= ANKI_REPORT_WINDOW_MS);
+  const report = ankiWatch.reports.find((entry) => !entry.mine && !entry.written && !entry.tabs.includes(tabId));
+  if (!report) return null;
+  report.tabs.push(tabId);
+  return { ok: true, newNoteId: report.id, note: report.note, replayed: true };
+}
+
+function reportFor(noteId) {
+  const id = Number(noteId);
+  return ankiWatch.reports.find((report) => report.id === id) || null;
+}
+
+// A note written into is nobody else's to attach to, whether an automatic mine or Alt+Shift+M
+// in another tab wrote it: a tab polling afterwards is not handed a card that has its material,
+// and a mine for it from a tab handed the card before (mineCue()) writes nothing. The entry
+// stays on the ledger, marked, until the window drops it: that is how such a mine learns.
+function forgetReport(noteId) {
+  const report = reportFor(noteId);
+  if (report) report.written = true;
+}
+
 // Report a note that appeared since the previous poll. Reports nothing whenever the baseline could
 // be stale (first poll, previous poll failed, long gap) or when several notes arrived at once, so a
-// card added while Anki was closed, or an import, is never touched.
-async function ankiPoll() {
+// card added while Anki was closed, or an import, is never touched. `tabId` is the asking tab:
+// the baseline is shared, so a note is put on the ledger and answered to every tab that polls
+// within the window.
+async function ankiPoll(tabId) {
   const settings = await getSettings();
   if (!settings.autoMine || settings.mineTarget !== "anki") return { ok: true, newNoteId: null };
   const now = Date.now();
+  // Before the throttle: the other tab's tick may land inside it, and this answer needs no request.
+  const replay = replayReport(tabId, now);
+  if (replay) return replay;
   const previousPollAt = ankiWatch.lastPollAt;
   if (now - previousPollAt < ANKI_POLL_THROTTLE_MS) return { ok: true, newNoteId: null };
   ankiWatch.lastPollAt = now;
@@ -1067,6 +1185,8 @@ async function ankiPoll() {
   try {
     if (!(await ankiPermission(url))) {
       ankiWatch.lastOk = false;
+      // No verdict yet: the last request threw, and the next is a few seconds away.
+      if (ankiWatch.permission === null) return { ok: false, offline: true, error: "Anki is not running or AnkiConnect is not installed" };
       return { ok: false, error: "AnkiConnect denied access. Click Yes in Anki's permission dialog." };
     }
     const ids = await anki(url, "findNotes", { query: "added:1" }, ANKI_POLL_TIMEOUT_MS);
@@ -1088,6 +1208,14 @@ async function ankiPoll() {
     } catch (err) {
       note = null;
     }
+    // Only a card whose sentence says which line it is about goes on the ledger for the other
+    // tabs: they match by sentence. One with a word alone would be attached by every tab whose
+    // lines hold the word, one that could not be read would be attached the playhead of every
+    // tab, and one whose sentence is a few characters (ANKI_REPORT_MIN_CHARS) is in the lines of
+    // every video; such a card goes to the tab that found it, as it did before there was a ledger.
+    if (note && SHISUKO_MATCH.normalize(note.sentence).length >= ANKI_REPORT_MIN_CHARS) {
+      ankiWatch.reports.push({ id: maxId, note, at: now, tabs: [tabId], mine: null, written: false });
+    }
     return { ok: true, newNoteId: maxId, note };
   } catch (err) {
     ankiWatch.lastOk = false;
@@ -1103,7 +1231,7 @@ async function ankiPoll() {
 // Anki may rename an uploaded file (recent versions lowercase it, and clashes get a suffix), so the
 // field must reference the name storeMediaFile reports, not the one we asked for.
 async function storeMedia(url, filename, base64) {
-  const stored = await anki(url, "storeMediaFile", { filename, data: base64 });
+  const stored = await anki(url, "storeMediaFile", { filename, data: base64 }, ANKI_REQUEST_TIMEOUT_MS);
   return typeof stored === "string" && stored ? stored : filename;
 }
 
@@ -1113,19 +1241,19 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
   const targetId = Number.isFinite(wanted) && wanted > 0 ? wanted : null;
   const what = targetId === null ? "newest" : "new";
   try {
-    const perm = await anki(url, "requestPermission", {});
+    const perm = await anki(url, "requestPermission", {}, ANKI_PERMISSION_TIMEOUT_MS);
     if (!perm || perm.permission !== "granted") {
       return { ok: false, error: "AnkiConnect denied access. Click Yes in Anki's permission dialog, then mine again." };
     }
     let noteId = targetId;
     if (noteId === null) {
-      const ids = await anki(url, "findNotes", { query: "added:1" });
+      const ids = await anki(url, "findNotes", { query: "added:1" }, ANKI_REQUEST_TIMEOUT_MS);
       if (!Array.isArray(ids) || !ids.length) {
         return { ok: false, error: "No card was added today. Create the card with Yomitan first, then mine." };
       }
       noteId = Math.max(...ids);
     }
-    const infos = await anki(url, "notesInfo", { notes: [noteId] });
+    const infos = await anki(url, "notesInfo", { notes: [noteId] }, ANKI_REQUEST_TIMEOUT_MS);
     const fields = (infos && infos[0] && infos[0].fields) || {};
     const sentence = fullSentence && fullSentence.text ? fullSentence : { text: cue.text };
     if (targetId !== null) {
@@ -1168,7 +1296,7 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
       const existing = String((fields[fieldName] && fields[fieldName].value) || "").trim();
       if (!existing) {
         // Filling an unconfigured field was never this add-on's business; only extending is.
-        if (sentenceField) update[fieldName] = sentence.text;
+        if (sentenceField) update[fieldName] = escapeHtml(sentence.text);
       } else {
         const grown = extendSentenceField(existing, sentence.text);
         if (grown !== null) {
@@ -1180,12 +1308,15 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
     if (!Object.keys(update).length) {
       return { ok: false, error: `The ${what} card has none of the fields ${missing.join(", ")}. Check the field names in the popup.` };
     }
-    await anki(url, "updateNoteFields", { note: { id: noteId, fields: update } });
+    await anki(url, "updateNoteFields", { note: { id: noteId, fields: update } }, ANKI_REQUEST_TIMEOUT_MS);
     let message = `Added ${Object.keys(update).join(" + ")} to the ${what} Anki card`;
     if (extended) message += " (sentence extended to what was spoken)";
     if (missing.length) message += ` (no field named ${missing.join(", ")})`;
     return { ok: true, target: "anki", noteId, message };
   } catch (err) {
+    if (err && err.name === "AbortError") {
+      return { ok: false, error: "AnkiConnect did not answer in time (a permission dialog in Anki may be waiting)" };
+    }
     const network = err && err.name === "TypeError";
     return { ok: false, error: network ? "Anki is not running or AnkiConnect is not installed" : String((err && err.message) || err) };
   }
@@ -1266,7 +1397,28 @@ async function cachedClip(entry, params) {
   return null;
 }
 
+// A mine into a note on the ledger holds the note while it runs (replayReport() hands it to no
+// other tab). A second mine for it, from a tab handed the note before the first began (its
+// poll landed first, or it was paused and seeking back for its frame), waits for the first and
+// writes only when that one wrote nothing: two writes into one card, from two tabs on one video
+// or on two sharing a line, would leave it with the later tab's frame and clip. Alt+Shift+M
+// carries no note id and is the viewer's own business.
 async function mineCue(msg, tabId) {
+  const report = reportFor(msg && msg.noteId);
+  if (!report) return mineCueNow(msg, tabId);
+  while (report.mine) await report.mine.catch(() => {});
+  if (report.written) {
+    return { ok: true, target: "anki", noteId: report.id, warning: true, message: "The new card was attached in another tab" };
+  }
+  report.mine = mineCueNow(msg, tabId);
+  try {
+    return await report.mine;
+  } finally {
+    report.mine = null;
+  }
+}
+
+async function mineCueNow(msg, tabId) {
   const settings = await getSettings();
   const cue = msg && msg.cue;
   if (!cue || typeof cue.start !== "number" || typeof cue.end !== "number") {
@@ -1306,6 +1458,8 @@ async function mineCue(msg, tabId) {
   let result;
   if (settings.mineTarget === "anki") {
     result = await addToAnki(settings, cue, image, audio, msg.noteId, sentence);
+    // The card has its material: off the ledger the Anki watch keeps for the other tabs.
+    if (result.ok) forgetReport(result.noteId);
     // Automatic mining never writes files: a failure the viewer did not ask for must stay quiet.
     if (!result.ok && !msg.auto && settings.mineFallbackDownload) {
       const fallback = await downloadFiles(image, audio);
@@ -1352,7 +1506,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       dropTabPremined(tabId);
       return Promise.resolve({ ok: true });
     case "ankiPoll":
-      return ankiPoll();
+      return ankiPoll(tabId);
     case "startServer":
       return startServer();
     case "startServerStatus":

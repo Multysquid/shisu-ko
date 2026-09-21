@@ -22,8 +22,34 @@ test("normalize drops bracket furigana, whitespace and punctuation", () => {
   assert.equal(normalize(" 食[た]べる"), "食べる");
   assert.equal(normalize("「はい」、そうです！"), "はいそうです");
   assert.equal(normalize("Look at the cat."), "Lookatthecat");
+  assert.equal(normalize("はい．そうです．"), "はいそうです");
   assert.equal(normalize(null), "");
   assert.equal(normalize(undefined), "");
+});
+
+test("normalize drops the readings of HTML ruby, as {sentence-furigana} and {furigana} write them", () => {
+  // Yomitan's ruby markers write <ruby>食<rt>た</rt></ruby>; only the -plain ones write brackets.
+  // Stripping the tags alone would weave every reading into the kanji (今日きょうは学校がっこうで).
+  const ruby =
+    "<ruby>今日<rt>きょう</rt></ruby>は<ruby>学校<rt>がっこう</rt></ruby>で<ruby>友達<rt>ともだち</rt></ruby>と" +
+    "<b><ruby>勉強<rt>べんきょう</rt></ruby></b>した";
+  assert.equal(normalize(ruby), "今日は学校で友達と勉強した");
+  assert.equal(normalize('<ruby>食<rp>(</rp><rt class="r">た</rt><rp>)</rp></ruby>べる'), "食べる");
+  // The end tag of <rt> may be left out before </ruby>.
+  assert.equal(normalize("<ruby>食<rt>た</ruby>べる"), "食べる");
+  assert.equal(normalize("<RUBY>食<RT>た</RT></RUBY>べる"), "食べる");
+});
+
+test("a card written with ruby furigana matches its line and earns the word bonus", () => {
+  const sentence = "<ruby>今日<rt>きょう</rt></ruby>は<ruby>学校<rt>がっこう</rt></ruby>で<b><ruby>勉強<rt>べんきょう</rt></ruby></b>した";
+  const cues = [
+    { id: 0, start: 0, text: "今日は学校で勉強した" },
+    { id: 1, start: 5, text: "猫が窓から外を見ている" },
+  ];
+  assert.equal(similarity(sentence, cues[0].text), 1);
+  assert.equal(matchCue(cues, { sentence, word: "<ruby>勉強<rt>べんきょう</rt></ruby>" }, {}).id, 0);
+  // A card with no sentence matches on a ruby word alone.
+  assert.equal(matchCue([{ id: 2, start: 9, text: "ご飯を食べる" }], { sentence: "", word: "<ruby>食<rt>た</rt></ruby>べる" }, {}).id, 2);
 });
 
 // ------------------------------------------------------------------ similarity
@@ -35,13 +61,22 @@ test("similarity is 1 when either text contains the other", () => {
   assert.equal(similarity("これは猫です", "これは猫です、とても可愛い、ずっと見ていられる。"), 1);
 });
 
-test("similarity ignores a scrap of text swallowed by a long sentence", () => {
-  // "ですね" is inside almost any Japanese sentence; containment must not make it a match.
+test("similarity ignores a scrap of a line swallowed by a long card sentence", () => {
+  // "ですね" is inside almost any Japanese sentence; a cue saying only that must not match a card
+  // whose sentence merely holds it.
   assert.equal(similarity("今日はとてもいい天気ですね", "ですね"), 0);
-  assert.equal(similarity("はい", "はい、そうですね、わかりました。"), 0);
+  assert.equal(similarity("はい、そうですね、わかりました。", "はい"), 0);
   // Short against short is still a match: a card made from a short line carries that short line.
   assert.equal(similarity("ですね。", "ですね"), 1);
   assert.equal(similarity("そうですね", "そうですね。ええ"), 1);
+});
+
+test("similarity accepts a short card sentence that a longer line said", () => {
+  // The other way round the bar does not apply: Yomitan stops its sentence at 。, and the server
+  // merges a short cue into its neighbour, so the card made from this line reads 嘘でしょ。 and
+  // the background guard must let the matcher's pick through.
+  assert.equal(similarity("<b>嘘</b>でしょ。", "嘘でしょ。本当にそんなことがあったの"), 1);
+  assert.equal(similarity("はい", "はい、そうですね、わかりました。"), 1);
 });
 
 test("similarity stays high across a one character difference", () => {
@@ -135,6 +170,87 @@ test("matchCue ignores a cue too short to be what the card is about", () => {
 
 test("matchCue attaches nothing when only the scrap is on the list", () => {
   assert.equal(matchCue([WITH_SCRAP[0]], { sentence: LONG_SENTENCE, word: "" }, {}), null);
+});
+
+// The server merges a cue shorter than --min-cue-seconds into its neighbour, and Yomitan cuts its
+// sentence at 。！？: the card made from the merged line carries only its first few characters.
+const MERGED = [
+  { id: 0, start: 0, text: "おはようございます" },
+  { id: 1, start: 4, text: "嘘でしょ。本当にそんなことがあったの" },
+  { id: 2, start: 9, text: "分かった。じゃあ明日また来るね" },
+  { id: 3, start: 14, text: "駄目だ。もう二度と会わない" },
+  { id: 4, start: 19, text: "行こう。時間がないんだ" },
+];
+
+test("matchCue finds the merged line a short Yomitan sentence was cut from", () => {
+  assert.equal(matchCue(MERGED, { sentence: "<b>嘘</b>でしょ。", word: "嘘" }, {}).id, 1);
+  assert.equal(matchCue(MERGED, { sentence: "分かった。", word: "分かる" }, {}).id, 2);
+  assert.equal(matchCue(MERGED, { sentence: "駄目だ。", word: "駄目" }, {}).id, 3);
+  // The word is the dictionary form and appears nowhere; the sentence alone has to do.
+  assert.equal(matchCue(MERGED, { sentence: "行こう。", word: "行く" }, {}).id, 4);
+  assert.equal(matchCue(MERGED, { sentence: "行こう。", word: "" }, {}).id, 4);
+});
+
+test("matchCue still refuses a short sentence that no line said", () => {
+  assert.equal(matchCue(MERGED, { sentence: "嘘だよ。", word: "嘘" }, {}), null);
+});
+
+test("matchCue lets rank decide between a line that is the short sentence and one that runs past it", () => {
+  const cues = [
+    { id: 0, start: 100, text: "嘘でしょ" },
+    { id: 1, start: 400, text: "嘘でしょ。本当にそんなことがあったの" },
+  ];
+  const note = { sentence: "<b>嘘</b>でしょ。", word: "嘘" };
+  // Both lines said the whole sentence; the one the viewer just read wins, wherever the playhead is.
+  assert.equal(matchCue(cues, note, { t: 100, rank: (c) => (c.id === 1 ? 0 : Infinity) }).id, 1);
+  assert.equal(matchCue(cues, note, { t: 400, rank: (c) => (c.id === 0 ? 0 : Infinity) }).id, 0);
+  // Nothing pre-mined: the playhead decides.
+  assert.equal(matchCue(cues, note, { t: 390 }).id, 1);
+  assert.equal(matchCue(cues, note, { t: 110 }).id, 0);
+});
+
+test("matchCue gives a card cut from the transcript its own line, not the playing line that holds its words", () => {
+  // The viewer at 10:00 scans はい in the transcript's line at 40:00 while the line playing, which
+  // was pre-mined as every playing line is, holds はい too, mid-clause. Yomitan cuts its sentence
+  // at 。！？, never at 、, so no card reading はい was made from はい、そうですね: the exact line
+  // wins, whatever the rank and the playhead say.
+  const cues = [
+    { id: 1, start: 598, text: "はい、そうですね" },
+    { id: 2, start: 602, text: "はいはい、わかりました" },
+    { id: 3, start: 2400, text: "はい" },
+  ];
+  const note = { sentence: "はい", word: "はい" };
+  assert.equal(matchCue(cues, note, { t: 600 }).id, 3);
+  assert.equal(matchCue(cues, note, { t: 600, rank: (c) => (c.id === 1 ? 0 : Infinity) }).id, 3);
+  const longer = [
+    { id: 1, start: 598, text: "本当にそうですね、そう思いますよ" },
+    { id: 3, start: 2400, text: "本当にそうですね" },
+  ];
+  const rank = (c) => (c.id === 1 ? 0 : Infinity);
+  assert.equal(matchCue(longer, { sentence: "本当にそうですね", word: "" }, { t: 600, rank }).id, 3);
+  // Nothing else said it: the line holding the words mid-clause is still the match.
+  assert.equal(matchCue(cues.slice(0, 2), note, { t: 600 }).id, 1);
+});
+
+test("matchCue treats a quote as an end of the sentence, as Yomitan does", () => {
+  // A word looked up inside 「」 gets the quoted words as its sentence, so the quoting line said
+  // the sentence whole and rank decides, as between a line that is the sentence and one that runs
+  // past it at 。.
+  const cues = [
+    { id: 0, start: 100, text: "はい" },
+    { id: 1, start: 400, text: "彼は「はい」と答えた" },
+  ];
+  const note = { sentence: "はい", word: "はい" };
+  assert.equal(matchCue(cues, note, { t: 100, rank: (c) => (c.id === 1 ? 0 : Infinity) }).id, 1);
+  assert.equal(matchCue(cues, note, { t: 400, rank: (c) => (c.id === 0 ? 0 : Infinity) }).id, 0);
+  assert.equal(matchCue(cues, note, { t: 390 }).id, 1);
+  // The word outside the quotes: the sentence runs from 。 to 。 across them.
+  const quoting = [
+    { id: 0, start: 100, text: "彼は「はい」と答えた" },
+    { id: 1, start: 400, text: "そうか。彼は「はい」と答えた。" },
+  ];
+  const outside = { sentence: "彼は「はい」と<b>答えた</b>。", word: "答える" };
+  assert.equal(matchCue(quoting, outside, { t: 100, rank: (c) => (c.id === 1 ? 0 : Infinity) }).id, 1);
 });
 
 test("matchCue prefers the cue that explains more of the card's sentence", () => {
