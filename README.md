@@ -181,7 +181,7 @@ comes back.
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
 | Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
-| ← / → | Jump to the previous / next subtitle. Left replays the current line once you are more than a second into it. Can be turned off in the popup |
+| ← / → | Jump to the previous / next subtitle. Left replays the current line once you are more than a second into it. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
 Chrome at `chrome://extensions/shortcuts`.
@@ -202,10 +202,10 @@ sides. A long sentence is shown as several short subtitle lines, but mining alwa
 whole sentence: the clip spans it, and the card's sentence field is grown from the single line
 Yomitan copied to the full sentence, keeping the bold around the word you looked up.
 
-Both are prepared while you watch. Each line that plays has its frame and its clip made ready in
-the background, so making a card attaches them at once, and still attaches them after the line has
-gone from the screen. Nothing is written to disk; a handful of recent sentences are held in memory
-and dropped when you leave the page.
+Both are prepared while you watch. Each line that plays has its clip, and with auto-attach on its
+frame, made ready in the background, so making a card attaches them at once, and still attaches
+them after the line has gone from the screen. Nothing is written to disk; a handful of recent
+sentences are held in memory and dropped when you leave the page.
 
 **Anki (default).** Normally you never trigger mining at all:
 

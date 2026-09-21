@@ -79,7 +79,15 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   directories; only the operator's `--model` may be a folder, and it skips the download.
 - `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S).
   Off must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption
-  hiding, no arrow-key handling, no Anki polling. Only the toggle command itself keeps working.
+  hiding, no arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so
+  Alt+Shift+M would still find one). Only the toggle command itself keeps working: the command
+  listener in `content.js` returns for every other command while `enabled` is false.
+- The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on
+  it, so its handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`,
+  the transcript's close button) act only on trusted events (`ev.isTrusted`): a synthetic click
+  must not write a card, save a file, seek or pause. The keyboard commands arrive through the
+  browser, not the page. Text from the server is written into Anki's HTML fields only through
+  `escapeHtml()` in `background.js`; the overlay shows it through `textContent`.
 - Live streams run on the stream's media clock, `getProgressState().current` of YouTube's player
   (read through `wrappedJSObject`, Firefox only), never on `video.currentTime`, which restarts at
   an arbitrary point on every page load. Every place the content script reads or seeks the
@@ -216,7 +224,9 @@ On the client, `content.js` keeps `state.modelLoading` / `state.modelError` from
 shows `Loading model X… (a first use downloads it)` or `Shisu-ko: model X: <error>` (an error is
 shown even with progress messages off, both parts capped by `truncate()`), and the storage
 listener clears the verdict and syncs at once when the model setting changes. `popup.js` polls
-`/health` every two seconds while open: the badge says "Loading model" during a switch, and
+`/health` every two seconds while open and in view (the same page is the options page, and a
+hidden tab polls nothing until it is shown again): the badge says "Loading model" during a
+switch, and
 `modelErrorFor()` puts the server's verdict under the field only when the field's value (or the
 default while empty) is one of the failed model's spellings.
 
@@ -255,10 +265,14 @@ answer to "why is nothing appearing?"; neither is styled as an error.
 
 ## How automatic mining works
 
-`ankiPoll()` in `addon/background.js` watches AnkiConnect so the viewer never presses anything:
-the content script asks once per sync tick (visible tab, no ad, not already mining) and the
-background answers with the id of a note Yomitan has just created, plus what that note says
-(`notesInfo`: its sentence field and its word field, `ankiWordField` or the field with `order` 0).
+`ankiPoll(tabId)` in `addon/background.js` watches AnkiConnect so the viewer never presses
+anything: the content script asks once per sync tick (`ankiPollAllowed()`: `autoMine` on with
+`mineTarget` `anki`, which is `autoAnkiMining()`; a visible tab, no ad, not already mining, not
+standing by for another tab (`state.standby`, see "One tab at a time"), and not idle, meaning
+two minutes after a plain pause or, during a hover pause, two minutes after the pointer was last
+seen over the subtitle or the player, `hoverSeenAt`) and the background answers
+with the id of a note Yomitan has just created, plus what that note says (`notesInfo`: its
+sentence field and its word field, `ankiWordField` or the field with `order` 0).
 Four rules keep it from touching the wrong card.
 
 - Baseline. Every poll remembers the highest `findNotes("added:1")` id. It reports nothing when
@@ -275,29 +289,68 @@ Four rules keep it from touching the wrong card.
   failure the viewer did not ask for must not scatter files.
 
 Polls are throttled to one request per 250 ms (several tabs poll the same background), and the
-`requestPermission` handshake is retried at most once a minute until Anki grants it. Poll errors
-are logged with `console.debug`, never toasted. A `notesInfo` that fails still reports the id,
-with `note: null`, and the content script falls back to the cue at the playhead.
+`requestPermission` handshake is retried at most once a minute after the viewer clicked No:
+`ankiPermission()` sets `permissionAskAt` a minute ahead before the request, because the polls
+landing while Anki's dialog is up must not queue dialogs of their own, and pulls it back to
+`ANKI_PERMISSION_RETRY_MS` (5 s) when no verdict came, so Anki not running is not a minute of
+"denied" (the poll answers `offline: true` meanwhile). Poll errors are logged with
+`console.debug`, never toasted. A `notesInfo` that fails still reports the id, with `note:
+null`, and the content script falls back to the cue at the playhead.
+
+The baseline is shared between tabs, so a note found by one tab's poll goes on a ledger
+(`ankiWatch.reports`, kept for `ANKI_REPORT_WINDOW_MS`, 60 s) and `replayReport()` answers it,
+with `replayed: true`, to every other tab that polls within the window, once per tab, before the
+throttle and without a request of its own; each tab matches the card's sentence against its own
+lines (`matchCue`), and the mine that writes into the note takes it off the ledger
+(`forgetReport()` marks the entry `written`; it stays until the window drops it). While a mine
+for a note runs (`mineCue()` keeps its promise in the entry's `mine`), the note is handed to no
+other tab, a second mine for it waits for the first and writes only when that one wrote nothing
+(else it answers `{ok: true, warning: true}` and "attached in another tab"), and a mine that
+wrote nothing (a mismatch, no clip) gives the note back: the finder is mid-mine for seconds
+when the other tab's tick lands, and two writes would leave the card with the later tab's frame
+and clip. Only a note with a sentence goes on the ledger: one with a word alone, or one
+`notesInfo` could not read, goes to the tab that found it, as before.
+
+Every request on the mining path has a deadline, because the content script holds
+`state.mining` until the `mine` message resolves: `fetchClip()` aborts each attempt after
+`CLIP_TIMEOUT_MS` (30 s, body read included; "Whisper server timed out"), `addToAnki()` and
+`storeMedia()` give AnkiConnect `ANKI_REQUEST_TIMEOUT_MS` (30 s) and its `requestPermission`
+`ANKI_PERMISSION_TIMEOUT_MS` (60 s, the dialog), an abort reading "AnkiConnect did not answer in
+time". The watcher's own `requestPermission` stays untimed: its poll resolves when the viewer
+answers the dialog. Whatever is written into a note's HTML fields goes through `escapeHtml()`:
+the sentence that fills an empty sentence field, and every text part `extendSentenceField()`
+puts around its own `<b>`.
 
 ### Matching a card to its subtitle (`addon/match.js`)
 
 `SHISUKO_MATCH` is a plain script loaded between `settings.js` and the two scripts that use it, in
 both `background.scripts` and `content_scripts[0].js`.
 
-- `normalize(text)` strips HTML tags, decodes `&nbsp; &amp; &lt; &gt; &quot; &#39;`, removes
-  bracket furigana (`{sentence-furigana}` writes ` 食[た]べる`), all whitespace and punctuation.
-- `similarity(a, b)` is 1 when either normalised text contains the other, otherwise the Dice
-  coefficient of their character-bigram sets; `MIN_SIMILARITY` is 0.6. Dice, not the overlap
-  coefficient: dividing by the smaller set alone passes two sentences that merely end the same way
-  (別の字幕です against これはテスト字幕です scores 0.6), and containment already covers a card
-  whose sentence is a real fragment of the cue. Either way the score is 0 unless the shorter text
-  has at least 6 characters or covers half of the longer one: a three-character cue (ですね) inside
-  a long card sentence is not a match, while a short cue's own card carries that same short
-  sentence and still scores 1. Ties in `matchCue` break on that coverage first.
+- `normalize(text)` removes ruby readings first (`RUBY`: an `<rt>` or `<rp>` up to the next end
+  tag; Yomitan's `{sentence-furigana}` and `{furigana}` write `<ruby>食<rt>た</rt></ruby>べる`,
+  which stripping the tags alone would leave as 食たべる), then strips HTML tags, decodes
+  `&nbsp; &amp; &lt; &gt; &quot; &#39;`, removes bracket furigana (`{sentence-furigana-plain}`
+  writes ` 食[た]べる`), all whitespace and punctuation.
+- `similarity(card, spoken)` takes the card's text first, and the order matters. It is 1 when
+  the spoken text contains the card's sentence whole, however short (`contains()`: the server
+  merges a short cue into its neighbour, 嘘でしょ。本当にそんなことがあったの, and Yomitan stops at
+  the 。, so the card reads 嘘でしょ, four characters only that line explains), or when the card's
+  sentence contains the spoken text and that text is a real share of it (`comparable()`: at
+  least 6 characters, or half of the longer one, so a three-character cue, ですね, inside a long
+  card sentence is not a match); otherwise the Dice coefficient of their character-bigram sets,
+  0 unless comparable; `MIN_SIMILARITY` is 0.6. Dice, not the overlap coefficient: dividing by
+  the smaller set alone passes two sentences that merely end the same way (別の字幕です against
+  これはテスト字幕です scores 0.6), and containment already covers a card whose sentence is a real
+  fragment of the cue.
 - `matchCue(cues, note, opts)` picks the cue a card belongs to: cues scoring below the threshold
   against the note's sentence are out, a cue containing the note's word gets +0.2, and ties break
-  on `opts.rank(cue)` (the content script ranks pre-mined sentences, newest first) and then on
-  distance from `opts.t`, the playhead. A card with no sentence matches on the word alone; a card
+  on `share()`, then on `opts.rank(cue)` (the content script ranks pre-mined sentences, the one
+  read last first) and then on distance from `opts.t`, the playhead. `share()` is 1 for a cue
+  that runs past the sentence at a point where Yomitan cuts (`cutFrom()`: the sentence is a whole
+  piece of the cue's raw text between 。！？!?．… or a newline, or of such a piece between quotes,
+  「」『』 and the straight ones; Yomitan never cuts at 、), else the shorter text's length over
+  the longer one's (`coverage()`), so a whole line beats a fragment of itself and a line that is
+  the sentence beats one holding it mid-clause. A card with no sentence matches on the word alone; a card
   with neither is nobody's, and `autoMine` falls back to `currentCueForMining()`.
 - It stays O(n): containment is tried on every cue first and bigrams only if nothing contained.
 
@@ -305,17 +358,27 @@ both `background.scripts` and `content_scripts[0].js`.
 
 Nothing is captured when the card appears; it was captured while the line played. 400 ms after a
 cue becomes active (`schedulePremine` in `content.js`), the content script reads the frame off the
-video and sends `premine` to the background, and asks for the *next* sentence's clip as well, so a
-lookup on either is already paid for. Hovering a line sends the frame again with `hover: true`:
-that is the frame the viewer was actually looking at, and it pins the sentence.
+video and sends `premine` to the background, and asks for the *next* sentence's clip as well
+(`ahead: true`), so a lookup on either is already paid for. The frame is read only while
+`autoAnkiMining()` holds (`autoMine` on and `mineTarget` `anki`): a mine the viewer asks for takes
+the frame on screen, so otherwise the `premine` carries no image and only the clip is prepared.
+Hovering a line sends the frame again with `hover: true`: that is the frame the viewer was
+actually looking at, and it pins the sentence; the same sentence at the same paused position is
+not read back again (`hoverShot`). Every frame is drawn onto one shared canvas (`drawFrame()`),
+let go after a tainted read. Premine and `premineReset` messages leave one at a time
+(`premineTurn()`), and an answer from before `state.cueGeneration` changed (`dropCues()` bumps
+it: a new video, a new session token) is not taken as the held list, since the new cues' ids
+start at 0 again and would count as prepared with the old video's material.
 
 The store is `premined`, a `Map` in `background.js` keyed by tab, video and sentence
 (`cueIds[0]`). Entries hold the base64 frame, the clip and the promise fetching it
 (`fetchClip(..., attempts = 1)`: nobody is waiting, and a failure simply leaves `audio` null for
 the next attempt). Caps: 5 sentences per tab, 10 in all, oldest-touched unpinned first; a pinned
 entry goes only when nothing else is left. Oversize payloads (3 MB image, 5 MB audio) are dropped.
-`premineReset`, `tabs.onRemoved` and a new video or server session clear a tab. Nothing is ever
-written to disk, and nothing survives a restart of the event page.
+`premineReset`, `tabs.onRemoved` and a new video or server session clear a tab. The inventory
+answered to the tab (`heldFor()`) is ordered by `seen`, stamped by every message without `ahead`,
+then by `touched`: a sentence only prepared ahead of its turn ranks behind the one on screen.
+Nothing is ever written to disk, and nothing survives a restart of the event page.
 
 `mineCue` then uses it: an `imageDataUrl` sent with the message wins, else the held frame; the
 held clip is used when its parameters still match the ones computed now (same start, end and
@@ -378,7 +441,11 @@ after that default model is loaded.
 Extension side: the popup's flow is `startFlow.state`, `idle -> requesting -> starting ->
 waiting -> idle` once `/health` answers, or `failed` with the reason on the detail line and the
 button back; the permission request is issued in the click handler before its first `await`
-(it needs the user gesture). The background owns the launch (`startServer()`): one
+(it needs the user gesture). A server-address edit (`checkServer(true)`) puts a spent flow
+(`failed`, and the update flow's `done` / `stale` / `failed` / `lost`) back to `idle`, since
+its hint was judged at the old address, and overtakes a `/health` request still under way
+(`healthAsked`: the old address may hold it up for the full timeout, and its answer is
+dropped). The background owns the launch (`startServer()`): one
 `sendNativeMessage` at a time (`startInFlight`), raced against `NATIVE_TIMEOUT_MS` (15 s), the
 answer recorded with a `deadline` of `START_WINDOW_MS` (90 s, past any healthy model load) in
 memory and in `browser.storage.session` (Firefox ends an idle event page after 30 s), so a
@@ -497,9 +564,12 @@ has the `.xpi`), it only tells the viewer and asks the server to update itself.
   available" / "The server runs <server>. Click to update it now."), only for `newer`, only from
   the start-up check. `notifications.onClicked` runs `updateServer({watch: true})`; a request
   that fails there gets a notification of its own (`shisuko-update-failed`, whose click does
-  nothing). Badge and notification helpers tolerate a missing API (the test sandbox, a content
-  script). The popup's banner (`#update-banner`, `renderUpdate()`) names the release and the
-  server's version with **Update** and **Not now** for `newer`, the reason and no Update button
+  nothing), except when the server already runs the release (`upToDate: true`: updated another
+  way while the notification sat there, and the click's own clear was all there was to do);
+  `updateStatus()` clears `shisuko-update` whenever the decision is `current`. Badge and
+  notification helpers tolerate a missing API (the test sandbox, a content script). The
+  popup's banner (`#update-banner`, `renderUpdate()`) names the release and the server's
+  version with **Update** and **Not now** for `newer`, the reason and no Update button
   for `cannot` ("was not started by run.cmd / run.sh", the one text for every blocker, since
   `/health` carries only the flag and a `--no-update` server's 409 text is never fetched) and
   `behind` ("cannot be updated from
@@ -509,7 +579,8 @@ has the `.xpi`), it only tells the viewer and asks the server to update itself.
   checked 3 min ago", "No release found, …", "Update check failed: <error> (last seen: X)").
 - Update. Popup **Update** or the notification click -> `{type: "updateServer"}` ->
   `requestUpdate()`: `/health` first (so a spent record ends, see below), refuse without a POST
-  when the server already runs >= latest, else `POST /update` through `apiRequest()`. On
+  (`{ok: false, upToDate: true, error}`) when the server already runs >= latest, else
+  `POST /update` through `apiRequest()`. On
   `{ok: true, restarting: true}` the record `serverUpdate` `{requestedAt, from, to, deadline,
   down}` (`deadline` = `UPDATE_WINDOW_MS`, 120 s: the launcher's update plus a model load) goes
   to `storage.session` with a memory fallback (`sessionGet` / `sessionSet`), the notification is
@@ -529,8 +600,11 @@ has the `.xpi`), it only tells the viewer and asks the server to update itself.
   with the Start button back. `refreshUpdate()` sends the popup's own `/health` answer with the
   question and re-asks only when the server's version, launcher flag or reachability changed or
   after an action; answers are numbered (`updateAsked`) so a slow first answer, held up by the
-  check of GitHub, cannot overwrite the verdict for the server now on screen. A reopened popup
-  resumes the flow from `startServerStatus` (`updating`) before its first paint.
+  check of GitHub, cannot overwrite the verdict for the server now on screen; an overtaken
+  first answer makes the popup ask once more, since it carried the day's check, which the answer
+  that overtook it was given without. It resolves to whether an answer was taken, and the banner
+  is painted again only then. A reopened popup resumes the flow from `startServerStatus`
+  (`updating`) before its first paint.
 - Chrome. `browser-api.js` bridges `action.setBadgeText` / `setBadgeBackgroundColor`,
   `notifications.create` / `clear` (with `onClicked` passed through) and `tabs.create`; the
   endpoint is plain HTTP, so the flow is the same there.
@@ -608,8 +682,16 @@ node --test addon/tests/*.test.js
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
 `REQUEST_TIMEOUT_MS`) need an extra script run in the same context to expose them, since they
 live in the global lexical environment rather than as globalThis properties. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting its IIFE to return its
-pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, `fontStack`, `modelForSync`, ...) and the
-`browser.storage.onChanged` listener as `onSettingsChanged`; it throws if the file's shape changes.
+pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, `jumpTarget`, `fontStack`,
+`modelForSync`, ...) and the handlers that drive them (`sync`, `premineNow`, `onKeyDown`,
+`onMineClick`, `discover`, ...), the `browser.storage.onChanged` listener as `onSettingsChanged`
+and the `runtime.onMessage` listener as `onCommand`; it throws if the file's shape changes. Its
+`stubElement(tag)` keeps a child list (`appendChild`, `insertBefore`, `replaceChildren`, a
+fragment that empties into its target), so a test can count the nodes a render makes and read
+the transcript panel's order back, and a stub canvas yields no blob. `addon/tests/popup.test.js`
+builds its fake document from `popup.html` (tags, types, range bounds, listeners a test can
+fire) and plays the background with a `getSettings` / `saveSettings` pair that merges like
+`background.js` and echoes the write to the storage listener.
 When adding a new setting or a new pure helper, add a matching test rather than only exercising
 it manually.
 
@@ -656,6 +738,27 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 - `browser.downloads.download()` refuses `data:` URLs ("Access denied for URL data:...", thrown
   synchronously before any promise exists): an extension may not load a URL that inherits its
   principal. Build a `Blob`, pass `URL.createObjectURL()` from the background page, revoke it later.
+- The toolbar popup's document dies with the click outside it that closes it, and a text field's
+  `change` event fires on that very close: `flushSave()` in `popup.js` sends the save before any
+  `await`, from `pagehide` and `visibilitychange` as well as the 150 ms debounce, and sends only
+  the fields edited since the last save (`dirty`), because the form is not the only writer (the
+  content script saves `enabled` and `showTranscript` for the commands) and a whole-form save
+  would put back what another writer changed; `browser.storage.onChanged` brings such changes
+  into the form. `saveSettings()` in `background.js` is a read-modify-write, so it runs one save
+  at a time (`saveChain`): two in flight would drop a patch.
+- YouTube's SPA keeps the watch page in the DOM when it leaves it: on a Short reached from a
+  watch page `#movie_player` still exists, hidden, with its video, so `findPlayer()` asks for
+  `#shorts-player` on `/shorts/` addresses first, or the Short would be fetched and transcribed
+  on the hidden video's clock. An ad runs on a clock of its own: `/sync` still goes out during
+  one (the server hears of a new video only through it, and a pre-roll ad used to hold up the
+  fetch by its whole length), carrying `state.contentPlayhead`, the video's position as of the
+  last request outside an ad, or the link's `t=` before the first.
+- The player's focused controls (the volume slider, the settings menu, the radios and lists of
+  its dialogs) take the arrow keys themselves; `KEY_SKIP_SELECTOR` names them by ARIA role,
+  except the progress bar, whose arrows are the five second seek the subtitle jump replaces.
+  `jumpTarget()` answers null, leaving YouTube's own seek alone, when there is no cue at all or
+  the playhead and the target do not sit in the same covered range (`coveredRange()`): the last
+  known line before an untranscribed stretch is not the previous line.
 
 ## Making changes
 
