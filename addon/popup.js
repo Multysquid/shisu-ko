@@ -15,6 +15,10 @@ const MODEL_HINT = "Applies while a video plays. A model not downloaded yet is f
 const MODEL_NAME_HINT = "Use a model size such as large-v3 or a Hugging Face repo id such as owner/name";
 // A model load takes seconds to minutes; while the popup is open its status line follows along.
 const HEALTH_REFRESH_MS = 2000;
+// The deck hint is a snapshot of Anki at the last ask, and the options page (the same popup.html)
+// lives for hours: a verdict that Anki is away, or has not allowed the extension yet, is asked
+// again this often while a word-colour feature is on (see retryDecks).
+const DECKS_RETRY_MS = 30000;
 const OFFLINE_HINT = "start server/run.cmd or docker/up.cmd";
 
 // The "Start server" button. The server answers /health only once its model is loaded, and a
@@ -61,10 +65,16 @@ let saveTimer = null;
 // The debounced save only remembers the last event, so a server-address or model edit leaves a
 // note here that the save flushes: "server" starts the status over, "model" refreshes the hint.
 let serverCheckPending = null;
-// The same for the word colours: a feature just turned on, or another deck chosen, asks Anki
-// for its decks once the save is through.
-let decksCheckPending = false;
+// The same for the word colours: a feature just turned on or another AnkiConnect URL ("feature")
+// or another deck chosen ("deck") asks Anki for its decks once the save is through. The save
+// judges "feature" again against the form it writes: a checkbox ticked and unticked inside the
+// debounce is off, and the ask would bring up AnkiConnect's permission dialog for a viewer who
+// uses neither feature.
+let decksCheckPending = null;
 let decksAsked = 0; // questions to Anki so far: an answer overtaken by a later question is dropped
+// The newest question's answer: true when Anki listed its decks, false when it could not (away,
+// permission not granted, an error), null while none has answered (nothing asked, or an ask out).
+let decksOk = null;
 let health = null; // the last /health answer, null while the server is unreachable
 let healthInFlight = false;
 
@@ -298,28 +308,55 @@ function renderDeckOptions(decks, seen, current) {
   select.value = value;
 }
 
+// Whether the form has a word-colour feature on: the checkboxes are the form, and what the
+// debounced save writes.
+function wordColoursOn() {
+  return document.getElementById("cardStatus").checked || document.getElementById("pitchAccent").checked;
+}
+
 // Ask Anki for its decks and say under the select which one the word colours look at, or what
 // stands in the way. Only asked while one of the two features is on, or when one was just turned
-// on or another deck chosen: the first ask brings up AnkiConnect's permission dialog, which a
-// viewer who never uses the feature must not meet. The answer names the deck the last mined card
-// went to as well, which is what "automatic" means; without an answer the select keeps the
-// stored deck and the hint says why the colours will not come.
+// on, another deck chosen or another Anki named: the first ask brings up AnkiConnect's permission
+// dialog, which a viewer who never uses the feature must not meet. The answer names the deck the
+// last mined card went to as well, which is what "automatic" means; without an answer the select
+// keeps the stored deck and the hint says why the colours will not come. The hint is about the
+// colours, so it is painted only while a feature is on: an answer that lands after the viewer
+// unticked both (Anki's dialog clicked later, a slow list) fills the list and says nothing.
 async function refreshDecks() {
   const asked = ++decksAsked;
+  decksOk = null;
   const res = await browser.runtime.sendMessage({ type: "ankiDecks" }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
   if (asked !== decksAsked) return;
   const select = document.getElementById("cardStatusDeck");
   const hint = document.getElementById("deck-hint");
   const ok = !!(res && typeof res === "object" && res.ok);
-  const seen = res && typeof res.seen === "string" && res.seen ? res.seen : null;
+  decksOk = ok;
+  // The background's every answer carries `seen`; only a message that failed outright has none,
+  // and then the deck of the last mined card was never looked at (see automaticDeckText).
+  const seen = res && typeof res === "object" && "seen" in res ? (typeof res.seen === "string" && res.seen ? res.seen : null) : undefined;
   const decks = ok && Array.isArray(res.decks) ? res.decks : [];
   const value = select.value;
   renderDeckOptions(decks, seen, value);
-  if (!ok) setHint(hint, res && typeof res.error === "string" && res.error ? res.error : "Anki gave no answer", "warn");
+  if (!wordColoursOn()) setHint(hint, "", "");
+  else if (!ok) setHint(hint, res && typeof res.error === "string" && res.error ? res.error : "Anki gave no answer", "warn");
   else if (value && !decks.includes(value)) setHint(hint, `No deck named ${value} in Anki`, "error");
   else if (value) setHint(hint, "", "");
+  // The deck of the last mined card may have been renamed or deleted since: the background would
+  // search it all the same and find nothing, so the colours would not come without a word here.
+  else if (seen && !decks.includes(seen)) setHint(hint, `The last mined card's deck ${seen} is no longer in Anki; mine a card, or choose a deck`, "warn");
   else if (seen) setHint(hint, `Looking at ${seen}`, "");
   else setHint(hint, DECK_NONE_HINT, "warn");
+}
+
+// The slow clock behind the deck hint. A failed verdict (Anki closed when the page opened, its
+// permission dialog not clicked yet) would otherwise stay on an options page or a popup left
+// open until a word-colour control is touched, while the tab's colours, asking on a clock of
+// their own, already work: so it is asked again while a feature is on. A good answer is left
+// alone (the viewer's own edits ask for what changes it), and so is an ask still out. The
+// background answers "denied" from memory for a minute before it puts Anki's dialog up again, so
+// this clock cannot make the dialog reappear more often than the tab's own asks already do.
+function retryDecks() {
+  if (decksOk === false && wordColoursOn()) refreshDecks();
 }
 
 function setField(el, value) {
@@ -338,6 +375,7 @@ async function resetStyle() {
   // A pending edit would otherwise land after the reset and put the old value back.
   clearTimeout(saveTimer);
   serverCheckPending = false;
+  decksCheckPending = null;
   await browser.runtime.sendMessage({ type: "saveSettings", settings: patch });
 }
 
@@ -347,16 +385,27 @@ function onChange(ev) {
   if (ev.target.id === "serverUrl") serverCheckPending = "server";
   else if (ev.target.id === "model" && serverCheckPending !== "server") serverCheckPending = "model";
   // A word-colour feature turned on, or another deck: the ask waits for the save, like the checks.
+  // Another AnkiConnect URL is another Anki, whose decks the list and the hint should describe;
+  // the ask goes out for it only while a feature is on, so it needs no branch of its own.
   const id = ev.target.id;
-  if (id === "cardStatusDeck" || ((id === "cardStatus" || id === "pitchAccent") && ev.target.checked)) decksCheckPending = true;
+  if (id === "cardStatusDeck") decksCheckPending = "deck";
+  else if (((id === "cardStatus" || id === "pitchAccent") && ev.target.checked) || id === "ankiUrl") {
+    if (decksCheckPending !== "deck") decksCheckPending = "feature";
+  }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     const check = serverCheckPending;
-    const decks = decksCheckPending;
+    const pending = decksCheckPending;
     serverCheckPending = null;
-    decksCheckPending = false;
-    await browser.runtime.sendMessage({ type: "saveSettings", settings: readForm() });
+    decksCheckPending = null;
+    const form = readForm();
+    // A feature turned on and off again inside the debounce is off: no ask for it.
+    const decks = pending === "deck" || (pending === "feature" && (form.cardStatus || form.pitchAccent));
+    await browser.runtime.sendMessage({ type: "saveSettings", settings: form });
     if (check) checkServer(check === "server");
+    // Both features off: the hint has nothing to be about, whatever the last ask painted (an ask
+    // still out for this save, for another deck, lands under two off features and paints none).
+    if (!form.cardStatus && !form.pitchAccent) setHint(document.getElementById("deck-hint"), "", "");
     if (decks) refreshDecks();
   }, 150);
 }
@@ -803,6 +852,7 @@ async function init() {
   // A resumed start or update has already painted its badge; "Checking server" is for a popup that knows nothing.
   checkServer(startFlow.state === "idle" && updateFlow.state === "idle");
   setInterval(() => checkServer(false), HEALTH_REFRESH_MS);
+  setInterval(retryDecks, DECKS_RETRY_MS);
 }
 
 document.addEventListener("DOMContentLoaded", init);
