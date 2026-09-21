@@ -9,6 +9,7 @@ run.cmd / run.sh in test_update_endpoint.py.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -506,3 +507,50 @@ def test_setup_scripts_offer_the_same_two_models():
         assert "small     about 500 MB, fine on a CPU, less accurate" in text
         assert "Which Whisper model should the server use? (the popup can switch later)" in text
     assert server.MODEL_SIZES["large-v3"] == "about 3 GB" and server.MODEL_SIZES["small"] == "about 500 MB"
+
+
+# --- server/tools/retranscribe.py: its --model default is the server's ---------------------------
+
+def load_retranscribe():
+    """The tool as a module. Its load_server() finds shisuko_server in sys.modules, so it drives
+    this test's server module and sees the patched CONFIG_PATH; the HF_HUB_OFFLINE=1 its import
+    sets for the process is put back, so the other tests keep the environment they had."""
+    name = "shisuko_retranscribe"
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
+    offline = os.environ.get("HF_HUB_OFFLINE")
+    spec = importlib.util.spec_from_file_location(name, SERVER_DIR / "tools" / "retranscribe.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if offline is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = offline
+    return module
+
+
+def test_retranscribe_runs_the_model_chosen_at_setup(tmp_path):
+    """Without --model the tool measures the model the server runs: config.json's, not a hard-coded large-v3."""
+    tool = load_retranscribe()
+    assert tool.server is server, "the tool must drive the same server module"
+    server.write_config({"model": "small"})
+    assert tool.parse_args(["abc123def45", "--out", str(tmp_path / "out")]).model == "small"
+
+
+def test_retranscribe_without_a_config_takes_large_v3_and_the_flag_wins(tmp_path):
+    tool = load_retranscribe()
+    assert tool.parse_args(["abc123def45", "--out", str(tmp_path / "out")]).model == server.DEFAULT_MODEL == "large-v3"
+    server.write_config({"model": "small"})
+    assert tool.parse_args(["abc123def45", "--out", str(tmp_path / "out"), "--model", "x"]).model == "x"
+
+
+def test_retranscribe_help_names_the_setup_default(monkeypatch, capsys):
+    monkeypatch.setenv("COLUMNS", "200")
+    tool = load_retranscribe()
+    with pytest.raises(SystemExit):
+        tool.parse_args(["--help"])
+    assert "the model chosen at setup (config.json), else large-v3" in capsys.readouterr().out

@@ -41,7 +41,7 @@ const SHISUKO_WORDS = (() => {
   // What stripMarkup() and parsePitch() read of a raw field at most. A field is third-party
   // content (a shared deck), so the tag patterns below stop at the next "<" rather than scanning
   // to the end of the field from every "<" that is never closed, and since an unclosed <rt> still
-  // restarts the scan for its </rt>, the length itself is bounded too: a word with ruby markup on
+  // restarts the scan for its end tag, the length itself is bounded too: a word with ruby markup on
   // every kanji, or a {pitch-accents} field drawing four patterns of a ten-mora word (under 8,000
   // characters), is well within it.
   const MAX_FIELD_HTML_LEN = 16000;
@@ -51,11 +51,18 @@ const SHISUKO_WORDS = (() => {
   const TAGS = /<[^<>]*>/g;
   const ENTITIES = /&(nbsp|amp|lt|gt|quot|#39);/gi;
   const ENTITY_TEXT = { nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
-  // Ruby readings, and the parentheses shown around them where ruby is not supported.
-  const RT_RP = /<(rt|rp)\b[^<>]*>[\s\S]*?<\/\1\s*>/gi;
+  // Ruby readings, and the parentheses shown around them where ruby is not supported. HTML lets
+  // the end tag of <rt> and <rp> be left out before the next <rt>, <rp> or </ruby>
+  // (<ruby>食<rt>た</ruby>べる), so the reading runs to the next end tag of any of the three, the
+  // rule match.js's RUBY reads by too, so a card's word and its sentence read alike. The end tag
+  // goes with the match rather than being left to TAGS (a lookahead): that keeps a field of
+  // unclosed <rt> at milliseconds, and TAGS would drop it anyway.
+  const RT_RP = /<(?:rt|rp)\b[^<>]*>[\s\S]*?<\/(?:rt|rp|ruby)\b[^<>]*>/gi;
   const HAS_RT = /<rt\b/i;
   const RUBY = /<ruby\b[^<>]*>([\s\S]*?)<\/ruby\s*>/gi;
-  const RT = /<rt\b[^<>]*>([\s\S]*?)<\/rt\s*>/gi;
+  // Run on the content of one <ruby>: a reading whose </rt> is left out ends at the next rt or
+  // rp tag or at the end of that content.
+  const RT = /<rt\b[^<>]*>([\s\S]*?)(?=<\/?(?:rt|rp|ruby)\b|$)/gi;
   const LINE_BREAKS = /<br\s*\/?>|<\/(?:p|div|li|tr)\s*>/gi;
   // Yomitan's furigana format: a space marks where a kanji run starts and its reading follows in
   // brackets (" 食[た]べる", "お 茶[ちゃ]"). $1 is the kanji, $2 the reading.

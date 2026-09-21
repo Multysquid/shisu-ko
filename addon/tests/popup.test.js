@@ -7,70 +7,139 @@ const vm = require("node:vm");
 const { test } = require("node:test");
 
 const ADDON = path.join(__dirname, "..");
+const HTML = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
+const CSS = fs.readFileSync(path.join(ADDON, "popup.css"), "utf8").replace(/\/\*[^]*?\*\//g, "");
 
-// The start flow of popup.js, driven without Firefox. popup.js paints a handful of elements by id;
-// the fake document hands out one plain object per id with the members the status line and the
-// hints touch, and a test reads the badge, the detail and the button back from it. A select's
-// options are its children: renderDeckOptions builds them with createElement and replaceChildren.
-// Like an input's, `value` reads back as a string whatever was written (a reset writes numbers
-// and booleans), and `checked` is false until set.
-function fakeElement(id) {
-  let value = "";
+// The declarations of the popup.css rule with exactly this selector list, as "property: value".
+function cssDeclarations(selector) {
+  for (const block of CSS.split("}")) {
+    const brace = block.lastIndexOf("{");
+    if (brace < 0 || block.slice(0, brace).trim() !== selector) continue;
+    return block
+      .slice(brace + 1)
+      .split(";")
+      .map((d) => d.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+  }
+  return assert.fail(`popup.css has no rule for ${selector}`);
+}
+
+// popup.js, driven without Firefox. It paints and reads elements by id; the fake document holds
+// one plain object per element popup.html declares, with the tag, the type and the range bounds
+// off the markup, the members the form, the status line and the hints touch, and the listeners
+// init() registers, which a test fires with dispatch(). An id popup.js asks for that the markup
+// lacks gets a bare element, so no test trips over a missing member. A select's options are its
+// children: renderDeckOptions builds them with createElement and replaceChildren.
+function fakeElement(tag = "div", attrs = {}) {
+  const listeners = new Map();
+  const styles = new Map();
+  let text = "";
   const el = {
-    id,
-    textContent: "",
+    tagName: tag.toUpperCase(),
+    id: attrs.id || "",
+    type: tag === "select" ? "select-one" : attrs.type || (tag === "input" ? "text" : ""),
+    min: attrs.min || "",
+    max: attrs.max || "",
     className: "",
     disabled: false,
     hidden: false,
+    value: "",
     checked: false,
-    get value() {
-      return value;
-    },
-    set value(v) {
-      value = String(v);
-    },
-    placeholder: "",
-    style: { setProperty: () => {} },
-    children: [],
-    get options() {
-      return this.children;
-    },
-    get firstChild() {
-      return this.children[0] || null;
-    },
+    options: [],
+    writes: 0, // textContent assignments, the mutations a repaint follows
+    attrWrites: 0, // placeholder assignments: an attribute change, a mutation like textContent's
+    toggles: 0, // classList.toggle calls, one per paint of the element's block
+    style: { setProperty: (name, value) => styles.set(name, value), getPropertyValue: (name) => styles.get(name) || "" },
+    listeners,
   };
+  Object.defineProperty(el, "textContent", {
+    get: () => text,
+    set: (value) => {
+      el.writes++;
+      text = value;
+    },
+  });
+  let placeholder = "";
+  Object.defineProperty(el, "placeholder", {
+    get: () => placeholder,
+    set: (value) => {
+      el.attrWrites++;
+      placeholder = value;
+    },
+  });
   el.classList = {
     toggle: (name, force) => {
+      el.toggles++;
       if (name === "hidden") el.hidden = !!force;
     },
     add: () => {},
     remove: () => {},
   };
-  el.addEventListener = () => {};
-  el.appendChild = (node) => el.children.push(node);
-  el.replaceChildren = (...nodes) => {
-    el.children = nodes;
+  el.addEventListener = (name, fn) => listeners.set(name, [...(listeners.get(name) || []), fn]);
+  el.dispatch = (name) => {
+    for (const fn of listeners.get(name) || []) fn({ type: name, target: el });
+  };
+  el.appendChild = (child) => el.options.push(child);
+  el.replaceChildren = (...children) => {
+    el.options = children;
   };
   return el;
 }
 
+function elementsFromHtml() {
+  const elements = new Map();
+  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|button|output|p|span|div|datalist)\b([^>]*)>/g)) {
+    const attrs = Object.fromEntries([...attrText.matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+    if (attrs.id) elements.set(attrs.id, fakeElement(tag, attrs));
+  }
+  return elements;
+}
+
 // `answer` plays the background: it gets every runtime.sendMessage and returns the reply. The
 // popup runs as Firefox's unless `runtimeURL` says otherwise: the button is for Firefox alone.
+// `opts.installedFonts` names the families the fake canvas measures differently from a generic.
 // The clocks init() sets up never run here; `intervals` holds them ({fn, ms}) for a test to tick.
-function loadPopup(answer, runtimeURL = "moz-extension://test/") {
-  const elements = new Map();
-  const intervals = [];
+function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
+  const elements = elementsFromHtml();
+  const installed = new Set(opts.installedFonts || []);
+  const canvas = { canvases: 0, contexts: 0 };
+  const listened = () => {
+    const listeners = new Map();
+    return {
+      addEventListener: (name, fn) => listeners.set(name, [...(listeners.get(name) || []), fn]),
+      dispatch: (name) => {
+        for (const fn of listeners.get(name) || []) fn({ type: name });
+      },
+    };
+  };
   const document = {
-    addEventListener: () => {},
+    ...listened(),
+    hidden: false,
+    activeElement: null,
     getElementById: (id) => {
       if (!elements.has(id)) elements.set(id, fakeElement(id));
       return elements.get(id);
     },
-    createElement: () => fakeElement(),
+    createElement: (tag) => {
+      if (tag !== "canvas") return fakeElement(tag);
+      canvas.canvases++;
+      return {
+        getContext: () => {
+          canvas.contexts++;
+          const ctx = { font: "", measureText: () => ({ width: [...installed].some((f) => ctx.font.includes(`"${f}"`)) ? 200 : 100 }) };
+          return ctx;
+        },
+      };
+    },
     body: { classList: { toggle: () => {} } },
   };
+  const window = listened();
+  const intervals = [];
+  const storageListeners = [];
+  const opened = [];
   const sandbox = {
     document,
+    window,
     console,
     setTimeout,
     clearTimeout,
@@ -79,19 +148,30 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/") {
       runtime: { sendMessage: async (msg) => answer(msg), getURL: () => runtimeURL },
       permissions: { contains: async () => true, request: async () => true },
       tabs: { query: async () => [], create: async (opts) => opened.push(opts.url) },
+      storage: { onChanged: { addListener: (fn) => storageListeners.push(fn) } },
     },
   };
-  const opened = [];
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(path.join(ADDON, "settings.js"), "utf8")).runInContext(sandbox);
   new vm.Script(fs.readFileSync(path.join(ADDON, "popup.js"), "utf8"), { filename: "popup.js" }).runInContext(sandbox);
   const api = new vm.Script(
     "({ startFlow, resumeStart, checkServer, startServerFromPopup, startNotUpHint, START_NOT_UP_HINT, START_ELSEWHERE_HINT, OFFLINE_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, checkForUpdatesFromPopup, openReleasePage, relativeTime, renderStatus," +
-      " UPDATE_LOST_HINT, stillOldHint, renderDeckOptions, refreshDecks, DECK_NONE_HINT, init, onChange, resetStyle, HEALTH_REFRESH_MS, DECKS_RETRY_MS })"
+      " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS })"
   ).runInContext(sandbox);
-  return { ...api, el: (id) => document.getElementById(id), opened, intervals };
+  // What the background's storage.local write of the settings looks like from the popup.
+  const fireStorage = (settings) => {
+    for (const fn of storageListeners) fn({ settings: { newValue: settings } }, "local");
+  };
+  return { ...api, el: (id) => document.getElementById(id), opened, document, window, intervals, storageListeners, canvas, fireStorage };
 }
+
+const DEFAULTS = (() => {
+  const sandbox = {};
+  vm.createContext(sandbox);
+  new vm.Script(fs.readFileSync(path.join(ADDON, "settings.js"), "utf8")).runInContext(sandbox);
+  return JSON.parse(JSON.stringify(new vm.Script("SHISUKO_DEFAULT_SETTINGS").runInContext(sandbox)));
+})();
 
 const offline = { ok: false, offline: true, error: "Server unreachable" };
 const online = { ok: true, data: { model: "large-v3", device: "cuda", compute_type: "float16" } };
@@ -232,16 +312,30 @@ test("a refusal from the background puts its reason and hint on the detail line"
 const LATEST = { version: "0.9.0", tag: "v0.9.0", url: "https://github.com/Multysquid/shisu-ko/releases/tag/v0.9.0", xpi: null };
 const healthOf = (version, launcher) => ({ ok: true, data: { version, launcher, model: "large-v3", device: "cuda", compute_type: "float16" } });
 
-// A background for the update flow: /health from `state.health`, updateStatus judged from the
-// /health answer the popup sends with the question (the way background.js does, in short), and
-// the other three messages answered from `state` and recorded.
+// A background for the update flow and the form: /health from `state.health` (a function is
+// called, so an answer can be held back), updateStatus judged from the /health answer the popup
+// sends with the question (the way background.js does, in short), the settings from
+// `state.settings` over the defaults with saveSettings merging its patch in, as background.js
+// does, and writing it back to the popup's storage listener the way the browser would, and the
+// other messages answered from `state` and recorded.
 function updateBackground(state) {
   const sent = [];
   const answer = (msg) => {
     sent.push(msg);
     switch (msg.type) {
       case "api":
-        return state.health;
+        return typeof state.health === "function" ? state.health() : state.health;
+      case "getSettings":
+        return Object.assign({}, DEFAULTS, state.settings || {});
+      case "saveSettings": {
+        if (state.failSave) throw new Error("storage write failed");
+        state.settings = Object.assign({}, DEFAULTS, state.settings || {}, msg.settings || {});
+        const settings = state.settings;
+        // `onSave` plays the store's echo of the write. A promise it returns holds the reply: the
+        // store notifies the popup before the background's set() resolves and the reply goes out.
+        const echoed = state.onSave ? state.onSave(settings) : undefined;
+        return echoed && typeof echoed.then === "function" ? echoed.then(() => settings) : settings;
+      }
       case "startServerStatus":
         return { starting: false };
       case "updateStatus": {
@@ -275,6 +369,8 @@ function updateBackground(state) {
       case "snoozeUpdate":
         state.snoozed = msg.version;
         return { ok: true };
+      case "ankiDecks":
+        return typeof state.anki === "function" ? state.anki() : state.anki || decksOffline(null);
       default:
         return offline;
     }
@@ -360,21 +456,31 @@ test("no banner while the server is offline, and none for a server that says no 
   assert.equal(none.popup.el("update-result").textContent, "No release found, checked 3 min ago");
 });
 
-test("an answer overtaken by a later question is dropped: a slow check of GitHub cannot take the banner down", async () => {
+test("an answer overtaken by a later question is dropped, and the day's check it carried is asked for again", async () => {
   // The popup opens while the server is offline and the day's check is due, with GitHub slow;
   // the server comes online before GitHub answers, and the second question, answered from the
   // store at once, puts the banner up. The first answer, "offline", then lands and must not undo
-  // it: no further question would be asked while this popup lives.
-  const state = { health: offline };
+  // it. But it is the only one that waited for the check, and the check found a newer release
+  // than the store held: without a third question, answered from the store now that the check
+  // is in it, the popup would show the old release and its stale date for as long as it lives,
+  // since no further question is asked while the server's answer stays the same.
+  const NEWER = { version: "0.9.1", tag: "v0.9.1", url: "https://github.com/Multysquid/shisu-ko/releases/tag/v0.9.1", xpi: null };
+  const state = { health: offline, latest: LATEST, checkedAt: Date.now() - 2 * 86400000 };
   const bg = updateBackground(state);
   let releaseFirst;
   const held = new Promise((resolve) => {
     releaseFirst = resolve;
   });
+  const questions = []; // the updateStatus questions in the order they were asked
   const popup = loadPopup(async (msg) => {
-    const answer = bg.answer(msg);
-    if (msg.type === "updateStatus" && msg.check) await held;
-    return answer;
+    if (msg.type === "updateStatus") questions.push(msg);
+    if (msg.type === "updateStatus" && msg.check) {
+      await held;
+      // runCheck() in background.js writes the store before the answer goes out.
+      state.latest = NEWER;
+      state.checkedAt = Date.now();
+    }
+    return bg.answer(msg);
   });
   await popup.resumeStart();
   await popup.checkServer(true);
@@ -385,16 +491,21 @@ test("an answer overtaken by a later question is dropped: a slow check of GitHub
   await settle();
   assert.equal(popup.el("update-banner").hidden, false);
   assert.equal(popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0.");
+  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, checked 2 days ago");
   releaseFirst();
+  await settle();
   await settle();
   await settle();
   assert.equal(popup.el("update-banner").hidden, false, "the late answer is dropped");
   assert.equal(popup.el("update-now").hidden, false);
-  assert.equal(bg.sent.filter((m) => m.type === "updateStatus").length, 2);
+  assert.deepEqual(questions.map((m) => m.check), [true, false, false], "the check's answer is asked for again, from the store");
+  assert.deepEqual(JSON.parse(JSON.stringify(questions[2].health)), healthOf("0.8.0", true).data);
+  assert.equal(popup.el("update-text").textContent, "Shisu-ko 0.9.1 is available — the server runs 0.8.0.");
+  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.1, checked just now");
   // The same server again asks nothing more, and the banner is still up.
   await popup.checkServer(false);
   await settle();
-  assert.equal(bg.sent.filter((m) => m.type === "updateStatus").length, 2);
+  assert.equal(questions.length, 3);
   assert.equal(popup.el("update-banner").hidden, false);
 });
 
@@ -594,6 +705,437 @@ test("Check for updates asks for a check now and shows the result, or the failur
   assert.equal(popup.el("update-result").className, "hint warn");
 });
 
+// ------------------------------------------------------------------ the form
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The popup as init() leaves it: the form filled from `state.settings`, every listener in place,
+// the first /health answered. `saves()` lists the patches the background got, in order.
+async function openForm(state, opts) {
+  const bg = updateBackground(state);
+  const popup = loadPopup(bg.answer, undefined, opts);
+  state.onSave = popup.fireStorage;
+  await popup.init();
+  await settle();
+  // The patches come out of the sandbox; a JSON round trip makes them deepEqual's own objects.
+  const saves = () => JSON.parse(JSON.stringify(bg.sent.filter((m) => m.type === "saveSettings").map((m) => m.settings)));
+  // A write by another writer (the content script, the other copy of this form): the store
+  // changes and the popup's storage listener hears of it.
+  const elsewhere = (patch) => {
+    state.settings = Object.assign({}, state.settings, patch);
+    popup.fireStorage(Object.assign({}, DEFAULTS, state.settings));
+  };
+  return { popup, bg, state, saves, elsewhere };
+}
+
+test("an edit saves the field it changed and nothing else, and a change made elsewhere lands in the form", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves, elsewhere } = await openForm(state);
+  assert.equal(popup.storageListeners.length, 1);
+  assert.equal(popup.el("enabled").checked, true);
+  assert.equal(popup.el("enabled-label").textContent, "On");
+  assert.equal(popup.el("fontScaleOut").textContent, "100%");
+  // Alt+Shift+S and Alt+Shift+L on the video, and a model chosen in the other copy of this form.
+  elsewhere({ enabled: false, showTranscript: true, model: "large-v3-turbo" });
+  assert.equal(popup.el("enabled").checked, false);
+  assert.equal(popup.el("enabled-label").textContent, "Off");
+  assert.equal(popup.el("showTranscript").checked, true);
+  assert.equal(popup.el("model").value, "large-v3-turbo");
+  // Ticking a box saves that box, and puts nothing back.
+  popup.el("subOutline").checked = true;
+  popup.el("subOutline").dispatch("input");
+  popup.el("fontScale").value = 1.2;
+  popup.el("fontScale").dispatch("input");
+  assert.equal(popup.el("fontScaleOut").textContent, "120%");
+  assert.deepEqual(saves(), [], "the save is debounced");
+  await wait(200);
+  assert.deepEqual(saves(), [{ subOutline: true, fontScale: 1.2 }]);
+  assert.equal(state.settings.enabled, false);
+  assert.equal(state.settings.showTranscript, true);
+  assert.equal(state.settings.model, "large-v3-turbo");
+  assert.equal(state.settings.subOutline, true);
+  // The save's own echo changed nothing, and a second edit starts a new patch.
+  assert.equal(popup.el("fontScale").value, 1.2);
+  popup.el("subOutline").checked = false;
+  popup.el("subOutline").dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves()[1], { subOutline: false });
+});
+
+test("a change from elsewhere leaves a field with an edit of its own alone", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const family = popup.el("subFontFamily");
+  const slider = popup.el("fontScale");
+  const box = popup.el("subOutline");
+  popup.document.activeElement = family;
+  family.value = "Yu Go"; // being typed
+  family.dispatch("input");
+  slider.value = 1.4; // waiting for its save
+  slider.dispatch("input");
+  popup.document.activeElement = box; // a checkbox keeps the focus, and is not being typed in
+  elsewhere({ subFontFamily: "Meiryo", fontScale: 0.8, lingerSeconds: 1, subOutline: true });
+  assert.equal(family.value, "Yu Go");
+  assert.equal(slider.value, 1.4);
+  assert.equal(popup.el("lingerSeconds").value, 1);
+  assert.equal(popup.el("lingerSecondsOut").textContent, "1.0 s");
+  assert.equal(box.checked, true);
+  await wait(200);
+  assert.deepEqual(saves(), [{ subFontFamily: "Yu Go", fontScale: 1.4 }]);
+  assert.equal(state.settings.lingerSeconds, 1);
+  assert.equal(state.settings.fontScale, 1.4);
+  // The model field is being typed in when a change lands: the typing stays, the rest lands.
+  const model = popup.el("model");
+  popup.document.activeElement = model;
+  model.value = "large-v3-tur";
+  elsewhere({ model: "small", clipFormat: "wav" });
+  assert.equal(model.value, "large-v3-tur");
+  assert.equal(popup.el("clipFormat").value, "wav");
+});
+
+// The flush clears `dirty` as it sends, and the store's echo of that write is one storage round
+// trip away. An echo of an earlier write landing in between (another writer's save, queued in the
+// background just before the popup's; this form's own previous save, still being written when the
+// next edit was flushed) carries the value from before the edit: the field waits for its own echo
+// instead of being put back for a round trip. A write that failed has no echo coming; its reply
+// ends the wait.
+test("a field keeps the value it sent until the store echoes it, and an earlier write's echo does not put it back", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves } = await openForm(state);
+  // Every write from here on is held: its echo and, behind it, its reply.
+  const held = [];
+  state.onSave = (settings) => new Promise((release) => held.push({ settings: Object.assign({}, settings), release }));
+  const echo = (i) => {
+    popup.fireStorage(held[i].settings);
+    held[i].release();
+  };
+  const slider = popup.el("fontScale");
+  const out = popup.el("fontScaleOut");
+  // Alt+Shift+S on the video, its save written just before the popup's: its echo still carries
+  // the slider from before the drag.
+  state.settings = Object.assign({}, DEFAULTS, state.settings, { enabled: false });
+  held.push({ settings: Object.assign({}, state.settings), release: () => {} });
+  slider.value = 1.4;
+  slider.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ fontScale: 1.4 }]);
+  assert.equal(held.length, 2, "the flush wrote, and its echo is on its way");
+  assert.equal(state.settings.fontScale, 1.4);
+  echo(0);
+  assert.equal(slider.value, 1.4, "the earlier write's echo does not put the slider back");
+  assert.equal(out.textContent, "140%");
+  assert.equal(popup.el("enabled").checked, false, "what that write changed lands");
+  echo(1);
+  assert.equal(slider.value, 1.4);
+  assert.equal(out.textContent, "140%");
+  await settle();
+  // Its own echo ended the wait: the next change from elsewhere lands.
+  state.settings = Object.assign({}, state.settings, { fontScale: 0.8 });
+  popup.fireStorage(Object.assign({}, state.settings));
+  assert.equal(slider.value, 0.8);
+  assert.equal(out.textContent, "80%");
+  // This form's own previous save, still being written when the next edit is flushed.
+  slider.value = 1.2;
+  slider.dispatch("input");
+  await wait(200);
+  slider.value = 1.4;
+  slider.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves().slice(1), [{ fontScale: 1.2 }, { fontScale: 1.4 }]);
+  assert.equal(held.length, 4);
+  echo(2);
+  await settle();
+  assert.equal(slider.value, 1.4, "the echo of the previous save does not put the slider back");
+  assert.equal(out.textContent, "140%");
+  echo(3);
+  assert.equal(slider.value, 1.4);
+  await settle();
+  state.settings = Object.assign({}, state.settings, { fontScale: 1 });
+  popup.fireStorage(Object.assign({}, state.settings));
+  assert.equal(slider.value, 1, "the wait ended with the echo of the last save");
+  // A write that fails has no echo: the reply ends the wait, and the next change lands.
+  const box = popup.el("subOutline");
+  state.failSave = true;
+  box.checked = true;
+  box.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves().slice(3), [{ subOutline: true }]);
+  assert.equal(held.length, 4, "nothing was written");
+  await settle();
+  state.failSave = false;
+  state.settings = Object.assign({}, state.settings, { subOutline: false });
+  popup.fireStorage(Object.assign({}, state.settings));
+  assert.equal(box.checked, false, "the failed write's reply ended the wait");
+});
+
+// The popup closes with a click outside it; the text field's change event fires on that blur and
+// the document is gone within the millisecond, before the debounce could run.
+test("a text edit still on its way when the popup closes is saved from pagehide, before anything is awaited", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves } = await openForm(state);
+  const field = popup.el("ankiSentenceField");
+  assert.deepEqual([...field.listeners.keys()], ["change"], "a text field saves once the edit is done");
+  field.value = "Sentence";
+  field.dispatch("change");
+  assert.deepEqual(saves(), [], "the debounce is running");
+  popup.window.dispatch("pagehide");
+  assert.deepEqual(saves(), [{ ankiSentenceField: "Sentence" }], "sent synchronously");
+  await wait(200);
+  assert.deepEqual(saves(), [{ ankiSentenceField: "Sentence" }], "and not again by the timer");
+  assert.equal(state.settings.ankiSentenceField, "Sentence");
+  // A page put out of view (the options page's tab) saves the same way.
+  popup.el("serverUrl").value = "http://127.0.0.1:8791";
+  popup.el("serverUrl").dispatch("change");
+  popup.document.hidden = true;
+  popup.document.dispatch("visibilitychange");
+  assert.deepEqual(saves()[1], { serverUrl: "http://127.0.0.1:8791" });
+  await wait(200);
+  assert.equal(saves().length, 2);
+});
+
+// The mousedown on the button blurs the text field, whose change event starts the 150 ms save;
+// the click lands well inside them.
+test("Reset style takes an edit still on its way with it, and runs the check it asked for", async () => {
+  const state = { health: offline, settings: { subPosition: 30, subFont: "mincho" } };
+  const { popup, bg, saves } = await openForm(state);
+  assert.equal(popup.el("subPosition").value, 30);
+  const health = () => bg.sent.filter((m) => m.type === "api" && m.path === "/health").length;
+  const before = health();
+  const pending = [];
+  state.health = () => new Promise((resolve) => pending.push(resolve));
+  const field = popup.el("serverUrl");
+  field.value = "http://127.0.0.1:8791";
+  field.dispatch("change");
+  await popup.resetStyle();
+  assert.equal(popup.el("subPosition").value, 11);
+  assert.equal(popup.el("subPositionOut").textContent, "11%");
+  assert.deepEqual(saves(), [
+    { subPosition: 11, subFont: "default", subFontFamily: "", subTextColor: "#ffffff", subBackgroundOpacity: 72, subOutline: false, transcriptSide: "right", serverUrl: "http://127.0.0.1:8791" },
+  ]);
+  assert.equal(state.settings.serverUrl, "http://127.0.0.1:8791");
+  assert.equal(state.settings.subFont, "default");
+  assert.equal(health(), before + 1, "the new address is checked, and the check starts over");
+  assert.equal(popup.el("server-status").textContent, "Checking server");
+  pending[0](offline);
+  await settle();
+  assert.equal(popup.el("server-status").textContent, "Server offline");
+  await wait(200);
+  assert.equal(saves().length, 1, "the debounced save was folded in, not run as well");
+});
+
+// A mistyped address holds a /health request open for the request timeout; the corrected one
+// must not wait behind it, and the old address's answer is not this server's.
+test("a first check overtakes a refresh the old address holds up, and drops its answer", async () => {
+  const pending = [];
+  const state = { health: () => new Promise((resolve) => pending.push(resolve)) };
+  const bg = updateBackground(state);
+  const popup = loadPopup(bg.answer);
+  const refresh = popup.checkServer(false); // the interval's tick, to the old address
+  assert.equal(pending.length, 1);
+  const first = popup.checkServer(true); // the corrected address, after its save
+  assert.equal(pending.length, 2, "asked at once");
+  assert.equal(popup.el("server-status").textContent, "Checking server");
+  pending[0]({ ok: true, data: { model: "tiny", device: "cpu", compute_type: "int8" } }); // the old address, at last
+  await refresh;
+  await settle();
+  assert.equal(popup.el("server-status").textContent, "Checking server", "the old address's answer is dropped");
+  pending[1](offline);
+  await first;
+  await settle();
+  assert.equal(popup.el("server-status").textContent, "Server offline");
+  // A refresh still waits for the request under way, and the next one goes out after it.
+  const again = popup.checkServer(false);
+  const more = popup.checkServer(false);
+  assert.equal(pending.length, 3);
+  pending[2](healthOf("0.9.0", true));
+  await again;
+  await more;
+  await settle();
+  assert.equal(popup.el("server-status").textContent, "Server online");
+  const later = popup.checkServer(false);
+  assert.equal(pending.length, 4);
+  pending[3](offline);
+  await later;
+  assert.equal(popup.el("server-status").textContent, "Server offline");
+});
+
+// updateOutputs() runs for every event of every control; the font probe (a canvas, a context and
+// six measurements) and the outputs' text must not run with it.
+test("the font probe runs once per name, and a slider drag redraws neither the sample nor an unchanged output", async () => {
+  const state = { health: offline, settings: { subFontFamily: "Meiryo" } };
+  const { popup, saves } = await openForm(state, { installedFonts: ["Meiryo"] });
+  const sample = popup.el("font-sample");
+  const hint = popup.el("font-hint");
+  assert.equal(popup.canvas.canvases, 1);
+  assert.equal(hint.textContent, "Meiryo is installed on this computer");
+  assert.match(sample.style.fontFamily, /^"Meiryo", "Noto Sans JP"/);
+  assert.equal(sample.style.fontWeight, "400");
+  const slider = popup.el("fontScale");
+  const linger = popup.el("lingerSecondsOut");
+  assert.equal(linger.textContent, "0.3 s");
+  const writes = linger.writes;
+  for (let i = 1; i <= 100; i++) {
+    slider.value = 1 + i * 0.01;
+    slider.dispatch("input");
+  }
+  assert.equal(popup.el("fontScaleOut").textContent, "200%");
+  assert.equal(slider.style.getPropertyValue("--fill"), `${((2 - 0.6) / (2.2 - 0.6)) * 100}%`);
+  assert.equal(popup.canvas.canvases, 1, "no probe for a slider position");
+  assert.equal(popup.canvas.contexts, 1);
+  assert.equal(linger.writes, writes, "an unchanged output is left alone");
+  assert.equal(hint.textContent, "Meiryo is installed on this computer");
+  // A name is probed once, however often it is typed; the sample and the hint follow every change.
+  const family = popup.el("subFontFamily");
+  family.value = "Klee";
+  family.dispatch("input");
+  assert.equal(popup.canvas.canvases, 2);
+  assert.equal(hint.textContent, "Klee was not found on this computer; the preset is used");
+  assert.equal(hint.className, "hint warn");
+  assert.match(sample.style.fontFamily, /^"Klee", "Noto Sans JP"/);
+  family.value = "Meiryo";
+  family.dispatch("input");
+  family.value = "Klee";
+  family.dispatch("input");
+  assert.equal(popup.canvas.canvases, 2);
+  assert.equal(hint.textContent, "Klee was not found on this computer; the preset is used");
+  const preset = popup.el("subFont");
+  preset.value = "mincho";
+  preset.dispatch("change");
+  assert.match(sample.style.fontFamily, /^"Klee", "Noto Serif JP".*serif$/);
+  family.value = "";
+  family.dispatch("input");
+  assert.equal(hint.textContent, "Leave empty to use the preset.");
+  assert.doesNotMatch(sample.style.fontFamily, /Klee/);
+  assert.equal(popup.canvas.canvases, 2);
+  await wait(200);
+  assert.deepEqual(saves(), [{ fontScale: 2, subFontFamily: "", subFont: "mincho" }]);
+});
+
+// popup.html is the options page too, alive in a tab for as long as the tab is: the poll is for
+// a status line somebody looks at.
+test("the poll skips a page out of view and catches up when it is back", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, bg } = await openForm(state);
+  assert.equal(popup.intervals.length, 2, "the health refresh and the deck retry");
+  assert.equal(popup.intervals[0].ms, 2000);
+  const polls = () => bg.sent.filter((m) => m.type === "api" && m.path === "/health").length;
+  const before = polls();
+  popup.intervals[0].fn();
+  await settle();
+  assert.equal(polls(), before + 1);
+  popup.document.hidden = true;
+  popup.document.dispatch("visibilitychange");
+  for (let i = 0; i < 10; i++) popup.intervals[0].fn();
+  await settle();
+  assert.equal(polls(), before + 1, "nothing while out of view");
+  popup.document.hidden = false;
+  popup.document.dispatch("visibilitychange");
+  await settle();
+  assert.equal(polls(), before + 2, "one check on return");
+  popup.intervals[0].fn();
+  await settle();
+  assert.equal(polls(), before + 3);
+});
+
+// Every tick of the poll paints the status line again, and nothing on it changes while the
+// server's answer does not: a text set to its own value is left alone (setText), and so must be
+// the model field's placeholder, since an attribute set to its own value is a mutation all the
+// same; and the update banner is only painted again when the background was asked something.
+test("an unchanged /health answer is painted once per tick and rewrites no placeholder", async () => {
+  const data = { version: "0.9.0", launcher: true, default_model: "large-v3", models: ["large-v3", "small"], model: "large-v3", device: "cuda", compute_type: "float16" };
+  const state = { health: { ok: true, data }, settings: {} };
+  const { popup, bg } = await openForm(state);
+  const model = popup.el("model");
+  const button = popup.el("start-server");
+  assert.equal(model.placeholder, "large-v3 (server default)");
+  assert.equal(popup.el("model-suggestions").options.map((o) => o.value).join(), "large-v3,small");
+  const placeholderWrites = model.attrWrites;
+  const paints = button.toggles;
+  const asked = bg.types().filter((t) => t === "updateStatus").length;
+  for (let i = 0; i < 5; i++) {
+    popup.intervals[0].fn();
+    await settle();
+  }
+  assert.equal(model.attrWrites, placeholderWrites, "the placeholder it already has is left alone");
+  assert.equal(button.toggles, paints + 5, "one paint per tick, none for an update answer nobody asked for");
+  assert.equal(bg.types().filter((t) => t === "updateStatus").length, asked);
+  assert.equal(popup.el("model-suggestions").options.length, 2);
+  // A new default is still written, and a changed server still gets the banner painted.
+  state.health = { ok: true, data: Object.assign({}, data, { version: "0.8.0", default_model: "small" }) };
+  popup.intervals[0].fn();
+  await settle();
+  assert.equal(model.placeholder, "small (server default)");
+  assert.equal(model.attrWrites, placeholderWrites + 1);
+  assert.equal(button.toggles, paints + 7, "painted with the answer, and again with the banner");
+  assert.equal(popup.el("update-banner").hidden, false);
+});
+
+// The outcome of a wait belongs to the address it waited at: "no answer after 90 s", or the hint
+// that names the very server URL the viewer has just changed, must not stand in for the offline
+// hint at the new address, nor an update's outcome for the model line of the server there.
+test("a new server address drops the verdicts reached at the old one", async () => {
+  const state = { health: offline, settings: {} };
+  const bg = updateBackground(state);
+  const popup = loadPopup((msg) => (msg.type === "startServerStatus" ? { starting: true, already: true, loading: false, deadline: Date.now() - 1 } : bg.answer(msg)));
+  state.onSave = popup.fireStorage;
+  await popup.init();
+  await settle();
+  assert.equal(popup.startFlow.state, "failed");
+  assert.equal(popup.el("server-detail").textContent, popup.START_ELSEWHERE_HINT);
+  const field = popup.el("serverUrl");
+  const move = async (url) => {
+    field.value = url;
+    field.dispatch("change");
+    await wait(200);
+    await settle();
+  };
+  await move("http://127.0.0.1:8791");
+  assert.equal(popup.startFlow.state, "idle");
+  assert.equal(popup.el("server-status").textContent, "Server offline");
+  assert.equal(popup.el("server-detail").textContent, popup.OFFLINE_HINT);
+  assert.equal(popup.el("start-server").hidden, false);
+  assert.equal(popup.el("start-server").disabled, false);
+  // An update the old address never answered again.
+  state.health = healthOf("0.8.0", true);
+  await popup.checkServer(false);
+  await settle();
+  state.update = { ok: true, restarting: true, from: "0.8.0", to: "0.9.0", requestedAt: Date.now(), deadline: Date.now() - 1 };
+  await popup.updateServerFromPopup();
+  state.health = offline;
+  await popup.checkServer(false);
+  assert.equal(popup.updateFlow.state, "lost");
+  assert.equal(popup.el("server-detail").textContent, popup.UPDATE_LOST_HINT);
+  await move("http://127.0.0.1:8792");
+  assert.equal(popup.updateFlow.state, "idle");
+  assert.equal(popup.el("server-status").textContent, "Server offline");
+  assert.equal(popup.el("server-detail").textContent, popup.OFFLINE_HINT);
+  // And one the old address came back from with the old version: the new address has its own.
+  state.health = healthOf("0.8.0", true);
+  await popup.checkServer(false);
+  await settle();
+  state.update = { ok: true, restarting: true, from: "0.8.0", to: "0.9.0", requestedAt: Date.now() - 11000, deadline: Date.now() + 120000 };
+  await popup.updateServerFromPopup();
+  await popup.checkServer(false);
+  assert.equal(popup.updateFlow.state, "stale");
+  assert.equal(popup.el("server-detail").textContent, popup.stillOldHint("0.8.0"));
+  await move("http://127.0.0.1:8793");
+  assert.equal(popup.updateFlow.state, "idle");
+  assert.equal(popup.el("server-status").textContent, "Server online");
+  assert.equal(popup.el("server-detail").textContent, "large-v3 · cuda · float16");
+  assert.equal(popup.el("update-banner").hidden, false, "the new address's server is offered the update");
+  assert.equal(popup.el("update-now").disabled, false);
+});
+
+// The detail line and the hints carry text the server wrote: a repo id under "Loading model" and
+// in the model hint (up to 193 characters, with no character a browser breaks after), the last line
+// of a load error (a URL, a path). One such word must wrap, not widen the 360 px popup and push the
+// switch off it; the header's 1fr column is as wide as its widest unbreakable word otherwise.
+test("a server-supplied word without spaces wraps in the status detail and the hints", () => {
+  for (const selector of [".detail", ".hint", ".sample"]) {
+    assert.ok(cssDeclarations(selector).includes("overflow-wrap: anywhere"), `${selector} does not wrap anywhere`);
+  }
+});
+
 test("relativeTime rounds to the unit that says something", () => {
   const { relativeTime } = loadPopup(() => offline);
   const now = 1000000000000;
@@ -617,25 +1159,23 @@ const decksOk = (seen) => ({ ok: true, decks: DECKS, seen });
 const decksOffline = (seen) => ({ ok: false, reason: "offline", error: "Anki is not running or AnkiConnect is not installed", seen });
 const optionsOf = (select) => select.options.map((o) => [o.value, o.textContent]);
 
-// A popup with a background that answers getSettings from `settings` and ankiDecks from `anki`
-// (a value or a function; a test that changes the answer as it goes hands in a function reading
-// its own variable, which may hold a function in turn), recording every message type and every
-// settings object saved. The two feature checkboxes carry their type, so the form reads their
-// `checked` the way it does in the real document.
+// A popup with a background that answers getSettings from `settings` over the defaults and
+// ankiDecks from `anki` (a value or a function; a test that changes the answer as it goes hands
+// in a function reading its own variable, which may hold a function in turn), recording every
+// message type and every settings patch saved.
 function deckPopup(settings, anki) {
   const sent = [];
   const saves = [];
   const answer = (value) => (typeof value === "function" ? answer(value()) : value);
   const popup = loadPopup((msg) => {
     sent.push(msg.type);
-    if (msg.type === "getSettings") return settings;
+    if (msg.type === "getSettings") return Object.assign({}, DEFAULTS, settings);
     if (msg.type === "ankiDecks") return answer(anki);
-    if (msg.type === "saveSettings") saves.push(msg.settings);
+    // The patches come out of the sandbox; a JSON round trip makes them deepEqual's own objects.
+    if (msg.type === "saveSettings") saves.push(JSON.parse(JSON.stringify(msg.settings)));
     if (msg.type === "startServerStatus") return { starting: false };
     return offline;
   });
-  popup.el("cardStatus").type = "checkbox";
-  popup.el("pitchAccent").type = "checkbox";
   return { popup, sent, saves };
 }
 // The debounced save is 150 ms behind the edit.
@@ -818,6 +1358,39 @@ test("a failed deck verdict is asked again on the slow clock, so Anki started af
   assert.equal(asks(sent), 4);
 });
 
+// The deck retry follows the health refresh's rule (see "the poll skips a page out of view"): a
+// hint nobody sees is not worth a knock at Anki every thirty seconds, and a page back in view
+// catches up now.
+test("the deck retry skips a page out of view and catches up when it is back", async () => {
+  let anki = decksOffline(null);
+  const { popup, sent } = deckPopup({ cardStatus: true, pitchAccent: false, cardStatusDeck: "" }, () => anki);
+  const hint = popup.el("deck-hint");
+  await popup.init();
+  await settle();
+  assert.equal(asks(sent), 1);
+  const clock = retryClock(popup);
+  popup.document.hidden = true;
+  popup.document.dispatch("visibilitychange");
+  for (let i = 0; i < 10; i++) clock.fn();
+  await settle();
+  assert.equal(asks(sent), 1, "nothing while out of view");
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  // Anki started meanwhile: the return brings the list, without waiting for the clock.
+  anki = decksOk("Vocab");
+  popup.document.hidden = false;
+  popup.document.dispatch("visibilitychange");
+  await settle();
+  assert.equal(asks(sent), 2, "one ask on return");
+  assert.equal(hint.textContent, "Looking at Vocab");
+  // A good verdict is left alone on return too, like on the clock.
+  popup.document.hidden = true;
+  popup.document.dispatch("visibilitychange");
+  popup.document.hidden = false;
+  popup.document.dispatch("visibilitychange");
+  await settle();
+  assert.equal(asks(sent), 2);
+});
+
 test("the deck retry asks nothing with both features off, nothing while an ask is still out, and nothing after a good answer", async () => {
   let anki = decksOffline(null);
   const { popup, sent } = deckPopup({ cardStatus: true, pitchAccent: false, cardStatusDeck: "" }, () => anki);
@@ -908,23 +1481,24 @@ test("a feature turned on and off again inside the debounce is saved off and ask
   popup.onChange({ target: checkbox });
   await saved();
   assert.deepEqual(sent, ["saveSettings"]);
-  assert.equal(saves[0].cardStatus, false);
-  assert.equal(saves[0].pitchAccent, false);
+  assert.deepEqual(saves[0], { cardStatus: false }, "the save carries the edited field alone");
   assert.equal(popup.el("deck-hint").textContent, "");
   // The same double click with the other feature on: the colours are in use, so the ask stands.
+  // That feature is on since an earlier save and not in this patch: the checkboxes are judged
+  // from the form.
   const pitch = popup.el("pitchAccent");
   pitch.checked = true;
   popup.onChange({ target: pitch });
   await saved();
   assert.deepEqual(sent.slice(1), ["saveSettings", "ankiDecks"]);
+  assert.deepEqual(saves[1], { pitchAccent: true });
   checkbox.checked = true;
   popup.onChange({ target: checkbox });
   checkbox.checked = false;
   popup.onChange({ target: checkbox });
   await saved();
   assert.deepEqual(sent.slice(3), ["saveSettings", "ankiDecks"]);
-  assert.equal(saves[2].cardStatus, false);
-  assert.equal(saves[2].pitchAccent, true);
+  assert.deepEqual(saves[2], { cardStatus: false });
   // A deck change inside the same debounce keeps its ask whatever the checkboxes say.
   const select = popup.el("cardStatusDeck");
   select.value = "Vocab";
@@ -1045,23 +1619,117 @@ test("a new AnkiConnect URL asks that Anki for its decks while a feature is on, 
   assert.deepEqual(sent.slice(7), ["saveSettings"]);
 });
 
-// Reset style cancels the pending save; the deck ask it carried must not survive to the next,
-// unrelated edit (the server check is dropped the same way).
-test("Reset style drops a pending deck ask along with the save it belonged to", async () => {
-  const { popup, sent } = deckPopup({}, decksOk(null));
+// Reset style takes an edit still on its way with it (see "Reset style takes an edit still on its
+// way with it"): the deck ask that edit carried follows that one save, the way the server check
+// does, and does not survive to the next, unrelated edit.
+test("Reset style takes a pending deck edit with it, and the ask it carried follows that one save", async () => {
+  const { popup, sent, saves } = deckPopup({}, decksOk(null));
   const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
   select.value = "Vocab";
   popup.onChange({ target: select });
   await popup.resetStyle();
-  assert.deepEqual(sent, ["saveSettings"], "the reset's own save, the deck edit's cancelled");
+  await settle();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks"], "one save, the deck edit folded into the reset's, and the ask it carried");
+  assert.equal(saves[0].cardStatusDeck, "Vocab");
+  assert.equal(saves[0].subPosition, DEFAULTS.subPosition);
+  assert.equal(select.value, "Vocab");
+  assert.equal(hint.textContent, "", "both features off: no hint, though the list was asked for");
+  assert.equal(select.options[0].textContent, "Automatic: no card mined yet");
+  await saved();
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks"], "the debounced save was folded in, not run as well");
   popup.onChange({ target: popup.el("pauseOnHover") });
   await saved();
-  assert.deepEqual(sent, ["saveSettings", "saveSettings"]);
+  assert.deepEqual(sent, ["saveSettings", "ankiDecks", "saveSettings"], "an unrelated edit asks nothing");
+  // A feature ticked and the style reset in the same breath: the tick is saved, and the ask stands.
   const checkbox = popup.el("cardStatus");
   checkbox.checked = true;
   popup.onChange({ target: checkbox });
   await popup.resetStyle();
+  await settle();
+  assert.deepEqual(sent.slice(3), ["saveSettings", "ankiDecks"]);
+  assert.equal(saves[2].cardStatus, true);
+  assert.equal(hint.textContent, "", "Vocab is listed: nothing to say");
   popup.onChange({ target: popup.el("pauseOnHover") });
   await saved();
-  assert.equal(sent.includes("ankiDecks"), false);
+  assert.deepEqual(sent.slice(5), ["saveSettings"]);
+});
+
+// The options page and the toolbar popup are two copies of this form. A deck chosen in one has no
+// option in the other until Anki lists it there, and a select given a value it has no option for
+// shows none: the option is built from Anki's last answer here. The hint then follows the deck,
+// the features and the AnkiConnect URL by the rules of an edit made here (onChange), less the
+// save, which is the other copy's; the popup's own save, echoed, asks nothing more.
+test("the word colours edited in the other copy of the form land in the select and the hint", async () => {
+  const state = { health: offline, settings: {}, anki: decksOk("Mining::JP") };
+  const { popup, bg, elsewhere } = await openForm(state);
+  const select = popup.el("cardStatusDeck");
+  const hint = popup.el("deck-hint");
+  const asked = () => bg.types().filter((t) => t === "ankiDecks").length;
+  assert.equal(asked(), 0, "both features off: nothing asked at init");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: the deck of the last mined card"]]);
+  // A deck chosen elsewhere with both features off: it shows at once, and Anki is asked for its
+  // standing, as for a deck chosen here; the hint says nothing under two off features.
+  elsewhere({ cardStatusDeck: "Vocab" });
+  assert.equal(select.value, "Vocab");
+  assert.deepEqual(optionsOf(select), [["", "Automatic: the deck of the last mined card"], ["Vocab", "Vocab"]]);
+  assert.equal(asked(), 1);
+  await settle();
+  assert.equal(hint.textContent, "");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Mining::JP", "Vocab"]);
+  // A feature turned on elsewhere: the hint is asked for.
+  elsewhere({ cardStatus: true });
+  assert.equal(popup.el("cardStatus").checked, true);
+  assert.equal(asked(), 2);
+  await settle();
+  assert.equal(hint.textContent, "", "a listed manual deck needs no hint");
+  // A deck Anki does not list: its option is built from Anki's last list, and the hint says so.
+  elsewhere({ cardStatusDeck: "Gone" });
+  assert.equal(select.value, "Gone");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Gone", "Mining::JP", "Vocab"]);
+  assert.equal(asked(), 3);
+  await settle();
+  assert.equal(hint.textContent, "No deck named Gone in Anki");
+  assert.equal(hint.className, "hint error");
+  // Back to automatic elsewhere.
+  elsewhere({ cardStatusDeck: "" });
+  assert.equal(select.value, "");
+  assert.equal(asked(), 4);
+  await settle();
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  assert.deepEqual(optionsOf(select).map(([value]) => value), ["", "Default", "Mining::JP", "Vocab"], "the unlisted deck went with its choice");
+  // Another AnkiConnect URL elsewhere while a feature is on: that Anki is asked.
+  state.anki = decksOffline("Mining::JP");
+  elsewhere({ ankiUrl: "http://127.0.0.1:8766" });
+  assert.equal(asked(), 5);
+  await settle();
+  assert.equal(hint.textContent, "Anki is not running or AnkiConnect is not installed");
+  // The feature turned off elsewhere: the hint goes, and nothing is asked.
+  elsewhere({ cardStatus: false });
+  assert.equal(asked(), 5);
+  assert.equal(hint.textContent, "");
+  // A change elsewhere to anything else asks nothing, and neither does the echo of this form's
+  // own edit: its save asked already.
+  elsewhere({ fontScale: 1.2, ankiSentenceField: "Sentence" });
+  assert.equal(asked(), 5);
+  state.anki = decksOk("Mining::JP");
+  popup.el("pitchAccent").checked = true;
+  popup.el("pitchAccent").dispatch("input");
+  await wait(200);
+  await settle();
+  assert.equal(state.settings.pitchAccent, true);
+  assert.equal(asked(), 6, "once, from the save");
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  // The other feature turned on elsewhere asks, as here; turned off again with pitch accent still
+  // on, it asks nothing, as an untick made here does not: the hint has nothing new to say.
+  elsewhere({ cardStatus: true });
+  assert.equal(asked(), 7);
+  await settle();
+  assert.equal(hint.textContent, "Looking at Mining::JP");
+  elsewhere({ cardStatus: false });
+  assert.equal(asked(), 7, "an untick with the other feature on asks nothing");
+  assert.equal(hint.textContent, "Looking at Mining::JP", "pitch accent is still on");
+  elsewhere({ pitchAccent: false });
+  assert.equal(asked(), 7);
+  assert.equal(hint.textContent, "", "both off: the hint goes without an ask");
 });

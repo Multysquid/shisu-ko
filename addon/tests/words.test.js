@@ -88,6 +88,40 @@ test("plainText drops ruby readings with their text and every other tag", () => 
   assert.equal(plainText('<span class="x">猫</span>'), "猫");
 });
 
+// HTML lets </rt> and </rp> be left out before the next <rt>, <rp> or </ruby>. Yomitan writes
+// them; a hand-written or third-party field may not, and match.js reads such a sentence, so the
+// word must read the same way or the card never colours its word.
+const RUBY_SHAPES = [
+  ["<ruby>食<rt>た</rt></ruby>べる", "食べる", "たべる"],
+  ["<ruby>食<rt>た</ruby>べる", "食べる", "たべる"],
+  ["<ruby>食<rp>(</rp><rt>た</rt><rp>)</rp></ruby>べる", "食べる", "たべる"],
+  ["<ruby>食<rp>(<rt>た<rp>)</ruby>べる", "食べる", "たべる"],
+  ["<RUBY>食<RT>た</RUBY>べる", "食べる", "たべる"],
+  ["<ruby>日本<rt>にほん</ruby><ruby>語<rt>ご</ruby>", "日本語", "にほんご"],
+  ["<ruby>日本<rt>にほん</rt></ruby><ruby>語<rt>ご</rt></ruby>", "日本語", "にほんご"],
+  ["<ruby><b>食</b><rt>た</ruby>べる", "食べる", "たべる"],
+  [" 食[た]べる", "食べる", "たべる"],
+  ["<b>食</b>べる", "食べる", ""],
+];
+
+test("plainText, plainWord and readingOf read a ruby whose end tags are left out", () => {
+  for (const [html, word, reading] of RUBY_SHAPES) {
+    assert.equal(plainWord(html), word, html);
+    assert.equal(readingOf(html), reading, html);
+    if (!html.includes("[")) assert.equal(plainText(html), word, html);
+  }
+});
+
+test("plainWord agrees with SHISUKO_MATCH.normalize on every ruby shape", () => {
+  // The background indexes a card's word with plainWord and matches its sentence with
+  // match.js; the two must not drift apart on any shape of ruby again.
+  const match = require("../match");
+  for (const [html, word] of RUBY_SHAPES) {
+    assert.equal(match.normalize(html), word, html);
+    assert.equal(plainWord(html), match.normalize(html), html);
+  }
+});
+
 test("plainText decodes entities, collapses whitespace and trims", () => {
   assert.equal(plainText("a&nbsp;b&amp;c"), "a b&c");
   assert.equal(plainText("&lt;tag&gt; &quot;q&quot; &#39;s&#39;"), "<tag> \"q\" 's'");

@@ -19,7 +19,7 @@ Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
                      language, launcher}
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
-                     model, model_loading, model_error}
+                     model, model_loading, model_error, heard, language_paused}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
   GET  /sessions -> the videos the server holds, for diagnostics
   POST /update   -> {ok, restarting, version}: the server exits with EXIT_UPDATE so that run.cmd / run.sh
@@ -40,6 +40,7 @@ import glob
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -66,7 +67,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.9.1"
+VERSION = "0.10.3"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
 # GPU context, no model left) and
@@ -87,6 +88,11 @@ DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json name
 CACHE_FORMAT = 2  # bumped when cue fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
+LANGUAGE_MIN_SPEECH = 4.0        # a window with less speech than this gets no language vote:
+LANGUAGE_MIN_PROB = 0.7          # a short clip is padded to 30 s, where the language head guesses
+                                 # worst, so a confident vote needs real speech and real confidence
+LANGUAGE_DETECT_SECONDS = 30.0   # Whisper judges one encoder window; more speech than that is wasted
+LANGUAGE_PROBE_AHEAD = 90.0      # a paused video is only probed this far ahead of the playhead, not --lookahead
 AUDIO_SUFFIXES = {".webm", ".m4a", ".opus", ".mp4", ".mp3", ".ogg", ".oga", ".wav", ".mka", ".aac"}
 PARTIAL_SUFFIXES = {".part", ".ytdl"}  # yt-dlp's in-progress download and its fragment state
 
@@ -620,6 +626,15 @@ class Session:
     cues: list = field(default_factory=list)
     covered: list = field(default_factory=list)
     speech: list = field(default_factory=list)  # merged Silero intervals, absolute seconds
+    # Language watch (see language_vote): speech heard in another language since the target
+    # language was last heard, which language that was, and whether cues are paused because of it.
+    foreign_seconds: float = 0.0
+    heard: Optional[str] = None
+    language_paused: bool = False
+    # Windows a paused session has only listened to. Kept apart from `covered` and never written
+    # to the cache: when the language comes back they are forgotten, so a wrong pause costs a
+    # second listen instead of leaving the video permanently blank.
+    probed: list = field(default_factory=list)
     seg_next: int = 0  # next Whisper-segment id; cues of one segment share it (see build_window_cues)
     want_t: float = 0.0
     last_sync: float = field(default_factory=time.time)
@@ -716,30 +731,49 @@ def plan_live_window(s: Session, args) -> Optional[tuple]:
     if not avail:
         return None
     t = max(0.0, s.want_t)
-    cov = find_covering(s.covered, t)
+    ranges = planned_ranges(s)
+    cov = find_covering(ranges, t)
     if cov is None:
         start = max(0.0, t - 0.5)
         size = args.first_window
     else:
         start = cov[1]
-        if args.lookahead > 0 and start - t > args.lookahead:
+        lookahead = lookahead_for(s, args)
+        if lookahead > 0 and start - t > lookahead:
             return None
         size = args.window
     have = find_covering(avail, start, tol=0.0)
     if have is None:
         return None  # the follower has not fetched this part (yet)
     end = min(start + size, have[1])
-    nxt = next_start_after(s.covered, start + 0.01)
+    nxt = next_start_after(ranges, start + 0.01)
     if nxt is not None:
         end = min(end, nxt)
     at_edge = end >= have[1] - 0.01
     if end - start < 1.5:
         if not at_edge:
-            s.covered = merge_intervals(s.covered + [[start, end]])
+            if s.language_paused:
+                s.probed = merge_intervals(s.probed + [[start, end]])
+            else:
+                s.covered = merge_intervals(s.covered + [[start, end]])
         return None
     if at_edge and end - start < LIVE_MIN_WINDOW:
         return None
     return (start, end)
+
+
+def planned_ranges(s: Session) -> list:
+    """Where the planner must not send another window: what has been transcribed, plus what a
+    paused session has already listened to."""
+    return merge_intervals(s.covered + s.probed) if s.probed else s.covered
+
+
+def lookahead_for(s: Session, args) -> float:
+    """How far ahead of the playhead to plan: --lookahead, or a short way while the language watch
+    has paused the video, where every window is a probe and the GPU should otherwise sit idle."""
+    if not s.language_paused:
+        return args.lookahead
+    return min(args.lookahead, LANGUAGE_PROBE_AHEAD) if args.lookahead > 0 else LANGUAGE_PROBE_AHEAD
 
 
 def plan_window(s: Session, args) -> Optional[tuple]:
@@ -749,7 +783,8 @@ def plan_window(s: Session, args) -> Optional[tuple]:
     if s.status != "ready" or (s.audio is None and s.preview is None) or s.duration <= 0:
         return None
     t = min(max(0.0, s.want_t), s.duration)
-    cov = find_covering(s.covered, t)
+    ranges = planned_ranges(s)
+    cov = find_covering(ranges, t)
     if cov is None:
         start = max(0.0, t - 0.5)
         size = args.first_window
@@ -757,11 +792,12 @@ def plan_window(s: Session, args) -> Optional[tuple]:
         start = cov[1]
         if start >= s.duration - 0.05:
             return None
-        if args.lookahead > 0 and start - t > args.lookahead:
+        lookahead = lookahead_for(s, args)
+        if lookahead > 0 and start - t > lookahead:
             return None
         size = args.window
     end = min(start + size, s.duration)
-    nxt = next_start_after(s.covered, start + 0.01)
+    nxt = next_start_after(ranges, start + 0.01)
     if nxt is not None:
         end = min(end, nxt)
     if s.audio is None:
@@ -773,7 +809,10 @@ def plan_window(s: Session, args) -> Optional[tuple]:
         end = min(end, preview_end)
         return (start, end) if end - start >= 1.5 else None
     if end - start < 1.5:
-        s.covered = merge_intervals(s.covered + [[start, end]])
+        if s.language_paused:
+            s.probed = merge_intervals(s.probed + [[start, end]])
+        else:
+            s.covered = merge_intervals(s.covered + [[start, end]])
         return None
     return (start, end)
 
@@ -935,6 +974,7 @@ class Fetcher:
                     s.live = False
                     s.live_audio = None
                     s.cues, s.covered, s.speech, s.seg_next = [], [], [], 0
+                    s.probed, s.foreign_seconds, s.heard, s.language_paused = [], 0.0, None, False
                     s.token = uuid.uuid4().hex[:12]
                 have_preview = s.preview is not None  # the download hook already published one
                 if not have_preview:
@@ -1402,6 +1442,53 @@ def _encode_clip(samples: np.ndarray, rate: int, fmt: str):
 
 # --------------------------------------------------------------------------- transcription
 
+def speech_samples(audio, speech, start: float, limit: float = LANGUAGE_DETECT_SECONDS):
+    """The speech parts of one window, concatenated, at most `limit` seconds of them."""
+    cap = int(limit * SAMPLE_RATE)
+    parts, total = [], 0
+    for a, b in speech:
+        i = max(0, int((a - start) * SAMPLE_RATE))
+        j = min(len(audio), int((b - start) * SAMPLE_RATE), i + cap - total)
+        if j <= i:
+            continue
+        parts.append(audio[i:j])
+        total += j - i
+        if total >= cap:
+            break
+    return np.concatenate(parts) if parts else audio[:0]
+
+
+def speech_seconds(speech, start: float, end: float) -> float:
+    """Seconds of detected speech inside [start, end)."""
+    return sum(max(0.0, min(b, end) - max(a, start)) for a, b in speech)
+
+
+def language_vote(s: Session, heard: Optional[str], seconds: float, target: str, patience: float) -> bool:
+    """Fold one window's language detection into the session; True if the window is worth transcribing.
+
+    Below the patience a foreign vote is still transcribed. The language is forced anyway, so one
+    misdetection (singing, noise, a line full of loanwords) must not cost a subtitle; only speech
+    that stays foreign for `patience` seconds does. A paused session probes every planned window
+    and resumes the moment the target language is heard again.
+    """
+    if patience <= 0:
+        return True
+    if heard is None:  # too little speech, or too unsure to count
+        return not s.language_paused
+    if heard == target:
+        s.foreign_seconds = 0.0
+        s.heard = None
+        s.language_paused = False
+        s.probed = []  # what was only listened to is offered to the planner again
+        return True
+    # Capped: past the patience the number decides nothing, and it is written to the cache.
+    s.foreign_seconds = min(s.foreign_seconds + seconds, patience)
+    s.heard = heard
+    if s.foreign_seconds >= patience:
+        s.language_paused = True
+    return not s.language_paused
+
+
 class Transcriber(threading.Thread):
     def __init__(self, app: "App"):
         super().__init__(daemon=True, name="transcriber")
@@ -1421,6 +1508,50 @@ class Transcriber(threading.Thread):
                 log.exception("transcriber loop error")
                 time.sleep(1.0)
 
+    def detect_language(self, s: Session, audio, speech, start: float, end: float):
+        """Judge this window: (code or None, probability, seconds of speech, whether the detector worked).
+
+        The seconds are all the speech in the window; only the samples fed to the detector are
+        capped, so the patience stays a count of seconds actually spoken.
+        """
+        seconds = speech_seconds(speech, start, end)
+        samples = speech_samples(audio, speech, start)
+        if len(samples) / SAMPLE_RATE < LANGUAGE_MIN_SPEECH:
+            return None, 0.0, seconds, True  # no evidence either way, but nothing broke
+        try:
+            language, probability, _ = self.app.model.detect_language(audio=samples)
+            probability = float(probability)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] language detection failed (%s); the window is transcribed unjudged", s.video_id, exc)
+            return None, 0.0, seconds, False
+        if not math.isfinite(probability) or probability < LANGUAGE_MIN_PROB:
+            return None, 0.0, seconds, True
+        return str(language), probability, seconds, True
+
+    def watch_language(self, s: Session, audio, speech, start: float, end: float) -> bool:
+        """Detect, vote, log. False means this window must not be transcribed."""
+        args = self.app.args
+        vote, probability, seconds, worked = self.detect_language(s, audio, speech, start, end)
+        if not worked:
+            # Nothing was heard, so nothing is decided. Staying paused on a detector that cannot
+            # judge would blank the video for as long as it stays broken.
+            return True
+        with s.lock:
+            was_paused = s.language_paused
+            wanted = language_vote(s, vote, seconds, args.language, args.language_patience)
+            paused, heard, foreign = s.language_paused, s.heard, s.foreign_seconds
+        if vote is not None and vote != args.language:
+            log.info("[%s] %s-%s: heard %s (%.2f), %.0f s of foreign speech so far",
+                     s.video_id, fmt_time(start), fmt_time(end), vote, probability, foreign)
+        if paused and not was_paused:
+            log.info("[%s] no %s heard for %.0f s of speech (heard %s); subtitles paused until it returns",
+                     s.video_id, args.language, foreign, heard)
+        elif was_paused and not paused:
+            log.info("[%s] %s is back; subtitles resume", s.video_id, args.language)
+        if paused != was_paused:
+            self.app.save_cache(s)  # the verdict changed; a probe on its own changes nothing to keep
+        return wanted
+
     def process(self, s: Session, start: float, end: float) -> None:
         args = self.app.args
         with s.lock:
@@ -1439,6 +1570,26 @@ class Transcriber(threading.Thread):
         except Exception as exc:  # noqa: BLE001
             log.warning("[%s] VAD failed (%s); treating the whole window as speech", s.video_id, exc)
             speech = [[start, end]]
+
+        # Detection costs an encoder pass, so --language-patience 0 must not reach it at all.
+        wanted = True
+        if float(getattr(args, "language_patience", 0.0) or 0.0) > 0:
+            try:
+                wanted = self.watch_language(s, audio, speech, start, end)
+            except Exception:  # noqa: BLE001
+                # Between setting s.busy and the transcribe call nothing may raise: the window
+                # would be replanned for ever with busy stuck on it.
+                log.exception("[%s] language watch failed; transcribing the window", s.video_id)
+        if not wanted:
+            with s.lock:
+                # Heard, not written. This goes to `probed`, not `covered`: the planner moves on,
+                # but nothing claims Whisper has seen this audio, and nothing reaches the cache.
+                s.probed = merge_intervals(s.probed + [[start, end]])
+                s.busy = None
+                heard = s.heard
+            log.info("[%s] %s-%s: skipped (heard %s, paused)", s.video_id, fmt_time(start), fmt_time(end), heard)
+            return
+
         try:
             segments, _info = self.app.model.transcribe(
                 audio,
@@ -1744,6 +1895,7 @@ class App:
                     "preview": s.preview is not None, "live": s.live,
                     "live_audio": s.live_audio.available() if s.live_audio is not None else None,
                     "idle_seconds": round(time.time() - s.last_sync, 1),
+                    "heard": s.heard, "language_paused": s.language_paused,
                 })
         return {"ok": True, "sessions": out}
 
@@ -1787,6 +1939,9 @@ class App:
                 "cues": s.cues[since:],
                 "next": len(s.cues),
                 "busy": s.busy,
+                # The last foreign language heard, and whether it has silenced this video.
+                "heard": s.heard,
+                "language_paused": s.language_paused,
             }
         resp.update(self.model_state(model))
         self.maybe_evict()
@@ -1895,6 +2050,17 @@ class App:
         s.speech = merge_intervals(data.get("speech", []))
         s.covered = merge_intervals(data.get("covered", []))
         s.duration = float(data.get("duration") or 0.0)
+        watch = data.get("language_state")
+        # Not restored with detection off: nothing could ever clear it again, and --language-patience 0
+        # is what the README offers a viewer whose video was paused by mistake.
+        if isinstance(watch, dict) and float(getattr(self.args, "language_patience", 0.0) or 0.0) > 0:
+            try:
+                s.foreign_seconds = float(watch.get("foreign_seconds") or 0.0)
+            except (TypeError, ValueError):
+                s.foreign_seconds = 0.0
+            heard = watch.get("heard")
+            s.heard = heard if isinstance(heard, str) and heard else None
+            s.language_paused = bool(watch.get("paused"))
         if s.fully_covered():
             s.status = "ready"  # nothing left to transcribe, no need to fetch the audio again
         log.info("[%s] loaded %d cached cues", s.video_id, len(s.cues))
@@ -1909,6 +2075,9 @@ class App:
                 "model": self.model_name, "language": self.args.language,
                 "cues": list(s.cues), "covered": [list(iv) for iv in s.covered],
                 "speech": [[round(a, 2), round(b, 2)] for a, b in s.speech],
+                # Reopening a foreign video finds it paused instead of hallucinating all over again.
+                "language_state": {"foreign_seconds": round(s.foreign_seconds, 2),
+                                   "heard": s.heard, "paused": s.language_paused},
             }
         tmp = s.cache_path().with_suffix(".tmp")
         try:
@@ -2581,6 +2750,8 @@ def parse_args(argv=None):
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     p.add_argument("--compute-type", default="auto", help="float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU)")
     p.add_argument("--language", default="ja")
+    p.add_argument("--language-patience", type=float, default=60.0,
+                   help="seconds of speech in another language before subtitles stop for that video (0 = never detect, always transcribe)")
     p.add_argument("--beam-size", type=int, default=5)
     p.add_argument("--initial-prompt", default="", help="optional text prompt given to Whisper for every window")
     p.add_argument("--window", type=float, default=40.0, help="seconds of audio transcribed per step (shorter reacts faster to seeking, longer is slightly more efficient)")

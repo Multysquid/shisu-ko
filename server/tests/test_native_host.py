@@ -673,18 +673,119 @@ def test_the_wrapper_forwards_the_browsers_arguments_to_the_host():
 def test_wrappers_run_the_host_and_nothing_else():
     cmd = (SERVER_DIR / "native-host.cmd").read_bytes()
     assert cmd.startswith(b"@echo off\r\n") and b"\n" not in cmd.replace(b"\r\n", b"")
-    # The venv first (Firefox's PATH may hold no usable python, e.g. the Store alias stub), the
-    # system python before setup ran; the venv paths are the ones setup.cmd / setup.sh create.
+    # The venv first (Firefox's PATH may hold no usable python, e.g. the Store alias stub), then
+    # whatever find-python.cmd finds before setup ran; the venv paths are the ones setup.cmd /
+    # setup.sh create. The probe helper must be as silent as the wrapper: stdout is the protocol.
     assert b'set "PY=%USERPROFILE%\\.shisu-ko\\venv\\Scripts\\python.exe"\r\n' in cmd
-    assert b'if not exist "%PY%" set "PY=python"\r\n' in cmd
-    assert b'"%PY%" "%~dp0native_host.py" %*' in cmd
+    assert b'if exist "%PY%" goto run\r\n' in cmd
+    assert b'call "%~dp0find-python.cmd"\r\n' in cmd and b'if not defined PY exit /b 1\r\n' in cmd
+    assert b'%PY% "%~dp0native_host.py" %*' in cmd
     assert b"echo " not in cmd.lower().replace(b"@echo off", b""), "a .cmd host may not print"
+    probe = (SERVER_DIR / "find-python.cmd").read_bytes()
+    assert probe.startswith(b"@echo off\r\n") and b"\n" not in probe.replace(b"\r\n", b"")
+    assert not re.search(rb"(?im)^\s*setlocal", probe), "PY is set for the caller, so no setlocal"
+    assert b"echo " not in probe.lower().replace(b"@echo off", b""), "the probe may not print either"
+    assert b'for %%C in ("py -3" "python" "python3")' in probe
+    assert b"sys.version_info < (3, 10)" in probe
     sh = (SERVER_DIR / "native-host.sh").read_bytes()
     assert sh.startswith(b"#!/usr/bin/env bash\n") and b"\r" not in sh
     assert b'PY="${HOME}/.shisu-ko/venv/bin/python"\n' in sh
     assert b'[ -x "$PY" ] || PY=python3\n' in sh
     assert b'exec "$PY" "$(dirname "$0")/native_host.py" "$@"' in sh
     assert b"echo" not in sh, "a shell host may not print"
+
+
+def test_setup_cmd_uses_the_python_the_probe_found():
+    """setup.cmd used to trust `where python`, which the Microsoft Store's python.exe shortcut
+    satisfies while answering "Python was not found" to every command; now the probe decides."""
+    setup = (SERVER_DIR / "setup.cmd").read_bytes()
+    assert b"\n" not in setup.replace(b"\r\n", b"")
+    assert b"where python" not in setup
+    assert b'call "%~dp0find-python.cmd"\r\nif not defined PY (' in setup
+    assert b"App execution aliases" in setup, "the message names the Windows setting that hides Python"
+    assert b'%PY% -m venv "%VENV%"' in setup and b'python -m venv' not in setup
+
+
+def _probe_with(path_env, tmp_path):
+    """Runs find-python.cmd under a PATH of our choosing and returns what it put in PY."""
+    driver = tmp_path / "driver.cmd"
+    driver.write_bytes(
+        b'@echo off\r\nsetlocal enabledelayedexpansion\r\n'
+        + f'call "{SERVER_DIR / "find-python.cmd"}"\r\n'.encode() + b'echo PY=[!PY!]\r\n')
+    env = dict(os.environ, PATH=path_env)
+    done = subprocess.run(["cmd.exe", "/c", str(driver)], capture_output=True, text=True, env=env, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert done.stderr == "" and done.stdout.count("PY=[") == 1, "the probe printed something"
+    return done.stdout.strip()[len("PY=["):-1]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="find-python.cmd is the Windows probe")
+def test_find_python_runs_the_candidates_instead_of_trusting_where(tmp_path):
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    # The Microsoft Store shortcut: found on the PATH as python, answers every call with a
+    # message and exit code 9009, and would have created no venv.
+    (stub / "python.cmd").write_bytes(
+        b"@echo Python was not found; run without arguments to install from the Microsoft Store, "
+        b"or disable this shortcut from Settings ^> Apps ^> Advanced app settings ^> App execution aliases.\r\n"
+        b"@exit /b 9009\r\n")
+    assert _probe_with(str(stub), tmp_path) == "", "a python that does not run must not be chosen"
+    # A real interpreter reachable only as `python` (no py launcher on this PATH) is chosen.
+    (stub / "python.cmd").write_bytes(f'@"{sys.executable}" %*\r\n'.encode())
+    assert _probe_with(str(stub), tmp_path) == "python"
+    # One that runs but is older than 3.10 is refused like a missing one.
+    (stub / "python.cmd").write_bytes(b'@if "%~1"=="-c" exit /b 1\r\n@exit /b 0\r\n')
+    assert _probe_with(str(stub), tmp_path) == ""
+    # With the machine's own PATH something runs, and the launcher wins when it is there.
+    found = _probe_with(os.environ["PATH"], tmp_path)
+    assert found in ("py -3", "python", "python3")
+
+
+def test_launchers_refuse_to_run_without_their_siblings():
+    """Explorer shows a zip as a folder and, on a double-click, extracts only the clicked file into
+    a temporary place; the launcher then runs alone and every python it calls fails on a missing
+    file. Each launcher checks for server.py next to itself before anything else."""
+    for name in ("run.cmd", "setup.cmd"):
+        text = (SERVER_DIR / name).read_bytes()
+        guard = text.index(b'if not exist "%~dp0server.py" (')
+        assert guard < text.index(b"%VENV%"), f"{name}: the guard comes before the venv is looked at"
+        assert b"Extract the whole zip first" in text and f"server\\{name}".encode() in text
+    for name in ("run.sh", "setup.sh"):
+        text = (SERVER_DIR / name).read_text(encoding="utf-8")
+        guard = text.index('[ -f "${HERE}/server.py" ] ||')
+        assert guard < text.index("${VENV}/bin/python"), f"{name}: the guard comes before the venv is looked at"
+        assert "extract the whole zip first" in text and f"server/{name}" in text
+
+
+def _alone(name, tmp_path):
+    """Copies one launcher into an empty folder and runs it there, as a zip double-click does."""
+    copy = tmp_path / name
+    copy.write_bytes((SERVER_DIR / name).read_bytes())
+    if name.endswith(".cmd"):
+        # stdin from NUL so the trailing `pause` returns at once instead of waiting for a key
+        command = f'cmd.exe /c ""{copy}" < NUL"'
+        done = subprocess.run(command, capture_output=True, text=True, cwd=tmp_path, timeout=60)
+    else:
+        done = subprocess.run(["bash", str(copy)], capture_output=True, text=True, cwd=tmp_path, timeout=60)
+    return done
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the .cmd launchers run under cmd.exe")
+@pytest.mark.parametrize("name", ["run.cmd", "setup.cmd"])
+def test_cmd_launcher_alone_explains_the_zip_and_stops(name, tmp_path):
+    done = _alone(name, tmp_path)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Extract the whole zip first" in done.stdout
+    assert f"server\\{name}" in done.stdout
+    assert "venv" not in done.stdout.lower(), "nothing beyond the guard ran"
+
+
+@pytest.mark.skipif(WINDOWS, reason="bash launchers run on POSIX")
+@pytest.mark.parametrize("name", ["run.sh", "setup.sh"])
+def test_sh_launcher_alone_explains_the_zip_and_stops(name, tmp_path):
+    done = _alone(name, tmp_path)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "extract the whole zip first" in done.stdout and f"server/{name}" in done.stdout
 
 
 def test_launchers_register_the_host():

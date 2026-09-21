@@ -16,6 +16,7 @@ import { chromium } from "playwright";
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const extension = resolve(process.env.SHISUKO_CHROME_DIST || join(root, "dist", "chrome"));
 const videoId = "smoke123";
+const secondVideoId = "smoke456";
 
 function json(res, body, status = 200) {
   res.writeHead(status, { "content-type": "application/json", "access-control-allow-origin": "*" });
@@ -48,6 +49,8 @@ async function poll(read, expected, timeout = 5000) {
 }
 let syncCount = 0;
 let healthCount = 0;
+const syncSeen = new Map(); // video id -> how many /sync requests actually reached the server
+let languagePaused = false; // fixture switch for the wrong-language answer
 const api = await listen(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   if (url.pathname === "/health") {
@@ -56,10 +59,16 @@ const api = await listen(async (req, res) => {
   }
   if (url.pathname === "/sync") {
     syncCount++;
-    return json(res, {
-      session: "smoke-session", status: "ready", duration: 3600, covered: [[0, 3600]], next: 1,
-      cues: [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }],
-    });
+    const body = await requestBody(req);
+    const id = typeof body.video_id === "string" ? body.video_id : "";
+    syncSeen.set(id, (syncSeen.get(id) || 0) + 1);
+    const head = { session: "smoke-session", status: "ready", duration: 3600, covered: [[0, 3600]], next: 1 };
+    if (languagePaused) return json(res, { ...head, cues: [], language_paused: true, heard: "en" });
+    // Cues come with the first request only, the way the real server answers a `since` cursor. A
+    // tab returning from standby with a reset cursor would therefore go blank instead of keeping
+    // the cue it already had, which is what the standby round trip must not do.
+    const cues = body.since ? [] : [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }];
+    return json(res, { ...head, cues });
   }
   if (url.pathname === "/clip") {
     res.writeHead(200, { "content-type": "audio/wav", "content-length": clipBytes.length });
@@ -136,20 +145,25 @@ try {
   assert.ok(healthCount > 0, "popup health check must reach the fixture server");
   await popup.close();
 
-  const page = await context.newPage();
-  await page.route("https://www.youtube.com/watch**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: html }));
-  await page.goto(`https://www.youtube.com/watch?v=${videoId}`);
-  await page.evaluate(async () => {
-    const video = document.querySelector("video");
-    const canvas = document.createElement("canvas");
-    canvas.width = 900; canvas.height = 520;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#234"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    video.muted = true;
-    video.srcObject = canvas.captureStream(10);
-    await video.play();
-  });
-  await page.locator(".shisuko-subtext").waitFor({ timeout: 10000 });
+  const openWatch = async (id) => {
+    const tab = await context.newPage();
+    await tab.route("https://www.youtube.com/watch**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: html }));
+    await tab.goto(`https://www.youtube.com/watch?v=${id}`);
+    await tab.evaluate(async () => {
+      const video = document.querySelector("video");
+      const canvas = document.createElement("canvas");
+      canvas.width = 900; canvas.height = 520;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#234"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      video.muted = true;
+      video.srcObject = canvas.captureStream(10);
+      await video.play();
+    });
+    await tab.locator(".shisuko-subtext").waitFor({ timeout: 10000 });
+    return tab;
+  };
+
+  const page = await openWatch(videoId);
   await poll(() => page.locator(".shisuko-subtext").textContent(), (value) => value.includes("これはテスト字幕です"), 10000);
   assert.ok(syncCount > 0, "content script must reach the fixture server");
   assert.equal(await page.locator(".shisuko-transcript").evaluate((el) => !el.classList.contains("shisuko-hidden")), true);
@@ -241,7 +255,65 @@ try {
   assert.equal(await restartedWorker.evaluate(() => globalThis.__shisukoSmokeGeneration), undefined, "worker must have a fresh global after suspension");
   assert.equal((await popupAfterRestart.evaluate(() => browser.runtime.sendMessage({ type: "ankiPoll" }))).newNoteId, null, "restart poll establishes a fresh baseline");
   await popupAfterRestart.close();
-  console.log(`browser smoke passed (syncs=${syncCount}, downloads=${records.length})`);
+
+  // Two YouTube tabs at once: only the one the viewer is looking at may drive the server.
+  const statusPopup = await context.newPage();
+  await statusPopup.goto(`chrome-extension://${extensionId}/popup.html`);
+  await statusPopup.locator("#showStatus").uncheck();
+  await statusPopup.waitForTimeout(400);
+  await statusPopup.close();
+
+  const first = await openWatch(videoId);
+  const firstText = first.locator(".shisuko-subtext");
+  const firstStatus = first.locator(".shisuko-status");
+  await poll(() => firstText.textContent(), (value) => value.includes("これはテスト字幕です"), 10000);
+  const second = await openWatch(secondVideoId);
+  const secondText = second.locator(".shisuko-subtext");
+  const secondStatus = second.locator(".shisuko-status");
+  await poll(() => secondText.textContent(), (value) => value.includes("これはテスト字幕です"), 10000);
+
+  const visible = (locator) => locator.evaluate((el) => !el.classList.contains("shisuko-hidden"));
+  const seen = (id) => syncSeen.get(id) || 0;
+  const grewOnlyFor = async (holderId, standbyId, by) => {
+    const mark = new Map(syncSeen);
+    await poll(() => seen(holderId), (count) => count >= (mark.get(holderId) || 0) + by, 10000);
+    assert.equal(seen(standbyId), mark.get(standbyId) || 0,
+      `${standbyId} must not reach the server while ${holderId} holds the sync right ` +
+      `(saw ${seen(standbyId)}, expected ${mark.get(standbyId) || 0})`);
+  };
+
+  await first.bringToFront();
+  await poll(() => secondStatus.textContent(), (value) => value.includes("another tab"), 8000);
+  assert.equal(await visible(secondStatus), true, "the standby line must show even with showStatus off");
+  await grewOnlyFor(videoId, secondVideoId, 4);
+
+  // Focus moves, the right follows it.
+  await second.bringToFront();
+  await poll(() => firstStatus.textContent(), (value) => value.includes("another tab"), 8000);
+  assert.equal(await visible(firstStatus), true, "the standby line must show even with showStatus off");
+  await grewOnlyFor(secondVideoId, videoId, 3);
+  assert.match(await firstText.textContent(), /これはテスト字幕です/,
+    "a tab on standby must keep the subtitle it already had");
+
+  // Coming back must not cost the cues: the fixture only sends them at `since: 0`, so a standby
+  // round trip that reset the cursor or cleared the cue list would leave the line blank.
+  await first.bringToFront();
+  assert.match(await firstText.textContent(), /これはテスト字幕です/,
+    "the returning tab must still show its cue");
+  await grewOnlyFor(videoId, secondVideoId, 3);
+  assert.match(await firstText.textContent(), /これはテスト字幕です/,
+    "the returning tab must still show its cue after syncing again");
+
+  // The server hears a language that is not the subtitle language and stops.
+  languagePaused = true;
+  const paused = await poll(() => firstStatus.textContent(), (value) => value.includes("not in the subtitle language"), 8000);
+  assert.match(paused, /hearing en/, `language-paused line must name the language heard (got "${paused}")`);
+  assert.equal(await visible(firstStatus), true, "the language-paused line must show even with showStatus off");
+  languagePaused = false;
+  await poll(() => visible(firstStatus), (shown) => !shown, 8000);
+
+  console.log(`browser smoke passed (syncs=${syncCount}, downloads=${records.length}, ` +
+    `${[...syncSeen].map(([id, count]) => `${id}=${count}`).join(" ")})`);
 } finally {
   await context?.close();
   await new Promise((resolveClose) => api.server.close(resolveClose));

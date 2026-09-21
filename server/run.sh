@@ -5,6 +5,8 @@
 set -uo pipefail
 VENV="${HOME}/.shisu-ko/venv"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# A copy of this file on its own (a zip browsed as a folder, a stray copy) has no siblings.
+[ -f "${HERE}/server.py" ] || { echo "This script is running on its own, without the rest of Shisu-ko: extract the whole zip first, then start server/run.sh from the extracted folder."; exit 1; }
 [ -x "${VENV}/bin/python" ] || { echo "Run ./setup.sh first"; exit 1; }
 
 main() {

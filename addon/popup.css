@@ -189,9 +189,14 @@ body.off main {
   background: var(--alert);
 }
 
+/* The detail and the hints carry words the server wrote: a repo id while a model loads, the last
+   line of a load error (a URL, a path). Nothing in those breaks by itself, and the header's 1fr
+   column is as wide as its widest unbreakable word, so one such word would widen the popup past
+   its 360 px and push the switch off it. */
 .detail {
   margin: 0;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 /* The one action in the header, shown only while the server is offline: a text button on the
@@ -242,6 +247,7 @@ h2 {
   padding-left: 26px;
   font-size: var(--fs-cap);
   color: var(--muted);
+  overflow-wrap: anywhere; /* the model hint names a loading model or quotes its error (see .detail) */
 }
 
 /* Hints in a drawer sit under a field, not under a checkbox, so there is nothing to align with. */

@@ -47,8 +47,9 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 ## Requirements
 
 - Firefox 140 or newer, or Chrome 120 or newer.
-- For the native server: Python 3.10 or newer on the PATH, plus Node.js 20+ or Deno
-  (yt-dlp needs a JavaScript runtime for YouTube). On Nix the flake provides all of this.
+- For the native server: Python 3.10 or newer (on Windows `setup.cmd` takes the `py` launcher
+  that the python.org installer registers, or a `python` that really runs), plus Node.js 20+
+  or Deno (yt-dlp needs a JavaScript runtime for YouTube). On Nix the flake provides all of this.
 - For the Docker server: Docker with the NVIDIA Container Toolkit (Docker Desktop on Windows
   has it built in). The image already contains Deno.
 - An NVIDIA GPU with about 4 GB of free VRAM for large-v3. With less free memory the server
@@ -60,6 +61,11 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 ## Quick start
 
 ### 1. Start the server
+
+Get the code: `git clone https://github.com/Multysquid/shisu-ko` (updates itself on every
+start), or download the zip from the [latest release](https://github.com/Multysquid/shisu-ko/releases/latest)
+and **extract it** (right-click, *Extract All...*): the scripts refuse to run from inside the
+zip, where Windows would start them without the rest of the files.
 
 **Windows:** double-click `server\setup.cmd` once, then `server\run.cmd`.
 **Linux/macOS:** `bash server/setup.sh` once, then `server/run.sh`.
@@ -182,12 +188,18 @@ audio…" through "Decoding audio…" to "Transcribing…", and the first subtit
 seconds. From then on the server stays ahead of you. The toolbar popup holds every setting, and
 the switch in its header turns the whole extension off and on again.
 
+Only the video you are watching is transcribed. Other YouTube tabs say "subtitles are running in
+another tab" and take over the moment you click into them, so two open videos never compete for
+the GPU. A video whose speech is not in the subtitle language stops after about a minute of it
+("the speech is not in the subtitle language") and starts again by itself when the language
+comes back.
+
 | Shortcut | Action |
 |---|---|
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
 | Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
-| ← / → | Jump to the previous / next subtitle. Left replays the current line once you are more than a second into it. Can be turned off in the popup |
+| ← / → | Jump to the previous / next subtitle. Left replays the current line once you are more than a second into it. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
 Chrome at `chrome://extensions/shortcuts`.
@@ -208,10 +220,10 @@ sides. A long sentence is shown as several short subtitle lines, but mining alwa
 whole sentence: the clip spans it, and the card's sentence field is grown from the single line
 Yomitan copied to the full sentence, keeping the bold around the word you looked up.
 
-Both are prepared while you watch. Each line that plays has its frame and its clip made ready in
-the background, so making a card attaches them at once, and still attaches them after the line has
-gone from the screen. Nothing is written to disk; a handful of recent sentences are held in memory
-and dropped when you leave the page.
+Both are prepared while you watch. Each line that plays has its clip, and with auto-attach on its
+frame, made ready in the background, so making a card attaches them at once, and still attaches
+them after the line has gone from the screen. Nothing is written to disk; a handful of recent
+sentences are held in memory and dropped when you leave the page.
 
 **Anki (default).** Normally you never trigger mining at all:
 
@@ -350,7 +362,6 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
 | Overbar by pitch accent | Draws a bar over each word that has a card, in the colour of its pitch accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka, read from the card's pitch accent field |
-| Pitch accent field | In the Anki, clips and server drawer: the note field holding Yomitan's pitch accent; empty means the first field named pitch or accent that holds a readable value |
 | Font size, keep line after speech | Presentation; the linger time keeps short lines readable |
 | Hide YouTube's own captions | Avoids two subtitle layers |
 | Show progress messages on the video | The status badge; errors are always shown |
@@ -386,7 +397,8 @@ during a switch, and the hint under the field carries the server's verdict on th
 
 The last drawer, **Anki, clips and server**, holds where mined material goes (Anki's newest
 card or the Downloads folder, with an optional Downloads fallback when Anki is unreachable), the
-AnkiConnect URL, the image, audio, sentence, word and pitch accent field names, the audio
+AnkiConnect URL, the image, audio, sentence, word and pitch accent field names (the last one
+empty means the first field named pitch or accent that holds a readable value), the audio
 padding around the sentence, the clip format (MP3 or WAV), the Shisu-ko server URL (default
 `http://127.0.0.1:8790`) and the **Check for updates** link with the result of the last check.
 
@@ -419,7 +431,19 @@ and the server does the heavy lifting with
 download is still running, and transcribes a short 20-second window there so the first subtitles
 appear quickly. It then continues in 40-second windows up to 15 minutes ahead of you. A sentence
 cut at a window edge is dropped and re-transcribed at the start of the next window, so lines are
-never chopped. Seeking to an untranscribed part starts a new short window there.
+never chopped. Seeking to an untranscribed part starts a new short window there. Only the tab you
+are looking at is served: the extension elects one, and the others are answered without the server
+being asked at all.
+
+**Language.** Whisper is told which language to expect (`--language`, default Japanese), and told
+that, it will gladly turn an English talk into Japanese subtitles. So the server also asks it what
+each window's speech actually was, and once `--language-patience` seconds of speech (60 by default)
+have gone by without the subtitle language being heard, it stops transcribing that video. It keeps
+listening to every window it would have transcribed, at a tenth of the cost, and starts again the
+moment the language returns; a video that opens with an English introduction loses nothing. One
+misjudged window never costs a subtitle, because until the patience runs out every window is
+transcribed anyway. Nothing a paused video has merely listened to is recorded as transcribed, so
+a pause that was wrong costs a second listen and never a blank video.
 
 **Cues.** The server runs Silero voice activity detection on each window and drops what Whisper
 makes up over silence and music: segments without words, segments that barely overlap detected
@@ -466,6 +490,7 @@ server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
 | `--max-cue-seconds 6` / `--min-cue-seconds 0.8` | Longest and shortest cue; shorter ones are extended or merged |
 | `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
+| `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop (0 = never listen for it, transcribe everything) |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
@@ -533,8 +558,12 @@ The extension does not change between native and Docker; both listen on `127.0.0
 
 | Symptom | Fix |
 |---|---|
+| `run.cmd` or `setup.cmd` says it is running on its own, or Python cannot open `...\Temp\...\shisu-ko-main.zip\...\server\server.py` | The zip was opened in Explorer and the script double-clicked inside it, so Windows extracted only that one file into a temporary folder. Extract the whole zip (right-click, *Extract All...*) and start `server\run.cmd` from the extracted folder. |
+| `setup.cmd` says "Python was not found; run without arguments to install from the Microsoft Store" | Windows answers `python` with a shortcut to the Store when no Python is on the PATH, and the setup used to trust it. Since 0.10.2 the setup runs the candidates instead (`py -3`, `python`, `python3`) and takes the first Python 3.10+ that works; with an older `setup.cmd`, install Python from python.org with "Add python.exe to PATH" ticked, or turn `python.exe` off under Settings > Apps > Advanced app settings > App execution aliases. |
 | No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
+| Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
+| Badge says "the speech is not in the subtitle language" | The server heard a minute of another language and stopped; it starts again when the subtitle language returns. For a video that really does mix languages, start the server with `--language-patience 0`. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
@@ -622,9 +651,9 @@ Checks:
 - Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
   runs both test suites; `nix build .#addon` produces the extension zip.
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`,
-  the instance lock `server-8790.lock` (one per port, held while a server runs), `server.log`
-  (the output of a server the popup started, Linux/macOS) and, on Windows, the launcher's host
-  manifest `native-messaging/shisuko.json`.
+  `config.json` (the model chosen at setup), the instance lock `server-8790.lock` (one per port,
+  held while a server runs), `server.log` (the output of a server the popup started,
+  Linux/macOS) and, on Windows, the launcher's host manifest `native-messaging/shisuko.json`.
 
 Tests cover the pure logic on both sides, need no GPU, network or Firefox, and run in CI on
 every push and pull request via [`.github/workflows/tests.yml`](.github/workflows/tests.yml):

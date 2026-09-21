@@ -6,10 +6,26 @@ REM and installs faster-whisper, yt-dlp and the CUDA runtime libraries.
 set "ROOT=%USERPROFILE%\.shisu-ko"
 set "VENV=%ROOT%\venv"
 
-where python >nul 2>nul
-if errorlevel 1 (
-  echo Python 3.10 or newer is required. Install it from https://www.python.org/downloads/
-  echo and tick "Add python.exe to PATH", then run this script again.
+REM Explorer shows a zip as a folder and, on a double-click, extracts only the clicked file
+REM into a temporary place: this script then runs alone, and every sibling is missing.
+if not exist "%~dp0server.py" (
+  echo This file is running on its own, from inside a zip or a folder without the rest
+  echo of Shisu-ko. Extract the whole zip first ^(right-click it, "Extract All..."^), then
+  echo start server\setup.cmd from the extracted folder.
+  pause
+  exit /b 1
+)
+
+REM find-python.cmd sets PY to a Python 3.10+ that really runs (Windows answers "python" with a
+REM Microsoft Store shortcut when none is on the PATH, and `where` cannot tell the two apart).
+call "%~dp0find-python.cmd"
+if not defined PY (
+  echo Python 3.10 or newer is required, and none that runs was found.
+  echo Install it from https://www.python.org/downloads/ and tick "Add python.exe to PATH",
+  echo then run this script again. If Python is installed and this message still appears,
+  echo Windows is answering "python" with its Store shortcut: turn python.exe off under
+  echo Settings ^> Apps ^> Advanced app settings ^> App execution aliases, or repair the
+  echo installation with "Add python.exe to PATH" ticked.
   pause
   exit /b 1
 )
@@ -19,7 +35,7 @@ if not exist "%ROOT%\models" mkdir "%ROOT%\models"
 
 if not exist "%VENV%\Scripts\python.exe" (
   echo Creating virtual environment in %VENV% ...
-  python -m venv "%VENV%"
+  %PY% -m venv "%VENV%"
   if errorlevel 1 (
     echo Could not create the virtual environment.
     pause
