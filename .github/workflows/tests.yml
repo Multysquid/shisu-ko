@@ -43,6 +43,13 @@ jobs:
           done
       - name: Install test dependencies
         run: pip install -r server/requirements-test.txt
+      # The runtime dependencies are not needed by the tests, but every Python in the matrix
+      # must be able to install and import them: setup.cmd / setup.sh take whatever Python 3.10+
+      # runs on the machine, so a version without wheels would fail the user, not CI.
+      - name: Install and import the server's runtime dependencies
+        run: |
+          pip install -r server/requirements.txt
+          python -c "import faster_whisper, av, yt_dlp, numpy"
       - name: Run server tests
         run: python -m pytest server/tests -v
 
