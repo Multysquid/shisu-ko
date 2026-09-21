@@ -36,6 +36,7 @@
       "browser-api.js",
       "settings.js",
       "match.js",
+      "words.js",
       "background.js"
     ]
   },
@@ -50,6 +51,7 @@
         "browser-api.js",
         "settings.js",
         "match.js",
+        "words.js",
         "content.js"
       ],
       "css": [
