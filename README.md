@@ -284,11 +284,16 @@ the select to look at that one instead; its subdecks count. Words are taken from
 field (the popup's **Word field**, else the note's first field), and a verb or adjective is found
 in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
 食べたことがある and 食べ in 食べに行く, 書く colours 書かない and 書いて, 美しい colours
-美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり. A word is not
-coloured inside a compound (食べ物 for 食べる, 日本語 for 日本, 走者 for 走る), and a card for a
-particle, the copula or an auxiliary (は, のは, から, でも, だ, です, ます, ない, たい, ん …) never
-colours anything, since it would paint every line the same way. Two cards for one word show the
-one with the least progress; a suspended card only counts when there is no other.
+美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり, and a word
+written in kana is found in its forms too (かける colours かけて, しまう colours しまった,
+おいしい colours おいしかった). The particles after a coloured word and the honorific お or ご
+before it take its colour (お風呂の, 中で, 学生です), and so does the quotative って or と between
+a coloured word and one found after it (話しかけていただくっていう with いう in the deck), so a
+line reads in whole pieces. A word is not coloured inside a compound (食べ物 for 食べる, 日本語
+for 日本, 走者 for 走る), and a card for a particle, the copula or an auxiliary (は, のは, から,
+でも, だ, です, ます, ない, たい, ん …) never colours anything by itself, since it would paint every
+line the same way. Two cards for one word show the one with the least progress; a suspended card
+only counts when there is no other.
 
 **Overbar by pitch accent** draws a bar over each word that has a card, in the colour of its pitch
 accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka (the colours Migaku and
@@ -450,8 +455,12 @@ makes up over silence and music: segments without words, segments that barely ov
 speech, repetition loops and a short blocklist of known hallucinated phrases. Whisper's word
 timestamps then split the rest into subtitle-sized cues at sentence ends, long pauses and a
 character and duration limit; starts snap to the onset of speech, ends get a short lead-out into
-the following silence, fragments are merged and gaps under half a second are closed. The
-reasoning and the measurements behind these rules are in
+the following silence, fragments are merged and gaps under half a second are closed. Singing is
+not speech to the voice-activity detector, so a window in which it hears next to nothing (under a
+second of speech) but the audio is not silent (a song, a 歌枠) is transcribed without it once
+Whisper hears Japanese in it, under stricter gates on Whisper's own confidence: music videos get
+their lyrics, and an instrumental may show a wrong line now and then (`--lyrics off` sends such
+windows through the detector as before, so a song stays blank). The reasoning and the measurements behind these rules are in
 [docs/subtitle-quality.md](docs/subtitle-quality.md). Cues are saved per video and per model in
 `~/.shisu-ko/cache`, so a video you have watched before shows subtitles immediately: the
 current model's cues are `<video_id>.cues.json`, and when you switch models another model's
@@ -491,6 +500,7 @@ server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3
 | `--max-cue-seconds 6` / `--min-cue-seconds 0.8` | Longest and shortest cue; shorter ones are extended or merged |
 | `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
 | `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop (0 = never listen for it, transcribe everything) |
+| `--lyrics off` | Transcribe a window in which the speech detector hears under a second of speech with the detector as before (blank when it heard nothing). The default `auto` transcribes such a window without the detector when its audio is not silent (sung lyrics, speech over music) and Whisper hears the target language in it, under stricter gates |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
@@ -564,6 +574,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
 | Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
 | Badge says "the speech is not in the subtitle language" | The server heard a minute of another language and stopped; it starts again when the subtitle language returns. For a video that really does mix languages, start the server with `--language-patience 0`. |
+| Badge says "No speech found in this video" | The whole video, from its start, was transcribed and nothing was heard: a silent clip, an instrumental, a song Whisper does not hear as Japanese, or, with `--lyrics off`, any song. |
+| A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before that gets its lines on the next visit: the server reads its saved result, sees the stretches nothing was heard in and transcribes those again (no need to delete anything from `~/.shisu-ko/cache`). A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
@@ -602,7 +614,9 @@ The extension does not change between native and Docker; both listen on `127.0.0
 - Subtitles are hidden while YouTube plays ads.
 - YouTube changes its player regularly; yt-dlp usually needs an update within days.
 - Whisper occasionally hallucinates on music or silence; the voice-activity gates remove most of
-  it but not all.
+  it but not all. Songs are transcribed without the speech gate (see `--lyrics`), so an
+  instrumental passage may show a wrong line now and then; loud non-speech (rain, a crowd, a
+  song in another language) stays blank rather than being guessed at.
 
 Planned: a distilled, smaller Japanese model that could eventually run in the browser itself.
 
