@@ -395,3 +395,82 @@ def test_build_cues_never_emits_a_cue_under_the_hard_minimum():
     ws = words([("あ", 0.0, 0.1), ("。", 0.1, 0.12), ("いうえおかきくけこさ", 0.2, 2.0), ("。", 2.0, 2.1)])
     cues = server.build_cues(ws, [[0.0, 2.2]], limits(max_chars=6))
     assert min(c["end"] - c["start"] for c in cues) >= 0.5
+
+
+# --------------------------------------------------------------------------- lead word repair
+
+def timings(ws):
+    return [(w.start, w.end) for w in ws]
+
+
+def test_repair_slides_a_stranded_head_onto_the_next_utterance():
+    # word[0] is anchored to the segment start, a whole speech interval behind the sentence it opens.
+    ws = words([("言", 3.0, 4.0), ("ってた", 6.0, 6.8)])
+    speech = [[2.9, 4.1], [5.5, 7.0]]
+    server.repair_lead_words(ws, speech)
+    assert ws[0].start == pytest.approx(5.5)  # the onset of word[1]'s interval
+    assert ws[0].end == pytest.approx(6.0)    # flush against word[1]
+
+
+def test_repair_leaves_the_head_alone_below_the_gap():
+    ws = words([("言", 3.0, 4.0), ("ってた", 4.2, 5.0)])
+    before = timings(ws)
+    server.repair_lead_words(ws, [[2.9, 4.05], [4.15, 5.1]])
+    assert timings(ws) == before  # 0.20 s is a pause, not the anchoring artifact
+
+
+def test_repair_leaves_a_long_head_alone():
+    ws = words([("あいうえおかき", 3.0, 4.0), ("ってた", 6.0, 6.8)])  # seven characters
+    before = timings(ws)
+    server.repair_lead_words(ws, [[2.9, 4.1], [5.5, 7.0]])
+    assert timings(ws) == before
+
+
+def test_repair_never_moves_the_head_backwards():
+    # word[1]'s interval already began before the head: sliding to its onset would drop the head on
+    # the previous utterance, where cue_overlaps() deletes a whole good cue.
+    ws = words([("えー", 5.0, 5.3), ("こんにちは", 6.0, 6.5)])
+    before = timings(ws)
+    server.repair_lead_words(ws, [[4.5, 7.0]])
+    assert timings(ws) == before
+
+
+def test_repair_leaves_a_head_that_already_shares_the_interval():
+    # Whisper stretched the head a hair past the onset, but it sits on the right utterance already.
+    ws = words([("言", 4.45, 4.7), ("ってた", 6.0, 6.5)])
+    before = timings(ws)
+    server.repair_lead_words(ws, [[4.5, 7.0]])
+    assert timings(ws) == before
+
+
+def test_repair_never_moves_the_words_after_the_head():
+    ws = words([("言", 3.0, 4.0), ("ってた", 6.0, 6.8), ("ね", 6.8, 7.0)])
+    server.repair_lead_words(ws, [[2.9, 4.1], [5.5, 7.1]])
+    assert timings(ws)[1:] == [(6.0, 6.8), (6.8, 7.0)]
+
+
+def test_repair_returns_short_lists_and_unknown_speech_unchanged():
+    single = words([("言", 3.0, 4.0)])
+    assert server.repair_lead_words(single, [[2.9, 4.1]]) is single
+    assert timings(single) == [(3.0, 4.0)]
+    assert server.repair_lead_words([], [[0.0, 1.0]]) == []
+    ws = words([("言", 3.0, 4.0), ("ってた", 6.0, 6.8)])
+    server.repair_lead_words(ws, [])
+    assert timings(ws) == [(3.0, 4.0), (6.0, 6.8)]
+
+
+# --------------------------------------------------------------------------- repair before the gates
+
+def test_build_window_cues_repairs_the_lead_word_before_the_vad_gate():
+    ws = words([("は", 0.0, 0.2), ("じめまして", 5.0, 5.8)])
+    speech = [[0.0, 0.25], [4.9, 6.0]]
+    segment = seg("はじめまして", 0.0, 5.8, ws)
+    # Unrepaired, the segment's span covers 5.6 s of silence it never contained.
+    raw = server.absolute_words(segment, 0.0)
+    assert server.hallucination_reason(segment, raw, speech) == "vad"
+
+    drops: dict = {}
+    cues, next_id = server.build_window_cues([segment], 0.0, speech, limits(), 0, drops)
+    assert [c["text"] for c in cues] == ["はじめまして"]
+    assert "vad" not in drops
+    assert next_id == 1

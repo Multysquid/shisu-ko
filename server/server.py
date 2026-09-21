@@ -85,7 +85,7 @@ MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-
 MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
                    "or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
-CACHE_FORMAT = 2  # bumped when cue fields change; older caches are ignored and transcribed again
+CACHE_FORMAT = 3  # bumped when cue fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
 LANGUAGE_MIN_SPEECH = 4.0        # a window with less speech than this gets no language vote:
@@ -280,6 +280,59 @@ def nearest_onset(intervals, t: float, reach: float):
         if a - reach <= t <= min(b, a + reach):
             return a
     return None
+
+
+# --------------------------------------------------------------------------- word timing repair
+
+# faster-whisper anchors a segment's first word to the segment's own start, and segment starts run
+# flush with the previous segment's end. The result is one or two characters stranded in the
+# previous utterance, seconds before the rest of the sentence they belong to. Measured over 448
+# multi-word segments of a 17-minute video: the gap after word[0] has p90 0.72 s and a worst case
+# of 9.2 s, while every later position has p90 0.00 s; 23% of segments put word[0] in a different
+# speech interval from word[1]. Left alone that one artifact splits words (コ|ラボ配信を), floats a
+# single character over silence, makes the VAD and anomaly gates below delete whole real
+# utterances, and feeds trim_words a leading mora to eat.
+LEAD_REPAIR_GAP = 0.30     # a gap this big straight after the first words is the artifact, not a pause
+LEAD_REPAIR_CHARS = 6      # only a short head can be a mis-anchored fragment
+LEAD_REPAIR_WORDS = 3
+
+
+def repair_lead_words(words, speech) -> list:
+    """Slide a segment's stranded first words onto the front of the utterance they belong to.
+
+    Rewrites the Word objects in place and returns the same list; every caller hands it a fresh
+    list from absolute_words(), and one that did not would find its word timings rewritten.
+
+    Conservative on purpose: the head only moves forward, only when it is short, and only out of
+    a speech interval it does not already share with the rest of the segment. Moving one backwards
+    would drop it on the previous utterance, where cue_overlaps() then deletes a whole good cue.
+    """
+    if len(words) < 2 or not speech:
+        return words
+    for k in range(min(LEAD_REPAIR_WORDS, len(words) - 1)):
+        head, nxt = words[:k + 1], words[k + 1]
+        if nxt.start - head[-1].end < LEAD_REPAIR_GAP:
+            break
+        if len(word_text(head)) > LEAD_REPAIR_CHARS:
+            break
+        interval = find_covering(speech, nxt.start, tol=0.02)
+        if interval is None or interval[0] >= nxt.start:
+            continue
+        # Two ways to say "this head is not stranded". The second catches every case on sorted,
+        # non-overlapping intervals, which is all detect_speech() and merge_intervals() produce;
+        # the first is kept because it is the one that states the rule the regression turns on.
+        if interval[0] <= head[0].start or find_covering(speech, head[-1].end, tol=0.02) == interval:
+            break
+        onset = interval[0]
+        span = max(head[-1].end - head[0].start, 1e-3)
+        scale = min(1.0, (nxt.start - onset) / span)
+        base = head[0].start
+        for w in head:
+            w.start = onset + (w.start - base) * scale
+            w.end = onset + (w.end - base) * scale
+        head[-1].end = min(head[-1].end, nxt.start)
+        break
+    return words
 
 
 # --------------------------------------------------------------------------- hallucination gates
@@ -574,7 +627,11 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
     """
     out: list = []
     for seg in segs:
-        words = absolute_words(seg, offset)
+        # Before the gates, not after: an unrepaired first word makes the segment's span cover a
+        # silence it never contained, and the VAD gate then deletes real speech (20 utterances in
+        # 17 minutes of the sample, キズナアイでーす and はじめまして! among them) while the anomaly
+        # gate scores its six-second "word" straight past the threshold.
+        words = repair_lead_words(absolute_words(seg, offset), speech)
         reason = hallucination_reason(seg, words, speech)
         if reason:
             if drops is not None:
