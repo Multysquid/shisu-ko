@@ -417,7 +417,8 @@ test("Left with no cues, or off a watch page, leaves YouTube's five second seek 
 
 // ------------------------------------------------------------------ sentences
 
-// Four cues: two of one segment, then the same segment again after 13 s of music, then another.
+// Four cues: two of one segment a fifth of a second apart, that segment again after 13 s of
+// music, then another segment. The first two are the shape that used to fuse into one card.
 const SENTENCE_CUES = [
   { id: 0, seg: 7, start: 0, end: 1, text: "あ" },
   { id: 1, seg: 7, start: 1.2, end: 2, text: "い" },
@@ -425,22 +426,25 @@ const SENTENCE_CUES = [
   { id: 3, seg: 8, start: 16.1, end: 17, text: "え" },
 ];
 
-test("sentenceForCue joins the cues of a segment but stops at a long pause", () => {
+test("sentenceForCue is the line on screen, never the Whisper segment around it", () => {
   const { api } = loadContent();
   const sentenceForCue = api.sentenceForCue;
-  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[1])), { start: 0, end: 2, text: "あい", cueIds: [0, 1] });
-  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[2])), { start: 15, end: 16, text: "う", cueIds: [2] });
-  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[3])), { start: 16.1, end: 17, text: "え", cueIds: [3] });
+  // Cues 0 and 1 are one segment 0.2 s apart: a card mined off either used to get both, and a
+  // clip of 0 -> 2. Whisper's segment is not a sentence, so neither reaches past its own line.
+  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES[0])), { start: 0, end: 1, text: "あ", cueIds: [0] });
+  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES[1])), { start: 1.2, end: 2, text: "い", cueIds: [1] });
+  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES[3])), { start: 16.1, end: 17, text: "え", cueIds: [3] });
+  assert.equal(sentenceForCue(null), null);
 });
 
-test("nextSentence steps past every cue of the sentence it is given", () => {
+test("nextSentence steps to the cue after the one it is given", () => {
   const { api } = loadContent();
-  const first = api.sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[0]);
-  assert.deepEqual(plain(api.nextSentence(SENTENCE_CUES, first)), { start: 15, end: 16, text: "う", cueIds: [2] });
-  const third = api.sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[2]);
+  const first = api.sentenceForCue(SENTENCE_CUES[0]);
+  assert.deepEqual(plain(api.nextSentence(SENTENCE_CUES, first)), { start: 1.2, end: 2, text: "い", cueIds: [1] });
+  const third = api.sentenceForCue(SENTENCE_CUES[2]);
   assert.deepEqual(plain(api.nextSentence(SENTENCE_CUES, third)), { start: 16.1, end: 17, text: "え", cueIds: [3] });
   // Nothing after the last one, and nothing to step from without cue ids.
-  const last = api.sentenceForCue(SENTENCE_CUES, SENTENCE_CUES[3]);
+  const last = api.sentenceForCue(SENTENCE_CUES[3]);
   assert.equal(api.nextSentence(SENTENCE_CUES, last), null);
   assert.equal(api.nextSentence(SENTENCE_CUES, null), null);
   assert.equal(api.nextSentence(SENTENCE_CUES, { start: 0, end: 1, text: "x", cueIds: [99] }), null);
@@ -2731,7 +2735,7 @@ async function transcriptHover() {
 
 test("a trusted hover on a transcript line ranks its sentence first: a premine with hover set and no frame", async () => {
   const { api, list, timers, fire, enter, premines } = await transcriptHover();
-  const line = list.children[1]; // cue 1, the first half of a two-cue sentence
+  const line = list.children[1]; // cue 1, the first of two cues Whisper put in one segment
   enter(line);
   assert.equal(premines().length, 0); // only once the pointer has rested on the line
   assert.equal(timers.size, 1);
@@ -2744,10 +2748,12 @@ test("a trusted hover on a transcript line ranks its sentence first: a premine w
   assert.ok(!msg.ahead);
   assert.equal(msg.videoId, "abcdef1234");
   assert.equal(msg.key, 1);
-  assert.deepEqual(plain(msg.cueIds), [1, 2]);
-  assert.deepEqual(plain(msg.sentence), { start: 3, end: 5, text: "c1c2" });
+  // Cue 2 shares cue 1's segment 0.2 s later; the hovered line is still the whole card.
+  assert.deepEqual(plain(msg.cueIds), [1]);
+  assert.deepEqual(plain(msg.sentence), { start: 3, end: 4, text: "c1" });
   // What the background answered is the order a card is matched by: this line before the playing one.
-  assert.equal(api.rankOfCue(api.state.premined, api.cueById(2)), 0);
+  assert.equal(api.rankOfCue(api.state.premined, api.cueById(1)), 0);
+  assert.equal(api.rankOfCue(api.state.premined, api.cueById(2)), Infinity);
   assert.equal(api.rankOfCue(api.state.premined, api.cueById(0)), Infinity);
 });
 

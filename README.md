@@ -29,7 +29,7 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   over the video resumes it.
 - **Transcript panel** with every line so far. A timestamp jumps there, a pickaxe mines it.
 - **Sentence mining by itself.** The moment Yomitan adds a card, a screenshot and an MP3 clip of
-  the whole sentence go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
+  the line you were reading go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
   does the same on demand, into the newest card or into your Downloads folder.
 - **Word colours** (optional). With Anki running, every word of a line that has a card in your
   deck is coloured by the card's state, green to red, and can carry an overbar in the colour of
@@ -214,11 +214,12 @@ and its timestamps seek the video.
 
 ## Sentence mining
 
-Mining captures two things for the sentence you are looking at: a screenshot of the video frame
-and an MP3 clip of the sentence audio, cut from the original track with a little padding on both
-sides. A long sentence is shown as several short subtitle lines, but mining always works on the
-whole sentence: the clip spans it, and the card's sentence field is grown from the single line
-Yomitan copied to the full sentence, keeping the bold around the word you looked up.
+Mining captures two things for the line you are looking at: a screenshot of the video frame and an
+MP3 clip of that line's audio, cut from the original track with a little padding on both sides.
+The line on screen is the whole of it — the card's sentence and its clip always describe the same
+seconds you just read and heard. Where Yomitan copied only part of the line, because it stopped at
+a 。 inside it, the sentence field is grown back to the line, keeping the bold around the word you
+looked up.
 
 Both are prepared while you watch. Each line that plays has its clip, and with auto-attach on its
 frame, made ready in the background, so making a card attaches them at once, and still attaches

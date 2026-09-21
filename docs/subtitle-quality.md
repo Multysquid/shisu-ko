@@ -165,6 +165,15 @@ count ~1.5× — more text swaps, partly offset by rule 6. More importantly, **s
 the mined Anki sentence comes from the cue**. That is a genuine conflict between display and mining; either
 mine cue ± neighbours, or keep a `sentence_id` on each cue so mining can rejoin them. Decide before shipping.
 
+**Decided, and then reversed.** `seg` shipped as that `sentence_id` and mining rejoined by it. It was
+wrong: `seg` is a Whisper segment, a run of speech, and on a narrator who reads without pausing Whisper
+punctuates almost nothing — one measured video had 7 marks in 3095 characters — so every split inside a
+segment was rule 7's length limit and the rejoin undid all of them. A card mined off a 3 s line came back
+with 9 s of audio and a clause the viewer never saw. Deferring to the VAD instead is worse, not better:
+Silero cuts at 300 ms of silence, which is a breath, and the same narrator ran 14.26 s across three cues
+between breaths. Neither signal marks a sentence. Mining now takes the cue and nothing else — the line
+the viewer read and heard is the only thing certainly true of the card.
+
 ### P2 — Overlay rules
 
 - `lingerSeconds` 3 → **0.3**, and cap the popup input at 1.0. Once P1.4 puts the lead-out in `end`, linger's
