@@ -44,7 +44,29 @@ REM the environment check, which reports whether it is registered.
 echo.
 echo Environment check:
 "%VENV%\Scripts\python.exe" "%~dp0server.py" --check
+
+REM The model the server starts with, downloaded now so the first start is not the wait; the
+REM popup can switch to another one later. The check above said whether there is a CUDA
+REM device. choice waits for one of the two keys, so a wrong key is impossible, and its
+REM errorlevel is the number of the key, or 255 when it cannot read one (stdin closed or
+REM empty: an unattended run). "if errorlevel N" means N or more, so the one line below tests
+REM 255 first and takes large-v3, as setup.sh does at an EOF, then 2; it stays one line, right
+REM after choice, since a set inside an if-block resets errorlevel to 0 for any test after it.
 echo.
-echo Setup finished. Start the server with run.cmd
-echo The Whisper large-v3 model (about 3 GB) is downloaded on the first start.
+echo Which Whisper model should the server use? (the popup can switch later)
+echo   1  large-v3  best quality, about 3 GB, wants a GPU with 4 GB or more free
+echo   2  small     about 500 MB, fine on a CPU, less accurate
+choice /c 12 /n /m "Type 1 or 2: "
+if errorlevel 3 (set "MODEL=large-v3") else if errorlevel 2 (set "MODEL=small") else (set "MODEL=large-v3")
+echo.
+"%VENV%\Scripts\python.exe" "%~dp0server.py" --download-model %MODEL%
+if errorlevel 1 (
+  echo The model could not be downloaded. Check the connection and run setup.cmd again,
+  echo or start run.cmd: the server then downloads %MODEL% itself, without a progress bar.
+  pause
+  exit /b 1
+)
+echo.
+echo Setup is complete: the %MODEL% model is downloaded and everything is ready.
+echo Close this window and start run.cmd.
 pause

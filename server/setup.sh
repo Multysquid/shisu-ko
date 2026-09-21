@@ -18,4 +18,29 @@ fi
 # the setup that just succeeded.
 "${VENV}/bin/python" "${HERE}/native_host.py" --register --verbose || true
 "${VENV}/bin/python" "${HERE}/server.py" --check
-echo "Setup finished. Start the server with ./run.sh"
+
+# The model the server starts with, downloaded now so the first start is not the wait; the popup
+# can switch to another one later. The check above said whether there is a CUDA device. An EOF on
+# read (stdin closed or redirected from an empty file) takes large-v3 instead of asking forever;
+# `yes 1 | bash setup.sh` picks it the same way.
+echo
+echo "Which Whisper model should the server use? (the popup can switch later)"
+echo "  1  large-v3  best quality, about 3 GB, wants a GPU with 4 GB or more free"
+echo "  2  small     about 500 MB, fine on a CPU, less accurate"
+while :; do
+  read -r -p "Type 1 or 2: " pick || pick=1
+  case "$pick" in
+    1) MODEL=large-v3; break;;
+    2) MODEL=small; break;;
+  esac
+done
+echo
+# Inside the if, set -e leaves the verdict to us: a failed download ends setup with a word on it.
+if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then
+  echo "The model could not be downloaded. Check the connection and run setup.sh again,"
+  echo "or start ./run.sh: the server then downloads $MODEL itself, without a progress bar."
+  exit 1
+fi
+echo
+echo "Setup is complete: the $MODEL model is downloaded and everything is ready."
+echo "Close this window and start ./run.sh."

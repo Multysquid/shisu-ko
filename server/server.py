@@ -28,7 +28,8 @@ Endpoints
                      clients only: a loopback page may not restart the server (update_origin_allowed())
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
-the Python environment, downloaded models, cached audio and cue files.
+the Python environment, downloaded models, cached audio and cue files, and config.json with
+the model chosen at setup (server.py --download-model NAME), the default of --model.
 """
 from __future__ import annotations
 
@@ -67,19 +68,22 @@ except ImportError:  # pragma: no cover - Windows
 
 VERSION = "0.9.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
-# (sys.exit), 3 asks for a plain restart (os._exit: a broken GPU context, no model left) and
+# (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
+# GPU context, no model left) and
 # EXIT_UPDATE asks the launcher to run update.py first and then start the server again (POST /update).
 EXIT_UPDATE = 4
 SAMPLE_RATE = 16000
 APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
 MODELS_DIR = APP_DIR / "models"
+CONFIG_PATH = APP_DIR / "config.json"  # {"model": ...}, written by --download-model at setup; read_config()
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 # A faster-whisper size or a Hugging Face repo id. WhisperModel() also opens local directories, so
 # anything else (paths, "..") is refused before it can point the server at an arbitrary folder.
 MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$")
 MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
                    "or a Hugging Face repo id like owner/name")
+DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
 CACHE_FORMAT = 2  # bumped when cue fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
@@ -2222,6 +2226,13 @@ def downloaded_models() -> list:
     return sorted(names)
 
 
+def require_model_bin(path: str, name: str) -> None:
+    """Refuse a repo that came back without model.bin: not a converted model (a PyTorch checkpoint, say)."""
+    if not os.path.isfile(os.path.join(path, "model.bin")):
+        raise ValueError(f"{name} is not a CTranslate2/faster-whisper model (no model.bin); convert it with "
+                         "ct2-transformers-converter or pick a *-ct2 / faster-whisper repo")
+
+
 def download_model_files(name: str) -> str:
     """Fetch the CTranslate2 files of `name` into MODELS_DIR (or find them there) and return the directory.
 
@@ -2234,9 +2245,7 @@ def download_model_files(name: str) -> str:
     from faster_whisper import download_model
 
     path = download_model(name, cache_dir=str(MODELS_DIR))
-    if not os.path.isfile(os.path.join(path, "model.bin")):
-        raise ValueError(f"{name} is not a CTranslate2/faster-whisper model (no model.bin); convert it with "
-                         "ct2-transformers-converter or pick a *-ct2 / faster-whisper repo")
+    require_model_bin(path, name)
     return path
 
 
@@ -2254,6 +2263,105 @@ def friendly_model_error(exc: BaseException, name: str) -> str:
         return f"could not reach Hugging Face to download '{name}'"
     lines = [line.strip() for line in msg.splitlines() if line.strip()]
     return (lines[-1] if lines else msg)[:200]
+
+
+# What --download-model says before the progress bars, by canonical name (the bars carry the exact
+# figures): the size of the converted weights on disk, which is also what the download moves.
+MODEL_SIZES = {
+    "large-v3": "about 3 GB", "large": "about 3 GB", "large-v2": "about 3 GB", "large-v1": "about 3 GB",
+    "large-v3-turbo": "about 1.6 GB", "medium": "about 1.5 GB", "distil-large-v3": "about 1.5 GB",
+    "small": "about 500 MB", "base": "about 150 MB", "tiny": "about 75 MB",
+}
+# The files of a converted model, the list faster_whisper.download_model() gives snapshot_download().
+MODEL_FILE_PATTERNS = ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*")
+
+
+def wait_for_thread(thread: threading.Thread) -> None:
+    """Join `thread` in half-second steps, so that Ctrl+C reaches the caller while it runs.
+
+    Python raises KeyboardInterrupt in the main thread alone, and on Windows only once a wait
+    returns: a plain join() there sits through the signal until the thread ends by itself.
+    """
+    while thread.is_alive():
+        thread.join(0.5)
+
+
+def run_download_model(name: str) -> int:
+    """--download-model NAME, what setup runs: fetch the model with progress bars and make it the default.
+
+    The same files download_model_files() fetches for a switch, but through huggingface_hub's
+    snapshot_download() directly, so that its own tqdm bars stay on (faster-whisper's
+    download_model() passes a disabled tqdm class) and the viewer watches model.bin arrive; on a
+    stdout that is no terminal there are simply no bars. Nothing here loads a model or touches
+    the GPU. Returns main()'s exit code: 0 with config.json naming the model for later starts,
+    else 2 with one line saying why not, the code run.cmd / run.sh end on rather than restart
+    (`run.cmd --download-model x` would otherwise try again every five seconds); Ctrl+C ends the
+    process from here with the same code.
+    """
+    if not valid_model_name(name):
+        print(f"'{name}' is {MODEL_NAME_HINT}")
+        return 2
+    try:
+        from faster_whisper import utils as fw_utils
+        from huggingface_hub import snapshot_download
+    except Exception as exc:  # noqa: BLE001
+        print(f"faster-whisper is not installed for {sys.executable} ({exc}); run setup first")
+        return 2
+    name = canonical_model_name(name)
+    sizes = dict(getattr(fw_utils, "_MODELS", None) or {})
+    repo_id = name if "/" in name else sizes.get(name)
+    if repo_id is None:
+        print(f"unknown model size '{name}': faster-whisper knows {', '.join(sizes) or 'no sizes at all'}; "
+              "a Hugging Face repo id is written owner/name")
+        return 2
+    # A size from faster-whisper's own table names a converted model that WhisperModel() fetches
+    # by itself, so the choice is kept before the download: a start after a failed or interrupted
+    # one then downloads this model, not the built-in default, as setup promises. A repo id is
+    # kept only once its files were seen, since a typo or a PyTorch checkpoint would make every
+    # later start exit 2; a size whose repo turns out that way is taken back again.
+    alias = name in sizes
+    previous = configured_model()
+    if alias:
+        write_config({"model": name})
+    print(f"Downloading {name} ({MODEL_SIZES.get(name, 'size unknown')}) into {MODELS_DIR} ...", flush=True)
+    # The download runs on a thread of its own, waited for in short steps, so that Ctrl+C is
+    # honoured at once: snapshot_download() fetches the files through a thread pool that joins its
+    # workers on the way out, and an interrupt raised inside it would only surface once the file
+    # being streamed (model.bin, minutes of it) is complete.
+    outcome: list = []  # the directory, or what snapshot_download() raised
+
+    def fetch() -> None:
+        try:
+            outcome.append(snapshot_download(repo_id, cache_dir=str(MODELS_DIR), allow_patterns=list(MODEL_FILE_PATTERNS)))
+        except BaseException as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    worker = threading.Thread(target=fetch, name="download-model", daemon=True)
+    worker.start()
+    try:
+        wait_for_thread(worker)
+    except KeyboardInterrupt:
+        print("\nDownload interrupted; run setup again to finish it")
+        # The pool is still streaming a file, and a normal exit would wait for it (the pool's
+        # workers are joined at interpreter shutdown): the process ends from here instead. The
+        # partial file stays behind as .incomplete, which the next download resumes.
+        for stream in (sys.stdout, sys.stderr):
+            stream.flush()
+        os._exit(2)
+    result = outcome[0]
+    try:
+        if isinstance(result, BaseException):
+            raise result
+        require_model_bin(result, name)
+    except Exception as exc:  # noqa: BLE001
+        if alias and not isinstance(result, BaseException):
+            write_config({"model": previous})  # the files came, but they are no model
+        print(f"Could not download {name}: {friendly_model_error(exc, name)}")
+        return 2
+    if not alias:
+        write_config({"model": name})
+    print(f"Model {name} is ready in {result}.")
+    return 0
 
 
 def load_model(args, name: Optional[str] = None, path: Optional[str] = None):
@@ -2368,6 +2476,58 @@ def hold_instance_lock(port: int) -> bool:
     return INSTANCE_LOCK is not None
 
 
+def read_config() -> dict:
+    """What setup wrote to config.json ({"model": ...}); {} without a file, or when it holds no JSON object.
+
+    Never raises: a file that cannot be read or parsed costs a warning and the built-in defaults.
+    """
+    try:
+        with open(CONFIG_PATH, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log.warning("Ignoring %s (%s)", CONFIG_PATH, exc)
+        return {}
+    if not isinstance(data, dict):
+        log.warning("Ignoring %s: not a JSON object", CONFIG_PATH)
+        return {}
+    return data
+
+
+def write_config(patch: dict) -> None:
+    """Merge `patch` into config.json (a None value drops its key), replaced in one step so that a crash never leaves it half written."""
+    data = read_config()
+    for key, value in patch.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, CONFIG_PATH)
+
+
+def configured_model():
+    """The model chosen at setup (config.json's "model"), or None; anything but a non-empty string is ignored."""
+    chosen = read_config().get("model")
+    return chosen if isinstance(chosen, str) and chosen else None
+
+
+def resolve_default_model(args):
+    """Fill in --model when the flag was not given: the model chosen at setup, else DEFAULT_MODEL.
+
+    Docker and Nix pass --model (WHISPER_MODEL) and never read config.json. Like the flag, the
+    configured name is not validated: it may be a folder, which is the operator's to name.
+    """
+    if not args.model:
+        args.model = configured_model() or DEFAULT_MODEL
+    return args
+
+
 def run_check() -> None:
     print(f"Python {sys.version.split()[0]} at {sys.executable}")
     print(f"Data directory: {APP_DIR}")
@@ -2397,7 +2557,9 @@ def run_check() -> None:
     if not any(runtimes.values()):
         print("WARNING: yt-dlp needs Node.js or Deno to download from YouTube.")
     models = sorted(p.name for p in MODELS_DIR.glob("models--*")) if MODELS_DIR.is_dir() else []
-    print("Downloaded models: " + (", ".join(models) if models else "none yet (downloaded on first start)"))
+    print("Downloaded models: " + (", ".join(models) if models else "none yet (setup or the first start downloads one)"))
+    chosen = configured_model()
+    print(f"Default model: {chosen or DEFAULT_MODEL} " + ("(chosen at setup)" if chosen else "(built-in default)"))
     # The native-messaging host behind the popup's "Start server" button lives next to this file;
     # loaded by path so a missing or broken native_host.py only costs this one line.
     try:
@@ -2415,7 +2577,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Shisu-ko: local Whisper transcription server for the Firefox extension")
     p.add_argument("--host", default="127.0.0.1", help="bind address (keep it local)")
     p.add_argument("--port", type=int, default=8790, help="default 8790 (8765 is left free for AnkiConnect)")
-    p.add_argument("--model", default="large-v3", help="faster-whisper model size or CTranslate2 repo, e.g. large-v3, large-v3-turbo, kotoba-tech/kotoba-whisper-v2.0-faster")
+    p.add_argument("--model", default=None, help="faster-whisper model size or CTranslate2 repo, e.g. large-v3, large-v3-turbo, kotoba-tech/kotoba-whisper-v2.0-faster (default: the model chosen at setup (config.json), else large-v3)")
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     p.add_argument("--compute-type", default="auto", help="float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU)")
     p.add_argument("--language", default="ja")
@@ -2437,8 +2599,9 @@ def parse_args(argv=None):
     p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--check", action="store_true", help="print environment diagnostics and exit")
+    p.add_argument("--download-model", metavar="NAME", help="download NAME now, showing progress, and make it the default model for later starts; used by setup")
     p.add_argument("--no-update", action="store_true", help="start without looking for a newer version first (run.cmd / run.sh skip server/update.py) and refuse the popup's Update button (POST /update answers 409), since the launcher would restart the server without updating")
-    return p.parse_args(argv)
+    return resolve_default_model(p.parse_args(argv))
 
 
 def main() -> None:
@@ -2461,6 +2624,8 @@ def main() -> None:
     if args.check:
         run_check()
         return
+    if getattr(args, "download_model", None) is not None:
+        sys.exit(run_download_model(args.download_model))
 
     if not hold_instance_lock(args.port):
         log.error("Another server is already starting or running on port %d (it holds %s). Stop it first.",
