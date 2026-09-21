@@ -132,6 +132,106 @@ Apply per segment, before `split_segment()`:
 6. Set `hallucination_silence_threshold=2.0` anyway — free, harmless, but expect little from it (see (b).3).
    `condition_on_previous_text=False` is already correct and should stay.
 
+### P0.3 — Sung lyrics (music videos, 歌枠)
+
+**Observation.** An anime opening (a 34 s Short, sung over music) came out with `cues: 0` and the whole video
+covered: Silero heard no speech at all (`speech: []`; 0 s at the 0.5 threshold, 2.7 s at 0.2), so nothing
+of it ever reached the decoder. Whisper without the VAD transcribes the same audio cleanly (four segments,
+`avg_logprob` −0.18, compression ratio 1.28); with the VAD at 0.2 it produced one garbled fragment. P0.1
+therefore has a blind spot: singing is not speech to the detector, and a music video stays blank.
+
+**Rule** (`wants_lyrics()`, `--lyrics auto`, the default): a window in which the detector heard less than
+`LYRICS_MAX_SPEECH_S` (1 s) of speech, whose samples have an RMS of at least `LYRICS_MIN_RMS` (0.02, about
+−34 dBFS), and in which Whisper's language head then hears the target language (`Transcriber.sung_in_target()`:
+the window's own samples, `LANGUAGE_DETECT_SECONDS` of them at a time, with probability at least
+`LANGUAGE_MIN_PROB`, 0.7), is transcribed with `vad_filter=False`, everything else unchanged. Sung windows
+measure 0.11–0.47, a timelapse's background music 0.015, room tone far less, so the RMS floor keeps quiet
+windows on the old path, where they cost nothing; the language verdict keeps loud non-speech there too (rain,
+a crowd, an engine, an English song under a montage: on the old path faster-whisper decodes nothing of a
+window Silero heard nothing in, while a full no-VAD decode of every such window would hand its inventions to
+the gates, and an English song came out as English lines in a Japanese track). The Short's two windows score
+`ja` 0.966 and 0.974 on the CPU, so sung Japanese clears the watch's own threshold. The verdict costs one
+encoder pass and is no vote: the language watch runs on the detector's intervals and casts none on such a
+window, and `sung_in_target()` never touches `language_vote()`, so a foreign song never pauses a video; it is
+asked whatever `--language-patience` says (it guards a decode, not the pause), and a head that raises leaves
+the window to the lyrics path, since a detector failure must never silence a video. Live streams take the
+same path. A 40 s window is longer than the head's 30 s, so a song that starts in a window's last ten
+seconds, after an instrumental intro, would be refused on the intro alone and those seconds covered blank for
+good: the head judges the window's first thirty seconds and, when those are refused, its last thirty, and
+either verdict for the target language sends the window to the lyrics path (a window sung throughout costs
+one pass, a refused one two).
+
+**A song beside the MC line.** `wants_lyrics()` judges a window whole, and the 歌枠 case has both in one
+window: the singer announces the song (a second or two of detected speech), then sings for the rest of it,
+which the detector hears nothing of. The window is talk to the rule, faster-whisper decodes the announcement
+alone, and the singing would be covered with nothing in it, up to `--window` seconds of it at every
+transition, the same at the song's end. So `process()` leaves the loud stretches of a talk window that the
+detector heard nothing in (`unsung_stretches()`: at least `LYRICS_MIN_STRETCH_S`, 4 s, about one sung line,
+no speech interval and no cue touching them, RMS over the floor) out of the covered range, and the planner
+brings each back as a window of its own, where the rule sees next to no speech and judges it alone. Only a
+window that the speech heard in it kept from the lyrics path: one the head refused is covered whole, or it
+would be planned for ever. Under the floor a stretch is a pause with music under it more often than a line,
+and each such window costs a Silero pass and an encoder pass for the head; a silent stretch costs nothing to
+cover and is covered.
+
+**Gates** (`lyrics_reason()`, in place of P0.2's; there is no VAD overlap to excuse a segment with):
+
+1. "empty" as in P0.2.
+2. "unsure": `no_speech_prob > LYRICS_MAX_NO_SPEECH` (0.9), or `avg_logprob < LYRICS_MIN_LOGPROB` (−0.8), or
+   the mean word probability under `LYRICS_MIN_WORD_PROB` (0.35). Measured on this machine's cached videos,
+   large-v3 int8 on the CPU: sung decode windows score `no_speech_prob` 0.07–0.42 as a rule, but a rap verse
+   scored 0.59 (fourteen lines, all right) and an eighteen-voice chorus 0.80 (千本桜, every line right), while
+   the one line made up over real background music (a drawing video's BGM) scored 0.47 and a sign-off over a
+   2.3 s instrumental outro 0.85. The decoder's own "not speech" probability is no judge of singing, so it only
+   refuses what the decoder is all but sure of (Whisper's own `no_speech_threshold` is 0.6 and acts only
+   together with a failed log-probability). `avg_logprob` separates better: sung windows −0.14 to −0.58, made-up
+   lines −0.49 to −0.91. The word probability catches garbled pieces (それられ at 0.30; genuine lines from 0.48).
+3. "anomaly": `is_segment_anomaly()` unconditionally (P0.2 applies it only under a low overlap). Cost: a very fast
+   sung line can fall to it (ないないない 止めらんないない…, three lines of one song in the sample).
+4. "repetition" as in P0.2.
+5. "blocklist": any phrase, unconditionally. This is what actually stops the instrumental case: over background
+   music Whisper's favourite invention is ご視聴ありがとうございました, at scores the other gates accept.
+
+**Cues.** The accepted segments stand in for the speech intervals (`lyrics_spans()`), in the detector's own
+shape: a segment's words are cut into runs at every gap of at least `pause_split` (0.45 s), and every run is
+padded by `speech_pad_ms` (0.2 s) on both sides, as Silero pads what it hears, so that the cue builder sees
+the breaths. Whole, unpadded segment spans hid them: the lead-out ate a breath under 0.8 s down to 0.1 s,
+`merge_segments()` then glued the two lines into one row (会いたくて震える夜空を見上げて, one sentence to Yomitan
+and to `cutFrom()`), and a pause inside a segment, two lines in one, which is the usual shape without the VAD
+filter, never split, so the second line was on screen seconds before it was sung. A stranded first word
+(`stranded_head()`: the anchoring artifact `repair_lead_words()` slides, a head of at most
+`LEAD_REPAIR_CHARS` characters followed by a gap of `LEAD_REPAIR_GAP`) starts no run: a span over it merged
+with the previous line's, the repair found the head in its interval already and moved nothing, and the line
+came on screen seconds early with the breath gone from the window's speech. Its run starts a pad before the
+next word, so the repair slides the head onto that onset. With this the lyrics path builds exactly the talk
+path's cues for the same words (`test_lyrics.py` checks it for breaths from 0.5 to 2 s, a pause inside a
+segment and a stranded head), and the spans are stored as the window's speech, so the sync's speech list and
+the cache carry the sung lines (`/clip` never reads `Session.speech`: it slices the audio by the times the
+client sends).
+
+**Result.** The Short gives its four lines (seven cues); the rap verse fifteen lines, the chorus six; a 40 s
+window of background music gives nothing. **Risk:** an instrumental window may still yield a made-up line the
+gates let through (a phrase off the blocklist with a plausible log-probability), so a music video may show a
+wrong line now and then where it used to show nothing; and a sung window the head is unsure of (a rap verse
+over loud music, a chorus, a window too short to judge well) stays blank. `--lyrics off` restores the old
+behaviour: such windows stay blank.
+
+**Caches from before the rule.** A record written without it (a 0.11.2 server, which wrote format 3 without
+the key, or `--lyrics off`) marked a sung stretch covered with nothing in it, and `load_cache()` would have
+read it as finished: the fix would never reach a video already watched. So `save_cache()` writes the rule the
+record was made under (`"lyrics"`), and `load_cache()` under `--lyrics auto` gives a format-3 record without
+`"lyrics": "auto"` its blank stretches back: `unheard_stretches()` lists the parts of `covered` that no speech
+interval and no cue touches, from 1.5 s (`plan_window()`'s own floor, so nothing unplannable is created) at
+either end of a covered range, where a video's music sits (an intro, an outro, the whole of a Short), and from
+`LYRICS_MIN_STRETCH_S` between two lines, as `process()` plans them for a fresh window, since the lead-out and
+the detector's padding turn every pause of a talk into a hole of a second or two and a window per pause would
+fetch, walk and rewrite every talk record dozens of times over; `subtract_intervals()` takes them out of
+`covered`, the cues and the rest stay, and a session no longer covered to the end is fetched again and planned
+over those stretches, where `wants_lyrics()` judges each window anew (a silent one costs a Silero pass and is
+covered again), and the first window walked writes the record with the key. A record from 0.11.0 or 0.11.1
+(format 2) never reaches the migration: the format check drops it whole, title kept, and the video is
+transcribed again, which also brings a music video its lines.
+
 ### P1 — Rewrite `split_segment()` as `build_cues(words, speech_intervals)` (complaint 2)
 
 Constants: `MIN_DUR 0.8`, `HARD_MIN_DUR 0.5`, `MAX_DUR 6.0`, `MAX_CHARS 26` (13 × 2 lines, Netflix JP),
@@ -233,7 +333,11 @@ Method, as (d) prescribed: `server/tools/dump_words.py` transcribes 40 s windows
 with the server's own `model.transcribe()` call and writes the raw segments and word timings to
 JSON; `server/tools/replay_cues.py` replays `build_window_cues()` over that JSON. Old and new are
 compared on **identical Whisper output**, so beam-search nondeterminism cannot swamp the effect.
-Three videos, ~45 minutes, chosen as the worst, a middling and the healthiest cache on disk.
+Three videos, ~45 minutes, chosen as the worst, a middling and the healthiest cache on disk. A
+window the server would take the lyrics path on (P0.3) is dumped as it decodes it, without the
+detector, and its record carries `"lyrics": true`; `replay_cues.py` then builds its cues on
+`lyrics_spans()` through the lyrics gates, as `process()` does, and counts those spans as the
+window's speech, so a change to the lyrics cue path is measured with the same rig.
 
 ### Three causes
 

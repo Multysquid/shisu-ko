@@ -67,13 +67,20 @@ class FakeSegment:
 
 
 def build(records, limits):
-    """Drive build_window_cues() window by window, deduping exactly as Transcriber.process does."""
+    """Drive build_window_cues() window by window, deduping exactly as Transcriber.process does.
+
+    A record dump_words.py marked `lyrics` was decoded without the detector: as process() does,
+    its segments go through the lyrics gates, and the spans of those that pass stand in for the
+    speech intervals, in the cues and in the speech list the metrics are measured against.
+    """
     cues, seg_id, speech, drops = [], 0, [], {}
     for record in records:
         offset, window_end = record["window"]
         segments = [FakeSegment(d, offset) for d in record["segments"]]
+        lyrics = bool(record.get("lyrics", False))
+        heard = server.lyrics_spans(segments, offset, limits) if lyrics else record["speech"]
         fresh, seg_id = server.build_window_cues(
-            segments, offset, record["speech"], limits, seg_id, drops, window_end)
+            segments, offset, heard, limits, seg_id, drops, window_end, lyrics)
         recent = cues[-80:]
         for cue in fresh:
             if any(server.cue_overlaps(cue, r) for r in recent):
@@ -81,7 +88,7 @@ def build(records, limits):
             cue["id"] = len(cues)
             cues.append(cue)
             recent.append(cue)
-        speech += record["speech"]
+        speech += [[max(a, offset), min(b, window_end)] for a, b in heard if min(b, window_end) > max(a, offset)]
     return cues, server.merge_intervals(speech), drops
 
 

@@ -116,7 +116,23 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
   file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
-  `load_cache()` brings them back from there after a switch back.
+  `load_cache()` brings them back from there after a switch back. A record carries `"lyrics"`,
+  the rule its covered ranges were made under (`--lyrics` as the server ran, see "How the server
+  schedules work"): a 0.11.2 server (format 3 without the key), or `--lyrics off`, marked a sung
+  stretch covered with nothing in it, so `load_cache()` under `--lyrics auto` gives a record
+  without `"lyrics": "auto"` its blank stretches back (`unheard_stretches()`: the parts of
+  `covered` that no speech interval and no cue touches, under two floors: 1.5 s, `plan_window()`'s
+  own floor, at either end of a covered range, where a video's music sits, and
+  `LYRICS_MIN_STRETCH_S` (4 s) between two heard things, `load_cache()` passing
+  `inner_seconds=LYRICS_MIN_STRETCH_S`, since every pause of a talk is a hole of a second or two
+  and a window per pause would fetch, walk and rewrite the record dozens of times over; taken
+  out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session, no
+  longer covered to its end, is fetched and planned again over them). `CACHE_FORMAT` is 3
+  (bumped by 0.11.2 for the cue geometry, see "How the server schedules work") and the format
+  check in `load_cache()` runs before this migration, so it reaches only a format-3 record
+  without the key: one written by 0.11.2, or by this version under `--lyrics off`. A format-2
+  record, from 0.11.0 or 0.11.1, is dropped whole by the format check and the video is
+  transcribed again from the start, which brings it under the lyrics rule as well.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
@@ -191,7 +207,84 @@ mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per s
 id would mis-group it. Cue caches are format 3; older caches are ignored, which is the only way a
 geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
-compare two cue builders on identical Whisper output; keep them working.
+compare two cue builders on identical Whisper output; keep them working (`retranscribe.py` wraps
+`build_window_cues()`, so its wrapper takes every argument, `lyrics` included; `dump_words.py`
+decides every window as `process()` does, `wants_lyrics()` and then `sung_in_target()` on an idle
+`App` like `retranscribe.py`'s, decodes a sung one without the detector and writes `"lyrics": true`
+into its record, its own `--lyrics off` sending every window through the detector; `replay_cues.py`
+passes a record's `lyrics` through, building on `lyrics_spans()` and the lyrics gates).
+
+Sung lyrics (P0.3 of the doc): singing over music is no speech to Silero, so `process()` decides
+`wants_lyrics()` after the detector and the language watch: with `--lyrics auto` (default; `off`
+is the switch), less than `LYRICS_MAX_SPEECH_S` (1 s) of detected speech in the window and an
+`rms()` of at least `LYRICS_MIN_RMS` (0.02), and then, that holding, a target-language verdict on
+the window from `Transcriber.sung_in_target()` (the language head over the window's own samples,
+`speech_samples(audio, [[start, end]], start)`, the window's first `LANGUAGE_DETECT_SECONDS` (30 s)
+and, when those are refused and the window is longer, its last 30 s, so a song starting after an
+instrumental intro in a window's last seconds is not refused on the intro alone: two encoder
+passes at most; `args.language` at `LANGUAGE_MIN_PROB` or more on either; asked whatever
+`--language-patience` says, since it guards a decode, not the pause; a head that raises
+sends the window down the lyrics path, since a detector failure must never silence a video, one
+that hears another language or is unsure leaves it with the detector, which decodes nothing of a
+window Silero heard nothing in: rain, a crowd, an English song under a montage stay blank), the
+window is transcribed with `vad_filter=False` and no `vad_parameters`, everything else as
+usual. `build_window_cues(..., lyrics=True)` then gates each
+segment with `lyrics_reason(seg, words)` instead of `hallucination_reason()`: "empty"; "unsure" for
+`no_speech_prob > LYRICS_MAX_NO_SPEECH` (0.9), `avg_logprob < LYRICS_MIN_LOGPROB` (-0.8) or a mean
+word probability under `LYRICS_MIN_WORD_PROB` (0.35); "anomaly" (`is_segment_anomaly()`, always);
+"repetition"; "blocklist" (any phrase, unconditionally, since no VAD evidence can rescue it). The
+thresholds are measured, not guessed, and the doc holds the numbers: a rap verse and an 18-voice
+chorus score `no_speech_prob` 0.59 and 0.80 with every line right, so that gate only refuses what
+the decoder is all but sure of. `lyrics_spans(segs, offset, limits)`, the padded word runs of the
+segments that pass, stands in for the speech intervals, in the detector's own shape: a segment's
+words are cut into runs at every gap of at least `pause_split`, every run is padded by
+`speech_pad_ms` on both sides, as Silero pads what it hears, so the cue builder sees the breaths
+(a whole, unpadded segment span hid them: the lead-out ate a breath, `merge_segments()` glued two
+lines into one row, and a pause inside a segment never split), and a stranded first word
+(`stranded_head()`: the anchoring artifact of `repair_lead_words()`, a head of at most
+`LEAD_REPAIR_CHARS` characters followed by a gap of `LEAD_REPAIR_GAP`) starts no run, its run
+beginning a pad before the next word, so the repair slides the head onto that onset as it does on
+the talk path. `process()` passes them as `speech` and stores them in `Session.speech`, so the
+sync's speech list and the cache carry the sung lines (nothing else reads them today; `/clip`
+slices the audio by the times the client sends); the log line gains ` [lyrics]`. A song shares a
+window with the line announcing it (a 歌枠's MC line): `wants_lyrics()` judges the window whole,
+the second of speech sends it the detector's way, and nothing of the singing is decoded, so
+`process()` leaves the `unsung_stretches()` of a talk window (loud, `rms()` at least
+`LYRICS_MIN_RMS`, unheard, `unheard_stretches()` of the window at `LYRICS_MIN_STRETCH_S`, 4 s,
+under both floors) out of `covered` when the window holds `LYRICS_MAX_SPEECH_S` or more of
+detected speech, and only then (a window the head refused, or `--lyrics off`, is covered whole,
+or it would be planned for ever); the planner brings each back as a window of its own, where the
+rule sees next to no speech and judges it alone, and the log line gains
+` [N s heard nothing in, planned again]`. `App.cache_record(s)` is the record `save_cache()`
+writes (`"lyrics"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
+`write_results()` writes the same. The language watch is untouched: without speech intervals it
+casts no vote, and the head's verdict in `sung_in_target()` never reaches `language_vote()`, so
+a foreign song never pauses a video. Live streams take the same path (a 歌枠 gets its lyrics).
+`server/tests/test_lyrics.py` (a fake model recording what `transcribe()` was asked for and a
+patched `detect_speech`, like `test_language.py`) covers `rms()` on silence and a tone, the
+decision (`wants_lyrics()`: no speech and loud, quiet, speech heard, `--lyrics off`), every gate
+of `lyrics_reason()` with scripted segments (a confident line passes; empty, unsure on each of
+the three scores, a repetition loop, a sign-off phrase, an anomaly rejected), `lyrics_spans()`
+(the padded runs, a segment cut at a pause, a stranded first word starting no run) and the cues
+`build_window_cues()` builds on a lyrics window (snapped to the segments, the lead-out into the
+gap, the `seg` ids; a breath between two sung lines keeping them apart, a pause inside a segment
+splitting the lines, a stranded first word slid onto its line), the four paths through
+`process()` with the recorded kwargs, a rejected line taking no segment id and no span, the log
+text, a lyrics window casting no language vote, the song after the MC line, the one before it
+and a bridge between two lines planned again rather than covered blank (`unsung_stretches()`;
+a short or quiet stretch staying covered, a window the head refused covered whole), the head's
+verdict (another language, an unsure head, the target language, a song starting in the last
+seconds of a long window, a raising head, asked whatever the patience, not asked for talk,
+silence or `--lyrics off`), a live stream, `subtract_intervals()`, `unheard_stretches()` (and
+its inner floor), `load_cache()` on a record from before the rule (a music video offered again,
+a talk video keeping its cues and giving back its blank stretch, a talk record giving back its
+long holes and its ends but not its pauses, a format-2 record dropped by the format check and
+not migrated, a record under the rule untouched, one written with `--lyrics off` offered again
+under `auto`, `--lyrics off` loading an old record untouched), `save_cache()` writing the rule
+and its own record reloading as covered, `parse_args(["--lyrics", "off"])`, `retranscribe.py`'s
+own `--lyrics` and its record of the cache shape, `replay_cues.py` taking a lyrics window
+through the lyrics gates, and `dump_words.py` deciding the lyrics path per window (with
+`faster_whisper` faked in `sys.modules`) and marking the record.
 
 Language watch: when `--language-patience` is above 0 (default 60) every window's speech-only
 samples (`speech_samples()`, capped at 30 s) go through `model.detect_language()` before
@@ -349,7 +442,18 @@ real answer brings the verdict back. An ad does not hand the right on: `/sync` k
 through it (see "Gotchas"), so the watched tab keeps asking and keeps the right for the ad's
 length. `statusText()` in `content.js` (pure, tested) shows standby and the language pause even
 with `showStatus` off, since they are the only answer to "why is nothing appearing?"; neither is
-styled as an error.
+styled as an error. In the `ready` case it shows `No speech found in this video` only when the
+covered range the playhead sits in runs from the start of the video (`view.coveredFrom <= 0.5`:
+the first window opens half a second before the playhead, and a video resumed near its end gets
+one window from there on and nothing before it, the server never planning backwards) to its end
+(`ahead >= view.duration - 1`, the done reading) with `view.duration > 0` and
+`view.cueCount === 0` (a silent clip, an instrumental), never for `view.live`, whose cues keep
+coming; `updateStatus()` passes `cueCount: state.cues.length`, `coveredFrom` (the range's start,
+null outside every range) and `live: state.live || state.serverLive` in the view, the latter
+read from the `/sync` answer's `live` key (the player's own API says live only in Firefox, and
+not through an ad; an older server sends no key and the flag stays as it was). It is a progress
+message like "Transcribing…", not an error, and obeys `showStatus`;
+`addon/tests/content.test.js` covers it beside the other `statusText()` cases.
 
 ## How automatic mining works
 
@@ -573,35 +677,64 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   じゃ, もん …: a card for one would paint every line); duplicates merged (`mergeStatus`, the
   first non-null pitch). Returns a frozen `{size, exact, stems, heads, maxLen, maxStemLen}`:
   `exact` Map word -> `{word, status, pitch, bounded}` (`bounded` for a word without kanji or
-  katakana, which must end at a word boundary, else ある is found in あるいは); `stems` Map stem ->
-  `[{entry, kind}]` from `stemOf()`, only for words holding a kanji or katakana (a kana-only verb
-  matches exactly only): `する` with length >= 3 -> kind `suru`; else, with length >= 2, a last
-  `い` -> `i-adj`, `る` -> `ru` (ichidan or godan, unknown), one of うくぐすつぬぶむ -> that kana;
-  anything else has no stem. `heads` is the set of first characters, so a position whose
-  character starts no word costs nothing.
+  katakana, which must end at a word boundary in every form, else ある is found in あるいは);
+  `stems` Map stem -> `[{entry, kind}]` from `stemOf()`: a stem of at least one character for a
+  word holding a kanji or katakana, of at least two for a kana-only word (かける -> かけ, しまう
+  -> しま, おいしい -> おいし; いう, する, くる, みる, いい stay exact: a stem of one kana would be
+  found in every line): `する` beyond the stem -> kind `suru` (こする, with two kana to spare, is
+  a る verb); else a last `い` -> `i-adj`, `る` -> `ru` (ichidan or godan, unknown), one of
+  うくぐすつぬぶむ -> that kana; anything else has no stem, and neither has a kana-only word
+  whose stem is itself in `PARTICLES` (から of からい, なら of ならう, しか of しかる): it matches
+  exactly only, since からかった would else be からい's かっ + た (the kanji twin 辛い keeps its
+  stem). `heads` is the set of first characters, so a position whose character starts no word
+  costs nothing.
 - `wordStarts(text)`: the indices where a word may begin, `Intl.Segmenter("ja", {granularity:
   "word"})` segment starts (the instance cached) plus 0; every index without a segmenter or on
   any error; it never throws. ICU keeps a compound in one segment (日本語, あるいは, 見せかけ).
 - `markWords(text, index, starts)` -> runs `[{text, status, pitch}]` covering the text in order,
   unmatched characters joined into one run with nulls. Left to right; only a position in `starts`
   (an iterable, `wordStarts(text)` by default) whose character is in `heads` is tried; after a
-  match `i` jumps to its end (no overlaps). `matchAt()` takes the longest span, the exact word on
-  a tie: exact words longest first (`bounded` ones must end at a boundary or the end of the text,
+  match `i` jumps to its end (no overlaps). The boundaries it goes by are `boundsOf(text,
+  starts)`: `starts` plus the index after a て or で at a start that ICU fused with the く of the
+  auxiliary behind it (`TE_FORM`: 食|べ|てく|れ|た, 書|い|てく|れ|た, かけ|てく|れ|た; not
+  読|んで|く|れ|た, which it cuts), where くれる begins and かけて ends; `starts` itself is never
+  written (the content script keeps it per cue), the set is copied when there is something to
+  add. `matchAt()` takes the longest span, the exact word on
+  a tie, and a kana-only (`bounded`) exact word over a form of itself that adds particles alone
+  (`particlesOnly()`: a walk over `particleLens()` from the word's end to the form's), so a kana
+  noun ending in a verb's kana (いくつ, きょう, けっこう, ふつう, ほんとう, whose stem is in the
+  tables) ends before its copula and carries no です in its pitch overbar (いくつ|です|か, the
+  copula a particle of its own with the status), a kana verb's んだ / でしょう being coloured by
+  the particle chain instead (わかる|ん|だ, おいしい|です), while a form that adds more than
+  particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is one
+  run): exact words longest first (`bounded` ones must end at a boundary or the end of the text,
   the others anywhere `endsWord()` admits: the end, a boundary, or not right before a kanji,
   katakana or ー, so 関 is not coloured in 関係, 飲み not in 飲み物, while 見た ends before 犬 and
   電話 before 番号); then every stem length from `maxStemLen` down, `continuationEnd()` giving the
-  furthest end `endsWord()` admits. Its rules:
-  - The bare stem counts for `suru` (勉強 in 勉強が) and for `ru` when the stem ends in an i-row or
-    e-row kana (`IE_ROW`) at a boundary (the ichidan 連用形 is the noun: 食べ in 食べに行く, 助け,
-    考え, 流れ); a stem ending in a kanji (走, 見) or the a-row (当た, 変わ: a godan verb, whose noun
-    is its り piece, found through the tables) is no form, and nothing ends inside a compound ICU
+  furthest end `endsWord()` admits, or, for a `bounded` entry, one at a boundary or where
+  `boundedEnd()` admits: inside the segment ICU made of the form's ending and the particle
+  after it (わか|っ|たよ, かけ|たよ, でき|ますよ, ちがい|ますよ: the segment holding the end must
+  begin after the form's start and what remains of it must be a particle, which then takes the
+  colour), while the exact bounded word, having no ending to be fused, still ends at a boundary
+  only (ことば, あいだ, はなし and こんにちは with こと, あい, はな and こんにち in the deck stay
+  plain, and so does はし in ICU's は|しか). ICU cuts a kana run it does not know into single
+  kana (い|れ|ば, かけ|ら, し|まっ|た), so かけて in 話し|かけ|て|いただく, しまった and わかった are
+  found and いれば is not いれる (ば is no first piece). Its rules:
+  - The bare stem counts for `suru` (勉強 in 勉強が; a bounded `suru` entry keeps it at a boundary
+    too, びっくり in びっくり|だ) and for `ru` when the stem ends in an i-row or e-row kana
+    (`IE_ROW`) at a boundary (the ichidan 連用形 is the noun: 食べ in 食べに行く, 助け, 考え, 流れ),
+    for `ru` never for a `bounded` entry (かけ in かけ|ら, いれ in い|れ|ば would be nouns at every
+    cut); a stem ending in a kanji (走, 見) or the a-row (当た, 変わ: a godan verb, whose noun is
+    its り piece, found through the tables) is no form, and nothing ends inside a compound ICU
     holds together (見せ in 見せかけ, 当た in 当たり前).
   - Otherwise a first piece from `FIRST_PIECES[kind]` must follow (`suru`: する し さ せ す すれ;
     `i-adj`: い く かっ けれ さ そう くて くない ければ; `ru`: る た て ない … られ させ よう れば ろ よ
     ず ん ら り れ っ なかっ なけれ, the ichidan stem being the 連用形; the godan rows わいうえおっ,
     かきくけこいっ, がぎぐげごい, さしすせそ, たちつてとっ, なにぬねのん, ばびぶべぼん, まみむめもん),
     so 走 in 走者 is not 走る. 行く's い is skipped (`text[pos - 1] === "行"`): its 音便 is っ alone,
-    and 行い, 行います, 行いたい are 行う's.
+    and 行い, 行います, 行いたい are 行う's; and っ is admitted after 行 alone, since every other く
+    verb takes い (歩いた, 書いた), so its っ is another word's: あるって is ある and the quotative
+    って, not あるく's, and はたらって, 書って are no forms.
   - `tailEnds()` then consumes up to `MAX_TAILS` (5) pieces of `TAIL_PIECES` (た て で だ ない …
     ます まし ませ ん たい … れる られる せる させる ば う よう ろ る い けれ ず ちゃ じゃ てる でる てい
     でい いる いた いて います いない ましょ でし でしょ です たら だら たり だり ても でも ながら なさい
@@ -630,15 +763,90 @@ marks the words of every line. Everything in words.js is pure, without DOM.
     without う before punctuation), 行かねば / 行かぬ, 書いといて / 読んどいて (とく is a tail, とい is
     not, and 書い alone is no form) and 書きそう / 話しそう (そう is a first piece of the ichidan and
     adjective tables, not a tail) are not matched; 〜てもらう is 食べて + もらう (もらう is no tail,
-    unlike いただく).
+    unlike いただく). Of the kana verbs: はいた (はいる, but also 吐いた and 履いた) and わかれ (わかる,
+    but also 別れ) are homographs the matcher colours; からいよ (ICU から|いよ: the exact word at
+    no boundary) and the くれた of 見てくれた (ICU's noun 見てくれ) stay plain; かけたらしい and
+    かけたくさん (ICU かけ|たらしい, かけ|たくさん) stay plain, since らしい and くさん are no
+    particles and `NOT_BEFORE` keeps た from ending the form before them.
   - It stays linear-ish: Maps keyed by the substring, never a loop over the deck per position.
+- Three things take a colour without being a deck word, so that a line reads in whole pieces
+  (ちょうどこのお風呂の中で with 風呂 and 中 in the deck is `[ちょうど][この][お風呂の][中で]`, not
+  `お[風呂]の[中]で`; 視聴者の方に話しかけていただくっていうね is `[視聴者の][方に][話しかけて
+  いただくって][いう][ね]`). Each is a run of its own with the word's `status` and `pitch` null;
+  content.js draws every run, and adjacent runs of one status stay separate. A word with a
+  pitch and no status has no colour to run on: what would take it is plain text.
+  - An honorific prefix (`HONORIFICS`: お, ご) joins the word it fronts: at a start `i` whose
+    character is one AND `starts.has(i + 1)` (ICU cut the prefix off: お|風呂, ご|家族, お|仕事; it
+    keeps お茶, お前, お金, ご飯, お母さん whole, so those are never tried and 前 never colours
+    お前), when no word matches at `i`, the match is tried at `i + 1`; on a hit the prefix's run
+    comes before the word's.
+  - The particles after a word take its colour (`particlesAt()`, handed `wordAt`): entries of
+    `PARTICLES` in a row (`particleLens()`: `particleShapes()` less what `PARTICLE_NOT_BEFORE`
+    refuses, longest first), each ending at a word boundary (には in 本|に|は, で in 中|で, です
+    in 学生|です; not に in 猫|にんじん, not と in 食べる|という: the boundary is the whole test,
+    and ICU's word list decides where one is) or, one kana long, right before the い of いる
+    (`iruAt()`: a single い before a boundary and one of `IRU_ENDINGS`, た て ない なかっ なく ます
+    まし ませ る れば よう たい, is a word to the particle before it, 猫|も|い|た, 猫|に|い|て, and a
+    one-kana particle ICU fused with that い, 猫|がい|た, 猫|はい|て, 猫|とい|た, 猫|がい|れ|ば, is
+    a shape although it ends at no boundary; not before an い that ends the text, 猫|がい, or that
+    is followed by anything else, 猫|はい|、), the chain reaching furthest of those that a word
+    follows (`wordFollows()`: the end of the text, anything but hiragana, a piece in a particle's
+    shape, the い of いる, or a segment of two kana or more not ending in っ; or a deck word,
+    `wordAt`, with or without an honorific or quotative in front, の in 私|の|お|風呂, which also
+    ends the chain: かもしれない in the deck, in 猫|かも|し|れ|ない) or that end in one of
+    `PARTICLES_ONLY` (を, へ: no word begins with them, so they are taken whatever follows,
+    猫|を|み|た, 猫|を|た|べた, 猫|へ|い|っ|た; not は, since はいる, はしる, はなす and はじめる are
+    common kana verbs), cut to `PARTICLE_CHAIN_MAX` (3): 本にはねよな takes には, ね and よ, and
+    the walk stops there too, at `PARTICLE_MAX_LEN ** PARTICLE_CHAIN_MAX` nodes at most (a line
+    of alternating particles, 猫のにのに…, used to cost 2 ** n). That
+    rule answers ICU's habit of cutting a kana verb it does not know into single kana, the first
+    of which is a particle as often as not (猫|が|で|た, 猫|に|も|ら|っ|た, 猫|は|よ|か|っ|た,
+    食|べ|て|し|まっ|た): a particle before a single kana that is no particle is not taken
+    (猫|が|す|わっ|た colours nothing past 猫), and `PARTICLE_NOT_BEFORE` refuses the particles a
+    following kana makes such a verb of (なら before ない/なく/なかっ/なけれ/ん: ならない; で before
+    て/た: 出る; な before に/れ/っ/る/で: 何, なる, 撫でる; ね before て/た: 寝る; よ before か/ん:
+    よかった, 呼んだ; の before ん: 飲んだ; や before っ: やる; し before ま/れ/て/た: しまう, しれない,
+    する; も before ら/て: もらう, もてる; か before っ/え: 買う, 帰る; と before っ: 取る), a refused
+    piece counting as a word for the particle before it, so が is taken in 猫がでた and 猫がでてきた,
+    に in 猫にもらった (never にも), は in 猫はねた and 猫はよかった, かも in 猫かもしれない, and で,
+    も, ね, よ and し are not. 〜といて, the contracted ておいて, colours the と with the verb
+    (勉強せんといて: ICU cuts 勉強|せん|とい|て, and と before the い of いる is a particle's shape;
+    いて after it is いる to the matcher). A particle after an uncoloured word stays plain.
+    Without a segmenter every segment is one kana, so a particle is then taken at the end of the
+    text, before anything but hiragana, before another particle or before the い of いる only.
+    Known gap: a verb cut into a particle and two kana or more takes the particle (猫|が|に|げた
+    colours に, 猫|を|さ|が|した さ and が).
+  - A quotative (`QUOTATIVES`: って, と, longest first) may front いう, and いう alone
+    (`QUOTED_WORD`), inside one segment: ICU keeps っていう and という (彼|という|人) whole, so
+    いう never begins a segment, while it cuts って off every other word (って|こと, って|もの)
+    and keeps ところ, とおる, とまる and とくに whole because they are words of their own, so
+    those stay plain with ころ, おる, まる or くに in the deck. At a start `i` holding one, when
+    no word matches at `i`, the match is tried at `i + prefix.length` and taken only when it is
+    いう and ends at a boundary or the text end, so いう is found in っていう / という and not in
+    そういう or といった. The quotative takes the status of the run that ends at `i` (って after
+    話しかけていただく, と after 猫), else it stays plain (彼と | いう).
 - Tests: `addon/tests/words.test.js` covers every function above: the field readers and their
   bounds (a passage, a field of `<` never closed), `moraCount`, `parsePitch` in each form and its
   mora sources, `pitchOf` (the named field, the fallback, the sentence reading skipped, a graph
   field before a position field), `statusOf` and `mergeStatus`, `buildIndex` (trimming, the
-  particles, the stems), `wordStarts` with Node's ICU, and the matcher rule by rule with explicit
-  `starts` sets: the examples above, the tails, `AFTER`, `OPEN_TAILS`, `NEXT`, `NOT_BEFORE`, the
-  compounds, the bare stems, the particles and auxiliaries, and a long line against a large deck.
+  particles, the stems, the kana-only stems of two kana at least), `wordStarts` with Node's ICU,
+  and the matcher rule by rule with explicit `starts` sets mirroring ICU and once more with the
+  real `wordStarts`: the examples above, the tails, `AFTER`, `OPEN_TAILS`, `NEXT`, `NOT_BEFORE`,
+  the compounds, the bare stems, the particles and auxiliaries, the two lines of the viewer
+  exactly as wanted, the honorific prefix (お茶 / お前 with 茶 / 前 stay plain, お茶 with お茶,
+  ご|家族, a status-less word's prefix), the particle chain (本には, 本からは, the fourth staying
+  plain, a particle after a plain word, に in にほん as one segment, the cut-up verbs, the
+  `PARTICLE_NOT_BEFORE` pieces, a deck word winning, no segmenter, the particle before a word
+  with an honorific prefix, を and へ whatever follows them and が before the い of いる, a line
+  of alternating particles staying quick), いう in という and っていう and not in そういう (and
+  ところ, とおる, とまる, とくに staying plain), the kana-only stems with their guards (いれば,
+  かけら, かけに行く, the one-kana stems staying exact), a kana verb's form ending inside the
+  segment ICU made of its ending and a particle (and the exact bounded word not), くれる after
+  the て ICU fused with its く (the caller's `starts` left as it was), a kana word whose stem is
+  a particle getting no forms, the っ of a く verb admitted after 行 alone (あるって, はたらって
+  and 書って staying plain, あるいて, 書いた and 行った found), a kana word found whole winning
+  over a form of it that adds particles alone (いくつ|です|か, きょう|です, わかる|ん|だ, わかるまい
+  and 食べるでしょう as one run), and a long line against a large deck.
 
 ### The background index (`addon/background.js`, "word colours" section)
 
@@ -1090,6 +1298,10 @@ then `server\run.cmd [options]`.
 Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
 Diagnostics: `server\run.cmd --check` (also says whether the Start button's launcher is registered
 and which model a bare start runs).
+Music videos: `--lyrics auto` (default) transcribes a window the speech detector hears next to
+nothing in (under `LYRICS_MAX_SPEECH_S`, 1 s) without the detector when its audio is not silent
+and the language head hears the target language in it; `--lyrics off` transcribes such windows
+with the detector as before. `retranscribe.py` takes the same switch.
 Model download with a progress bar, what setup runs after the check: `server.py --download-model
 NAME` (`run_download_model()`: validates the name like `/sync` does, resolves the alias,
 `huggingface_hub.snapshot_download()` with faster-whisper's five file patterns and its own tqdm

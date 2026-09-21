@@ -32,6 +32,55 @@ const SHISUKO_WORDS = (() => {
     "だ", "だった", "だろう", "だろ", "です", "でした", "でしょう", "でしょ", "ます", "ません", "ました", "ない", "たい", "ん",
     "じゃ", "じゃん", "もん",
   ]);
+  const PARTICLE_MAX_LEN = Math.max(...[...PARTICLES].map((piece) => piece.length));
+  // A particle takes the colour of the word it attaches to (お風呂の, 中で, 学生です), up to this
+  // many in a row (本にはね: には and ね).
+  const PARTICLE_CHAIN_MAX = 3;
+  // What a particle is not taken before: the kana that makes it the start of a verb ICU has cut
+  // into single kana instead (猫|が|で|た, 猫|に|も|ら|っ|た, 猫|は|よ|か|っ|た), the common ones.
+  // なら before ない, なく, なかっ, なけれ or ん is なる's negative (猫にならない), not the
+  // conditional; で before て or た is 出る; な before に is 何, before れ, っ or る it is なる and
+  // before で 撫でる; ね before て or た is 寝る; よ before か is よかった and before ん 呼んだ; の
+  // before ん is 飲んだ (and のんびり); や before っ is やる; し before ま, れ, て or た is しまう,
+  // しれない and する; も before ら is もらう and before て もてる; か before っ or え is 買う and
+  // 帰る; と before っ is 取る.
+  const PARTICLE_NOT_BEFORE = {
+    なら: ["ない", "なく", "なかっ", "なけれ", "ん"],
+    で: ["て", "た"],
+    な: ["に", "れ", "っ", "る", "で"],
+    ね: ["て", "た"],
+    よ: ["か", "ん"],
+    の: ["ん"],
+    や: ["っ"],
+    し: ["ま", "れ", "て", "た"],
+    も: ["ら", "て"],
+    か: ["っ", "え"],
+    と: ["っ"],
+  };
+  // The particles no word begins with: を and へ are taken whatever kana follows them (猫|を|み|た,
+  // 猫|を|た|べた), where が, で or も would be the first kana of a verb as often as not. Not は:
+  // はいる, はしる, はなす and はじめる are common kana verbs.
+  const PARTICLES_ONLY = new Set(["を", "へ"]);
+  // The endings of いる that follow its い in a segment of their own: a single い before one of
+  // them is いる (猫|も|い|た, 猫|に|い|て), a word for the particle before it, and so is the い ICU
+  // fused with a one-kana particle (猫|がい|た, 猫|はい|て, 猫|とい|た, 猫|がい|ない, 猫|がい|ます,
+  // 猫|がい|れ|ば: がい, はい and とい are words to it), where the particle ends at no boundary.
+  const IRU_ENDINGS = ["た", "て", "ない", "なかっ", "なく", "ます", "まし", "ませ", "る", "れば", "よう", "たい"];
+  // The て or で of a て-form ICU fuses with the く of the auxiliary after it (食|べ|てく|れ|た,
+  // 書|い|てく|れ|た, かけ|てく|れ; not 読|んで|く|れ|た or 言|って|く|れ|た, which it cuts), so that
+  // くれる never begins a segment there and かけて ends inside one: the index after such a て is
+  // a boundary too.
+  const TE_FORM = new Set(["て", "で"]);
+  // The honorific prefixes ICU cuts off the word they front (お|風呂, ご|家族, お|仕事): the prefix
+  // takes the word's colour. It keeps お茶, お前, お金, ご飯 and お母さん whole, and those are words
+  // of their own, so 前 in a deck never colours お前.
+  const HONORIFICS = new Set(["お", "ご"]);
+  // The quotative pieces ICU keeps in one segment with いう (という, っていう, 彼|という|人), so
+  // that いう never begins a segment: いう may begin right after one. Longest first. Only いう:
+  // ICU cuts って off every other word (って|こと, って|もの) and keeps ところ, とおる, とまる and
+  // とくに whole because they are words of their own, so ころ in a deck never colours ところ.
+  const QUOTATIVES = ["って", "と"];
+  const QUOTED_WORD = "いう";
   // The regexes below scan a line from every character when no bracket follows, so a passage in
   // the word field would cost its length squared. A line this long holds no word (the index drops
   // any over MAX_WORD_LEN, furigana brackets included), and a reading field this long is no
@@ -302,11 +351,12 @@ const SHISUKO_WORDS = (() => {
 
   // ------------------------------------------------------------ the matcher
 
-  // Conjugation tables. A dictionary form with a kanji or katakana in it is cut before its ending
-  // and remembered by that stem; in the text, the stem must be followed by a first piece of its
-  // kind (the inflected ending) and then by any run of tail pieces (auxiliaries), so 食べる finds
-  // 食べました and 書く finds 書かない. Kana-only verbs match exactly only: a stem of one or two
-  // kana would be found in every line.
+  // Conjugation tables. A dictionary form is cut before its ending and remembered by that stem;
+  // in the text, the stem must be followed by a first piece of its kind (the inflected ending)
+  // and then by any run of tail pieces (auxiliaries), so 食べる finds 食べました and 書く finds
+  // 書かない. A kana-only word needs a stem of two kana at least (かける, しまう, おいしい; いう,
+  // する, くる, みる and いい match exactly only: a stem of one kana would be found in every line)
+  // and, like its exact form, must end at a word boundary.
   const FIRST_PIECES = {
     suru: ["する", "し", "さ", "せ", "す", "すれ"],
     "i-adj": ["い", "く", "かっ", "けれ", "さ", "そう", "くて", "くない", "ければ"],
@@ -445,9 +495,17 @@ const SHISUKO_WORDS = (() => {
   const TAIL = table(TAIL_PIECES);
 
   function stemOf(word) {
-    if (!hasKanjiOrKatakana(word)) return null;
-    if (word.length >= 3 && word.endsWith("する")) return { stem: word.slice(0, -2), kind: "suru" };
-    if (word.length < 2) return null;
+    const least = hasKanjiOrKatakana(word) ? 1 : 2;
+    const found = cutStem(word, least);
+    // A kana stem that is a particle gets no forms: からかった would be からい's かっ + た, and no
+    // form of an adjective or verb in speech begins with から, なら, かな or しか (習う, 叶う and
+    // 叱る written in kana match exactly only).
+    return found && PARTICLES.has(found.stem) ? null : found;
+  }
+
+  function cutStem(word, least) {
+    if (word.length >= least + 2 && word.endsWith("する")) return { stem: word.slice(0, -2), kind: "suru" };
+    if (word.length < least + 1) return null;
     const last = word.slice(-1);
     if (last === "い") return { stem: word.slice(0, -1), kind: "i-adj" };
     if (last === "る") return { stem: word.slice(0, -1), kind: "ru" };
@@ -540,12 +598,31 @@ const SHISUKO_WORDS = (() => {
     }
   }
 
+  // Whether `stop` is the end of the text or a word boundary.
+  function atBoundary(text, stop, starts) {
+    return stop === text.length || starts.has(stop);
+  }
+
+  // Where a form of a bounded word beginning at `from` may end: at a boundary, or inside the
+  // segment ICU made of the form's ending and the particle after it (わか|っ|たよ, かけ|たよ,
+  // でき|ますよ, ちがい|ますよ: the ending never ends at a boundary there), that is when the
+  // segment holding `stop` begins after `from` and what remains of it is a particle. A segment
+  // beginning at `from` is no such fusion: ことば, あいだ, はなし and こんにちは are one segment
+  // with こと, あい, はな and こんにち, and a card for one of those paints none of them. The exact
+  // word has no ending to be fused and ends at a boundary only (はし in は|しか, as ICU cuts it).
+  function boundedEnd(text, from, stop, starts) {
+    if (atBoundary(text, stop, starts)) return true;
+    let seg = stop;
+    while (seg > from && !starts.has(seg)) seg--;
+    return seg > from && particleShapes(text, stop, starts).length > 0;
+  }
+
   // Whether a span may end at `stop`: at the end of the text, at a word boundary, or before
   // anything but a kanji, katakana or ー. ICU keeps a compound in one segment, so 関 is not
   // coloured in 関係, 飲み not in 飲み物 and 日本 not in 日本語, while 見た may end before 犬
   // (見|た|犬) and 電話 before 番号 (電話|番号).
   function endsWord(text, stop, starts) {
-    if (stop === text.length || starts.has(stop)) return true;
+    if (atBoundary(text, stop, starts)) return true;
     return !KANJI_OR_KATAKANA_NEXT.test(text.slice(stop, stop + 2));
   }
 
@@ -556,24 +633,37 @@ const SHISUKO_WORDS = (() => {
   // The boundary keeps it out of a compound ICU holds together (見せ in 見せかけ, 生き in 生きがい);
   // a godan る verb's stem ends in the a-row (当た, 変わ) and is no form (its noun is the り piece,
   // 当たり, found through the tables like 話し and 動き); every other kind needs its first piece,
-  // since a bare stem ending in a kanji is another word (走 in 走者, 見 in 見物).
-  function continuationEnd(text, pos, kind, starts) {
+  // since a bare stem ending in a kanji is another word (走 in 走者, 見 in 見物). A `bounded`
+  // entry (a kana-only word, beginning at `from`) gets no bare `ru` stem (its `suru` noun stays,
+  // at a boundary: びっくり in びっくり|だ), and its forms end where boundedEnd() admits: ICU cuts
+  // a kana run it does not know into single kana (い|れ|ば, かけ|ら), where かけ would be かける's
+  // noun and いれ いれる's at every such cut.
+  function continuationEnd(text, from, pos, kind, starts, bounded) {
     const first = FIRST[kind];
     const ends = new Set();
-    if (kind === "suru" || (kind === "ru" && IE_ROW.test(text[pos - 1]) && (pos === text.length || starts.has(pos)))) ends.add(pos);
+    if (kind === "suru" || (kind === "ru" && !bounded && IE_ROW.test(text[pos - 1]) && atBoundary(text, pos, starts))) ends.add(pos);
     for (let len = Math.min(first.maxLen, text.length - pos); len >= 1; len--) {
       const piece = text.slice(pos, pos + len);
       if (!first.pieces.has(piece)) continue;
-      // 行く is the one く verb whose 音便 is っ alone (行った): 行い is 行う's (行いたい, 行いました).
+      // 行く is the one く verb whose 音便 is っ alone (行った): 行い is 行う's (行いたい, 行いました),
+      // and every other く verb takes い (歩いた, 書いた), so its っ is another word's (あるって is
+      // ある and the quotative って, not あるく's; はたらって is no form).
       if (piece === "い" && kind === "く" && text[pos - 1] === "行") continue;
+      if (piece === "っ" && kind === "く" && text[pos - 1] !== "行") continue;
       tailEnds(text, pos + len, firstRole(kind, piece), MAX_TAILS, ends);
     }
     let best = -1;
-    for (const end of ends) if (end > best && endsWord(text, end, starts)) best = end;
+    for (const end of ends) if (end > best && (bounded ? boundedEnd(text, from, end, starts) : endsWord(text, end, starts))) best = end;
     return best;
   }
 
-  // The longest word found at `i`; on a tie the exact word beats a conjugation.
+  // The longest word found at `i`; on a tie the exact word beats a conjugation. A kana-only word
+  // found whole also beats a form of itself that adds particles alone (the form is then the word
+  // and its tails: です, でしょう, んだ): a kana noun ending in a verb's kana has a stem to the
+  // tables (いくつ, きょう, けっこう, ふつう, ほんとう), and its copula would else join its run and
+  // carry its pitch overbar (いくつです), while a kana verb loses nothing, since the particles
+  // after its dictionary form take its colour as a chain (わかる|ん|だ, おいしい|です), as after
+  // a する verb's noun (勉強|です). A kanji word keeps the form (食べるでしょう is one run).
   function matchAt(text, i, index, starts) {
     const remaining = text.length - i;
     let end = i;
@@ -582,27 +672,140 @@ const SHISUKO_WORDS = (() => {
       const entry = index.exact.get(text.slice(i, i + len));
       if (!entry) continue;
       const stop = i + len;
-      if (entry.bounded ? stop !== text.length && !starts.has(stop) : !endsWord(text, stop, starts)) continue;
+      if (entry.bounded ? !atBoundary(text, stop, starts) : !endsWord(text, stop, starts)) continue;
       end = stop;
       found = entry;
       break;
     }
+    const exact = found;
+    const exactEnd = end;
     for (let len = Math.min(index.maxStemLen, remaining); len >= 1; len--) {
       const list = index.stems.get(text.slice(i, i + len));
       if (!list) continue;
       for (const { entry, kind } of list) {
-        const stop = continuationEnd(text, i + len, kind, starts);
-        if (stop > end) {
-          end = stop;
-          found = entry;
-        }
+        const stop = continuationEnd(text, i, i + len, kind, starts, entry.bounded);
+        if (stop <= end) continue;
+        if (entry === exact && entry.bounded && particlesOnly(text, exactEnd, stop, starts)) continue;
+        end = stop;
+        found = entry;
       }
     }
     return found ? { end, entry: found } : null;
   }
 
+  // Whether `at` holds the い of いる: い, then a boundary and one of IRU_ENDINGS.
+  function iruAt(text, at, starts) {
+    return text[at] === "い" && starts.has(at + 1) && IRU_ENDINGS.some((piece) => text.startsWith(piece, at + 1));
+  }
+
+  // The lengths of the pieces in a particle's shape at `pos`, longest first: the entries of
+  // PARTICLES there that end at a word boundary (には and に in 本|に|は, で in 中|で; not に in
+  // 猫|にんじん, not と in 食べる|という) or, one kana long, right before the い of いる that ICU
+  // fused with them (が in 猫|がい|た).
+  function particleShapes(text, pos, starts) {
+    const lens = [];
+    for (let len = Math.min(PARTICLE_MAX_LEN, text.length - pos); len >= 1; len--) {
+      if (!PARTICLES.has(text.slice(pos, pos + len))) continue;
+      if (atBoundary(text, pos + len, starts) || (len === 1 && iruAt(text, pos + 1, starts))) lens.push(len);
+    }
+    return lens;
+  }
+
+  // Whether the particle of `len` characters at `pos` is one PARTICLE_NOT_BEFORE refuses there.
+  function refusedParticle(text, pos, len) {
+    const next = PARTICLE_NOT_BEFORE[text.slice(pos, pos + len)];
+    return !!next && next.some((kana) => text.startsWith(kana, pos + len));
+  }
+
+  // The lengths of the particles at `pos` that a colour may run on to: the shapes not refused.
+  function particleLens(text, pos, starts) {
+    return particleShapes(text, pos, starts).filter((len) => !refusedParticle(text, pos, len));
+  }
+
+  // Whether the text from `from` to `to` is such particles in a row and nothing else (です, ですか,
+  // でしょう, んだ; `to` is a form's end, a few pieces past `from` at most).
+  function particlesOnly(text, from, to, starts) {
+    if (from >= to) return from === to;
+    return particleLens(text, from, starts).some((len) => particlesOnly(text, from + len, to, starts));
+  }
+
+  // Whether what begins at `at` reads as a word rather than as kana ICU has cut up: the end of
+  // the text, anything but hiragana (a kanji, katakana, punctuation, a space), a piece in a
+  // particle's shape (taken or not: 出て in 猫|が|で|て|きた lets が stand, and so does の in
+  // 猫|が|の|ぼ|っ|た), the い of いる (猫|も|い|た, 猫|がい|た), or a segment of two kana or more
+  // not ending in っ.
+  function wordFollows(text, at, starts) {
+    if (at === text.length || !isHiragana(text[at]) || particleShapes(text, at, starts).length || iruAt(text, at, starts)) return true;
+    let end = at + 1;
+    while (end < text.length && !starts.has(end)) end++;
+    return end - at >= 2 && text[end - 1] !== "っ";
+  }
+
+  // The particles after a word that take its colour, as their lengths in order: entries of
+  // PARTICLES in a row, each ending at a word boundary, the run reaching furthest of those that
+  // a word follows (wordFollows(), or a deck word, with or without an honorific or quotative in
+  // front: の in 私|の|お|風呂), or that end in one of PARTICLES_ONLY, cut to PARTICLE_CHAIN_MAX.
+  // ICU cuts a kana verb it does not know into single kana (猫|が|で|た, 猫|に|も|ら|っ|た,
+  // 猫|は|よ|か|っ|た), and the first of them is a particle as often as not: so a particle before
+  // a single kana that is no particle is not taken (猫|が|す|わっ|た colours nothing past 猫),
+  // PARTICLE_NOT_BEFORE names the verbs met most (が is taken in 猫がでた and 猫がでてきた, に in
+  // 猫にもらった, never にも, は in 猫はねた and 猫はよかった, かも in 猫かもしれない, and で, も, ね,
+  // よ and し are not, rather than でた, もらった, ねた, よかった and しれない being painted), and a
+  // verb cut into a particle and two kana or more (猫|が|に|げた, 猫|を|さ|が|した) is a known gap.
+  // A deck word at that position ends the chain and counts as a word (かもしれない in the deck,
+  // in 猫|かも|し|れ|ない). Without a segmenter every segment is one kana, so a particle is then
+  // taken at the end of the text, before anything but hiragana, before another particle or
+  // before the い of いる only.
+  function particlesAt(text, pos, starts, tryAt) {
+    let best = [];
+    let bestEnd = pos;
+    const walk = (at, lens) => {
+      const word = starts.has(at) && tryAt(at);
+      const last = lens.length ? text.slice(at - lens[lens.length - 1], at) : "";
+      if (lens.length && (word || PARTICLES_ONLY.has(last) || wordFollows(text, at, starts))) {
+        const taken = lens.slice(0, PARTICLE_CHAIN_MAX);
+        const end = pos + taken.reduce((sum, len) => sum + len, 0);
+        if (end > bestEnd) {
+          best = taken;
+          bestEnd = end;
+        }
+      }
+      // A chain of PARTICLE_CHAIN_MAX was recorded above whenever a further particle follows
+      // (its shape makes wordFollows() true), and a longer walk cuts to the same three pieces,
+      // so it never does better: this keeps the walk at PARTICLE_MAX_LEN ** PARTICLE_CHAIN_MAX
+      // nodes, where a line of alternating particles (猫のにのにのに…) would else cost 2 ** n.
+      if (word || lens.length >= PARTICLE_CHAIN_MAX) return;
+      for (const len of particleLens(text, at, starts)) {
+        lens.push(len);
+        walk(at + len, lens);
+        lens.pop();
+      }
+    };
+    walk(pos, []);
+    return best;
+  }
+
+  // The word boundaries the matcher goes by: `starts`, plus the index after a て or で that ICU
+  // fused with the く of the auxiliary behind it (TE_FORM: 食|べ|てく|れ|た), where a word may
+  // begin and a bounded one end. `starts` itself is never written (the content script keeps
+  // it per cue): the set is copied when there is something to add.
+  function boundsOf(text, starts) {
+    let bounds = starts;
+    for (const pos of starts) {
+      if (!TE_FORM.has(text[pos]) || text[pos + 1] !== "く" || starts.has(pos + 1)) continue;
+      if (bounds === starts) bounds = new Set(starts);
+      bounds.add(pos + 1);
+    }
+    return bounds;
+  }
+
   // The text as runs, in order: a matched run carries its entry's status and pitch, the text
   // between matches is one run with neither. `starts` is the set of indices a word may begin at.
+  // Three things take a colour without being a deck word: the honorific prefix ICU cut off the
+  // word (お in お|風呂, its status and no pitch, before the word's own run), the particles after
+  // a word (の in お風呂の, で in 中で, each a run of its own with the word's status), and a
+  // quotative that fronts a word inside one segment (って in っていう, with the status of the run
+  // it follows, plain when none does).
   function markWords(text, index, starts) {
     const s = str(text);
     const runs = [];
@@ -612,19 +815,53 @@ const SHISUKO_WORDS = (() => {
       plain(s);
       return runs;
     }
-    const bounds = starts instanceof Set ? starts : starts ? new Set(starts) : wordStarts(s);
+    const bounds = boundsOf(s, starts instanceof Set ? starts : starts ? new Set(starts) : wordStarts(s));
     const heads = index.heads;
+    const tryAt = (pos) => (!heads || heads.has(s[pos]) ? matchAt(s, pos, index, bounds) : null);
     let i = 0;
+    // Where the text not yet in a run begins: the end of the last coloured run, and its status.
     let from = 0;
+    let last = null;
+    // The word at the start `pos`: the deck word there, else the one after an honorific prefix
+    // (ICU cut it off: お|風呂, not お前) or, for いう alone, a quotative (the word ends the
+    // segment: いう in っていう, not in そういう), with the length of what fronts it and the colour
+    // that takes.
+    const wordAt = (pos) => {
+      let hit = tryAt(pos);
+      if (hit) return { lead: 0, status: null, hit };
+      if (HONORIFICS.has(s[pos]) && bounds.has(pos + 1)) {
+        hit = tryAt(pos + 1);
+        if (hit) return { lead: 1, status: hit.entry.status, hit };
+      }
+      const quote = QUOTATIVES.find((piece) => s.startsWith(piece, pos));
+      if (quote) {
+        hit = tryAt(pos + quote.length);
+        if (hit && hit.entry.word === QUOTED_WORD && atBoundary(s, hit.end, bounds)) return { lead: quote.length, status: from === pos ? last : null, hit };
+      }
+      return null;
+    };
     while (i < s.length) {
-      const hit = bounds.has(i) && (!heads || heads.has(s[i])) ? matchAt(s, i, index, bounds) : null;
-      if (!hit) {
+      const found = bounds.has(i) ? wordAt(i) : null;
+      if (!found) {
         i++;
         continue;
       }
-      if (from < i) plain(s.slice(from, i));
-      runs.push({ text: s.slice(i, hit.end), status: hit.entry.status, pitch: hit.entry.pitch });
+      const { lead, hit } = found;
+      const start = i + lead;
+      if (lead && found.status !== null) {
+        if (from < i) plain(s.slice(from, i));
+        runs.push({ text: s.slice(i, start), status: found.status, pitch: null });
+      } else if (from < start) plain(s.slice(from, start));
+      last = hit.entry.status;
+      runs.push({ text: s.slice(start, hit.end), status: last, pitch: hit.entry.pitch });
       i = hit.end;
+      // A word with a pitch and no status has no colour to run on: its particles stay plain text.
+      if (last !== null) {
+        for (const len of particlesAt(s, i, bounds, wordAt)) {
+          runs.push({ text: s.slice(i, i + len), status: last, pitch: null });
+          i += len;
+        }
+      }
       from = i;
     }
     if (from < s.length) plain(s.slice(from));

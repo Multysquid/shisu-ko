@@ -5,6 +5,11 @@ Half of the A/B rig docs/subtitle-quality.md (e) describes. This half costs a GP
 replay_cues.py then compares any number of cue builders against the JSON it leaves behind, so two
 versions are judged on identical model output instead of on two beam searches.
 
+Every window is decided as Transcriber.process() decides it: one the server would take the lyrics
+path on (wants_lyrics(), then sung_in_target(): next to no speech heard, not silence, and the
+target language heard in it) is decoded without the detector, and its record carries
+"lyrics": true, which replay_cues.py reads. --lyrics off dumps every window through the detector.
+
     python server/tools/dump_words.py DhcrgdOzgic --from 80 --to 1120 --out /tmp/words
 """
 from __future__ import annotations
@@ -12,9 +17,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
@@ -49,6 +56,10 @@ def parse_args(argv=None):
     p.add_argument("--compute-type", default="auto")
     p.add_argument("--language", default="ja")
     p.add_argument("--beam-size", type=int, default=5)
+    p.add_argument("--lyrics", default="auto", choices=["auto", "off"],
+                   help="auto: a window in which the speech detector hears next to nothing but the audio is "
+                        "not silent is decoded without the detector when Whisper hears the target language in "
+                        "it, and its record is marked \"lyrics\": true; off: every window goes through the detector")
     return p.parse_args(argv)
 
 
@@ -59,8 +70,19 @@ def audio_path(cache: Path, video_id: str):
     return None
 
 
+def worker_args(args) -> SimpleNamespace:
+    """The server options Transcriber.sung_in_target() and wants_lyrics() read, the rest idle:
+    retranscribe.py builds the same App, whose transcriber thread has no session to work on."""
+    return SimpleNamespace(model=args.model, language=args.language, lyrics=args.lyrics,
+                           language_patience=0.0, lookahead=0.0, client_timeout=0.0,
+                           idle_minutes=10 ** 6, retry_after=10 ** 6,
+                           beam_size=args.beam_size, initial_prompt="")
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("faster_whisper").setLevel(logging.WARNING)
     src = audio_path(Path(args.cache), args.video_id)
     if src is None:
         print(f"no cached audio for {args.video_id} in {args.cache}", file=sys.stderr)
@@ -77,22 +99,32 @@ def main(argv=None) -> int:
 
     model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
                          download_root=str(server.MODELS_DIR))
+    lyrics_args = worker_args(args)
+    # sung_in_target() lives on the transcriber and asks the App's model; the App's own worker
+    # thread idles, since no session is ever registered with it.
+    worker = server.Transcriber(server.App(lyrics_args, model, args.device, args.compute_type))
+    stub = server.Session(video_id=args.video_id, url="")
     out = []
     start = args.start
     while start < end:
         stop = min(start + args.window, end)
         chunk = audio[int(start * server.SAMPLE_RATE): int(stop * server.SAMPLE_RATE)]
         speech = server.detect_speech(chunk, offset=start)
-        # The same call Transcriber.process() makes, so the dump is what the server would have seen.
+        # The same decision and the same call Transcriber.process() makes, so the dump is what the
+        # server would have seen: a window it would take the lyrics path on is decoded without the
+        # detector, and the record says so.
+        lyrics = (server.wants_lyrics(lyrics_args, chunk, speech, start, stop)
+                  and worker.sung_in_target(stub, chunk, start, stop))
+        vad = {"vad_filter": False} if lyrics else {"vad_filter": True, "vad_parameters": server.vad_parameters()}
         segments, _info = model.transcribe(
             chunk, language=args.language, task="transcribe", beam_size=args.beam_size,
-            vad_filter=True, vad_parameters=server.vad_parameters(), word_timestamps=True,
-            condition_on_previous_text=False, initial_prompt=None,
+            word_timestamps=True, condition_on_previous_text=False, initial_prompt=None,
             temperature=[0.0, 0.2, 0.4, 0.6], no_speech_threshold=0.6, log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4, hallucination_silence_threshold=2.0,
+            compression_ratio_threshold=2.4, hallucination_silence_threshold=2.0, **vad,
         )
         record = {"window": [start, stop],
                   "speech": [[round(a, 2), round(b, 2)] for a, b in speech],
+                  "lyrics": lyrics,
                   "segments": []}
         for seg in segments:
             record["segments"].append({
@@ -104,7 +136,8 @@ def main(argv=None) -> int:
                            "p": round(w.probability, 2)} for w in (seg.words or [])],
             })
         out.append(record)
-        print(f"  {server.fmt_time(start)}-{server.fmt_time(stop)}: {len(record['segments'])} segments", flush=True)
+        print(f"  {server.fmt_time(start)}-{server.fmt_time(stop)}: {len(record['segments'])} segments"
+              f"{' [lyrics]' if lyrics else ''}", flush=True)
         start = stop
 
     dest = Path(args.out)
