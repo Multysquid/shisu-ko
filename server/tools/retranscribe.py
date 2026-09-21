@@ -55,7 +55,7 @@ def parse_args(argv=None):
     p.add_argument("--window", type=float, default=40.0)
     p.add_argument("--first-window", type=float, default=20.0)
     p.add_argument("--max-cue-chars", type=int, default=30)
-    p.add_argument("--max-cue-seconds", type=float, default=6.0)
+    p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8)
     p.add_argument("--limit-seconds", type=float, default=0.0, help="only transcribe the first N seconds")
     p.add_argument("--cpu-threads", type=int, default=0)

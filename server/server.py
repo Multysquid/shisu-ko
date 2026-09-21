@@ -462,12 +462,12 @@ def hallucination_reason(seg, words, speech):
 class CueLimits:
     """Cue geometry from docs/subtitle-quality.md (P1); seconds unless the name says chars."""
     max_chars: int = 30          # 26 = 13 x 2 lines (Netflix JP); 30 keeps mined sentences whole
-    max_seconds: float = 6.0
+    max_seconds: float = 7.0     # Netflix's maximum; a merged cue is often near it now
     min_seconds: float = 0.8     # Netflix's general minimum
     hard_min_seconds: float = 0.5  # the Japanese floor: never go below this
     clause_ratio: float = 0.6    # a 、 breaks the line once the buffer is this full
     lead_in: float = 0.08
-    lead_out: float = 0.50
+    lead_out: float = 0.70       # the beat of padding after the audio; measured in the doc's (e)
     min_gap: float = 0.10
     dead_zone: float = 0.50      # gaps between min_gap and this read as a glitch, so they are closed
     pause_split: float = 0.45
@@ -476,7 +476,7 @@ class CueLimits:
     merge_reach: float = 1.0     # a too-short cue may merge with a neighbour this far away
     trim_slack: float = 0.15     # edge words whose midpoint is this far outside speech are dropped
     snap_reach: float = 0.60
-    lead_out_silence: float = 0.40
+    lead_out_silence: float = 0.30
     # Merging across Whisper segments (merge_segments).
     seam_gap: float = 0.25       # a pause at least this long reads as a new line, not a continuation
     cross_reach: float = 1.5     # how far a cue too short to read, or a broken word, may reach
@@ -489,7 +489,7 @@ class CueLimits:
 def cue_limits(args) -> CueLimits:
     return CueLimits(
         max_chars=int(getattr(args, "max_cue_chars", 30)),
-        max_seconds=float(getattr(args, "max_cue_seconds", 6.0)),
+        max_seconds=float(getattr(args, "max_cue_seconds", 7.0)),
         min_seconds=float(getattr(args, "min_cue_seconds", 0.8)),
     )
 
@@ -692,7 +692,6 @@ def seam_for(prev_text: str, gap: float, limits: CueLimits) -> str:
     return "\n" if gap >= limits.seam_gap else ""
 
 
-
 def merge_segments(cues, limits: CueLimits) -> list:
     """Merge neighbouring cues across Whisper segment boundaries.
 
@@ -750,7 +749,6 @@ def merge_segments(cues, limits: CueLimits) -> list:
             seen.add(cue["seg"])
             cue["seg"] = rename[cue["seg"]]
     return out
-
 
 
 def normalise_gaps(cues, limits: CueLimits) -> list:
@@ -3006,7 +3004,7 @@ def parse_args(argv=None):
     p.add_argument("--first-window", type=float, default=20.0, help="shorter first step after a seek so subtitles appear quickly")
     p.add_argument("--lookahead", type=float, default=900.0, help="stop transcribing this many seconds ahead of the playhead (0 = whole video)")
     p.add_argument("--max-cue-chars", type=int, default=30, help="26 is the Netflix Japanese limit (13 x 2 lines); 30 keeps more mined sentences whole")
-    p.add_argument("--max-cue-seconds", type=float, default=6.0)
+    p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8, help="cues shorter than this are extended or merged")
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
     p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically, and the least time between two attempts to load a model that failed to download or load")

@@ -244,7 +244,7 @@ def test_build_cues_leaves_a_mid_interval_cue_where_it_is():
 def test_build_cues_adds_a_lead_out_into_the_following_silence():
     ws = words([("あいうえおかきくけこ", 0.0, 2.0), ("。", 2.0, 2.1)])
     cues = server.build_cues(ws, [[0.0, 2.2], [9.0, 10.0]], limits())
-    assert cues[0]["end"] == pytest.approx(2.6)  # +LEAD_OUT 0.5
+    assert cues[0]["end"] == pytest.approx(2.1 + limits().lead_out)
 
 
 def test_build_cues_does_not_lead_out_into_the_next_utterance():
@@ -256,7 +256,9 @@ def test_build_cues_does_not_lead_out_into_the_next_utterance():
 def test_build_cues_extends_a_short_cue_to_the_minimum_duration():
     ws = words([("はい", 0.0, 0.3), ("。", 0.3, 0.35)])
     cues = server.build_cues(ws, [[0.0, 0.4], [9.0, 10.0]], limits())
-    assert cues[0]["end"] - cues[0]["start"] == pytest.approx(0.85, abs=0.06)
+    # The lead-out alone already carries it past min_seconds; both floors are satisfied.
+    assert cues[0]["end"] - cues[0]["start"] == pytest.approx(0.35 + limits().lead_out, abs=0.06)
+    assert cues[0]["end"] - cues[0]["start"] >= limits().min_seconds
 
 
 def test_build_cues_merges_a_short_cue_into_its_neighbour():
@@ -297,7 +299,7 @@ def test_build_cues_never_returns_a_cue_over_the_duration_limit():
     ws = words([(f"語{i}", float(i), float(i) + 1.0) for i in range(20)])
     cues = server.build_cues(ws, [[0.0, 20.5]], limits())
     assert cues
-    assert max(c["end"] - c["start"] for c in cues) <= 6.0 + 0.6
+    assert max(c["end"] - c["start"] for c in cues) <= limits().max_seconds
 
 
 def test_build_cues_on_empty_input():
