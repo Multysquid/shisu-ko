@@ -56,6 +56,11 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 
 ### 1. Start the server
 
+Get the code: `git clone https://github.com/Multysquid/shisu-ko` (updates itself on every
+start), or download the zip from the [latest release](https://github.com/Multysquid/shisu-ko/releases/latest)
+and **extract it** (right-click, *Extract All...*): the scripts refuse to run from inside the
+zip, where Windows would start them without the rest of the files.
+
 **Windows:** double-click `server\setup.cmd` once, then `server\run.cmd`.
 **Linux/macOS:** `bash server/setup.sh` once, then `server/run.sh`.
 
@@ -490,6 +495,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 
 | Symptom | Fix |
 |---|---|
+| `run.cmd` or `setup.cmd` says it is running on its own, or Python cannot open `...\Temp\...\shisu-ko-main.zip\...\server\server.py` | The zip was opened in Explorer and the script double-clicked inside it, so Windows extracted only that one file into a temporary folder. Extract the whole zip (right-click, *Extract All...*) and start `server\run.cmd` from the extracted folder. |
 | `setup.cmd` says "Python was not found; run without arguments to install from the Microsoft Store" | Windows answers `python` with a shortcut to the Store when no Python is on the PATH, and the setup used to trust it. Since 0.10.2 the setup runs the candidates instead (`py -3`, `python`, `python3`) and takes the first Python 3.10+ that works; with an older `setup.cmd`, install Python from python.org with "Add python.exe to PATH" ticked, or turn `python.exe` off under Settings > Apps > Advanced app settings > App execution aliases. |
 | No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |

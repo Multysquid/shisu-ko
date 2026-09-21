@@ -6,6 +6,16 @@ REM and installs faster-whisper, yt-dlp and the CUDA runtime libraries.
 set "ROOT=%USERPROFILE%\.shisu-ko"
 set "VENV=%ROOT%\venv"
 
+REM Explorer shows a zip as a folder and, on a double-click, extracts only the clicked file
+REM into a temporary place: this script then runs alone, and every sibling is missing.
+if not exist "%~dp0server.py" (
+  echo This file is running on its own, from inside a zip or a folder without the rest
+  echo of Shisu-ko. Extract the whole zip first ^(right-click it, "Extract All..."^), then
+  echo start server\setup.cmd from the extracted folder.
+  pause
+  exit /b 1
+)
+
 REM find-python.cmd sets PY to a Python 3.10+ that really runs (Windows answers "python" with a
 REM Microsoft Store shortcut when none is on the PATH, and `where` cannot tell the two apart).
 call "%~dp0find-python.cmd"
