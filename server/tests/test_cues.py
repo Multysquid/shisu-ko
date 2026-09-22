@@ -141,6 +141,33 @@ def test_anomaly_gate_keeps_an_anomalous_segment_that_sits_on_speech():
     assert server.hallucination_reason(seg("あいうえおかきくけこさしすせそたちつてと", 0.0, 0.1), ws, [[0.0, 1.0]]) is None
 
 
+def test_the_talk_gate_keeps_a_segment_of_one_kana_words():
+    # Whisper's Japanese words are sub-tokens, usually one kana, so they are shorter than the
+    # 133 ms the short-word term penalises whatever the speaker did. Scoring on it deleted five
+    # real utterances in 15 minutes and no hallucination, so the talk path does not.
+    ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")])
+    text = "".join(w.word for w in ws)
+    assert server.is_segment_anomaly(ws) is True                      # with the term, as ported
+    assert server.is_segment_anomaly(ws, short_term=False) is False
+    # Overlap 0.6: past the VAD gate, and under the 0.8 that would excuse the segment unasked.
+    assert server.hallucination_reason(seg(text, 0.0, 1.5), ws, [[0.0, 0.53]]) is None
+
+
+def test_the_talk_gate_still_drops_improbable_words():
+    ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")], prob=0.05)
+    text = "".join(w.word for w in ws)
+    assert server.is_segment_anomaly(ws, short_term=False) is True
+    assert server.hallucination_reason(seg(text, 0.0, 1.5), ws, [[0.0, 0.53]]) == "anomaly"
+
+
+def test_the_lyrics_gate_keeps_the_short_word_term():
+    # Its thresholds were measured with it, and nothing here re-measures them.
+    ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")])
+    line = SimpleNamespace(text="".join(w.word for w in ws), start=0.0, end=1.5, words=ws,
+                           compression_ratio=1.0, avg_logprob=-0.2, no_speech_prob=0.1)
+    assert server.lyrics_reason(line, ws) == "anomaly"
+
+
 def test_is_segment_anomaly_ignores_punctuation_only_words():
     assert server.is_segment_anomaly(words([("。", 0.0, 0.01)])) is False
 

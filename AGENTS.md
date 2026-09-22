@@ -162,7 +162,15 @@ contained, and the VAD and anomaly gates then delete real speech — 29 lines in
 sample, against 8 once repaired.
 
 Segments go through gates before becoming cues: no words, VAD overlap under 0.5, faster-whisper's own
-word-anomaly score, repetition loops, and a gated phrase blocklist.
+word-anomaly score, repetition loops, and a gated phrase blocklist. The talk path scores the anomaly
+without the short-word term (`is_segment_anomaly(words, short_term=False)`): Whisper's Japanese words
+are sub-tokens, usually one kana, so they fall under the 133 ms it penalises whatever the speaker did,
+and the term measured the tokenizer rather than the audio. Over two 15-minute dumps the first-8-words
+score reached the threshold for 37 of 279 segments and 34 of 202 with the term and for 0 and 2 without
+it, and every segment the gate actually deleted was real speech - a 10 s block holding
+一応、担任の先生とかいるの? … そうなんですよね on the live run, a 9.6 s block of 31 words, three shorter
+lines - with no hallucination among them. `lyrics_reason()` keeps the term: its thresholds were measured
+with it, and nothing has re-measured them.
 
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into

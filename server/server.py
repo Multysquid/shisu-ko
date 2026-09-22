@@ -439,25 +439,42 @@ def absolute_words(seg, offset: float) -> list:
 PUNCTUATION = set("\"'“¿([{-。！？、，,.!?:：;；)]}、…～~ー'\"")
 
 
-def word_anomaly_score(word: Word) -> float:
-    """Port of faster_whisper.transcribe.word_anomaly_score (1.2.1, MIT): long, short or improbable words."""
+def word_anomaly_score(word: Word, short_term: bool = True) -> float:
+    """Port of faster_whisper.transcribe.word_anomaly_score (1.2.1, MIT): long, short or improbable words.
+
+    `short_term` is the (0.133 - duration) * 15 penalty, and it measures the tokenizer rather than
+    the audio in Japanese: Whisper's Japanese words are sub-tokens, usually one kana, so they are
+    under 133 ms by construction and every ordinary segment scores on them. Over the two 15-minute
+    dumps of 5csq1MlSspA the whole first-8-words score reaches the threshold for 37 of 279 segments
+    and 34 of 202 with the term, and for 0 and 2 without it (both of those real speech, both saved
+    by their VAD overlap). The talk path therefore scores without it; see is_segment_anomaly().
+    """
     score = 0.0
     duration = word.end - word.start
     if word.probability < 0.15:
         score += 1.0
-    if duration < 0.133:
+    if short_term and duration < 0.133:
         score += (0.133 - duration) * 15
     if duration > 2.0:
         score += duration - 2.0
     return score
 
 
-def is_segment_anomaly(words) -> bool:
-    """Port of faster_whisper.transcribe.is_segment_anomaly (1.2.1, MIT)."""
+def is_segment_anomaly(words, short_term: bool = True) -> bool:
+    """Port of faster_whisper.transcribe.is_segment_anomaly (1.2.1, MIT).
+
+    The talk path asks with `short_term=False`, so a segment is anomalous only on improbable words
+    and stretched ones. What the term bought was false drops: in 15 minutes of one video the gate
+    deleted 一応、担任の先生とかいるの? … そうなんですよね (a 10 s block, live), a 9.6 s block of 31
+    words and three shorter lines - five drops, five real utterances, no hallucination among them -
+    while nothing at all fires without it. P0.2 of docs/subtitle-quality.md named this risk when the
+    gate went in ("false positives on very fast speech; the overlap gate is the safety"), and the
+    lead-repair measurement records the same gate eating 29 lines in 17 minutes.
+    """
     words = [w for w in words if w.word.strip() and w.word.strip() not in PUNCTUATION][:8]
     if not words:
         return False
-    score = sum(word_anomaly_score(w) for w in words)
+    score = sum(word_anomaly_score(w, short_term) for w in words)
     return score >= 3 or score + 0.01 >= len(words)
 
 
@@ -500,7 +517,7 @@ def hallucination_reason(seg, words, speech):
     mean_prob = sum(w.probability for w in words) / len(words)
     if overlap < VAD_GATE_OVERLAP and not (len(text) >= VAD_GATE_CHARS and mean_prob >= VAD_GATE_PROB):
         return "vad"
-    if overlap < ANOMALY_MAX_OVERLAP and is_segment_anomaly(words):
+    if overlap < ANOMALY_MAX_OVERLAP and is_segment_anomaly(words, short_term=False):
         return "anomaly"
     # seg.compression_ratio is faster-whisper's value for the whole 30 s decode, shared by every
     # segment it produced, so one loop would take its innocent neighbours with it. Use this text.
@@ -527,7 +544,9 @@ def lyrics_reason(seg, words):
     logprob = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
     if no_speech > LYRICS_MAX_NO_SPEECH or logprob < LYRICS_MIN_LOGPROB or mean_prob < LYRICS_MIN_WORD_PROB:
         return "unsure"
-    if is_segment_anomaly(words):
+    # With the short-word term, unlike the talk path above: the lyrics thresholds were all
+    # measured with it, and there is no lyrics measurement for dropping it.
+    if is_segment_anomaly(words, short_term=True):
         return "anomaly"
     if has_repetition(text) or compression_ratio(text) > COMPRESSION_LIMIT:
         return "repetition"
