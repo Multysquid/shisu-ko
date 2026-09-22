@@ -56,11 +56,17 @@ def parse_args(argv=None):
     p.add_argument("--compute-type", default="auto")
     p.add_argument("--language", default="ja")
     p.add_argument("--beam-size", type=int, default=5)
+    p.add_argument("--initial-prompt", default=None, help="text prompt given to Whisper for every window, as the "
+                   "server's --initial-prompt (default: DEFAULT_PROMPTS for --language, \"\" for none); it "
+                   "reaches only the first 30 s of a window, and never a lyrics window, as in the server")
     p.add_argument("--lyrics", default="auto", choices=["auto", "off"],
                    help="auto: a window in which the speech detector hears next to nothing but the audio is "
                         "not silent is decoded without the detector when Whisper hears the target language in "
                         "it, and its record is marked \"lyrics\": true; off: every window goes through the detector")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.initial_prompt is None:  # the same resolution parse_args() does, so a bare dump is
+        args.initial_prompt = server.DEFAULT_PROMPTS.get(args.language, "")  # what process() decodes
+    return args
 
 
 def audio_path(cache: Path, video_id: str):
@@ -76,7 +82,7 @@ def worker_args(args) -> SimpleNamespace:
     return SimpleNamespace(model=args.model, language=args.language, lyrics=args.lyrics,
                            language_patience=0.0, lookahead=0.0, client_timeout=0.0,
                            idle_minutes=10 ** 6, retry_after=10 ** 6,
-                           beam_size=args.beam_size, initial_prompt="")
+                           beam_size=args.beam_size, initial_prompt=args.initial_prompt)
 
 
 def main(argv=None) -> int:
@@ -118,7 +124,8 @@ def main(argv=None) -> int:
         vad = {"vad_filter": False} if lyrics else {"vad_filter": True, "vad_parameters": server.vad_parameters()}
         segments, _info = model.transcribe(
             chunk, language=args.language, task="transcribe", beam_size=args.beam_size,
-            word_timestamps=True, condition_on_previous_text=False, initial_prompt=None,
+            word_timestamps=True, condition_on_previous_text=False,
+            initial_prompt=None if lyrics else (args.initial_prompt or None),
             temperature=[0.0, 0.2, 0.4, 0.6], no_speech_threshold=0.6, log_prob_threshold=-1.0,
             compression_ratio_threshold=2.4, hallucination_silence_threshold=2.0, **vad,
         )

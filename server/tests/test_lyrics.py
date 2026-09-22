@@ -977,6 +977,13 @@ def test_dump_words_decides_the_lyrics_path_per_window_and_marks_the_record(monk
 
     assert tool.main(argv) == 0
     assert [call["vad_filter"] for call in model.calls] == [False, True, True]
+    # The dump is only an A/B on the server's own decode if it resolves the prompt as parse_args()
+    # does and withholds it from a lyrics window as process() does.
+    assert tool.parse_args(argv).initial_prompt == server.DEFAULT_PROMPTS["ja"]
+    assert tool.parse_args(argv + ["--initial-prompt", ""]).initial_prompt == ""
+    assert tool.parse_args(argv + ["--language", "en"]).initial_prompt == ""
+    assert [call["initial_prompt"] for call in model.calls] == [None, server.DEFAULT_PROMPTS["ja"],
+                                                                server.DEFAULT_PROMPTS["ja"]]
     assert "vad_parameters" not in model.calls[0]
     assert model.calls[1]["vad_parameters"] == server.VAD_PARAMS and model.calls[1]["word_timestamps"] is True
     assert model.detections == 2  # the talk window never reaches the head
