@@ -287,11 +287,12 @@ in its usual conjugations and in its noun form: a card for 食べる colours 食
 食べたことがある and 食べ in 食べに行く, 書く colours 書かない and 書いて, 美しい colours
 美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり, and a word
 written in kana is found in its forms too (かける colours かけて, しまう colours しまった,
-おいしい colours おいしかった). The particles after a coloured word and the honorific お or ご
-before it take its colour (お風呂の, 中で, 学生です), and so does the quotative って or と between
-a coloured word and one found after it (話しかけていただくっていう with いう in the deck), so a
-line reads in whole pieces. A word is not coloured inside a compound (食べ物 for 食べる, 日本語
-for 日本, 走者 for 走る), and a card for a particle, the copula or an auxiliary (は, のは, から,
+おいしい colours おいしかった). The word alone takes the colour: a particle after it has no card
+of its own and stays plain (領域まで reads 領域 in colour and まで in black). The honorific お or
+ご before a word takes its colour, being part of the word (お風呂), and so does the quotative って
+or と between a coloured word and one found after it (話しかけていただくっていう with いう in the
+deck), which ICU holds in one piece. A word is not coloured inside a compound (食べ物 for 食べる,
+日本語 for 日本, 走者 for 走る), and a card for a particle, the copula or an auxiliary (は, のは, から,
 でも, だ, です, ます, ない, たい, ん …) never colours anything by itself, since it would paint every
 line the same way. Two cards for one word show the one with the least progress; a suspended card
 only counts when there is no other.

@@ -33,39 +33,6 @@ const SHISUKO_WORDS = (() => {
     "じゃ", "じゃん", "もん",
   ]);
   const PARTICLE_MAX_LEN = Math.max(...[...PARTICLES].map((piece) => piece.length));
-  // A particle takes the colour of the word it attaches to (お風呂の, 中で, 学生です), up to this
-  // many in a row (本にはね: には and ね).
-  const PARTICLE_CHAIN_MAX = 3;
-  // What a particle is not taken before: the kana that makes it the start of a verb ICU has cut
-  // into single kana instead (猫|が|で|た, 猫|に|も|ら|っ|た, 猫|は|よ|か|っ|た), the common ones.
-  // なら before ない, なく, なかっ, なけれ or ん is なる's negative (猫にならない), not the
-  // conditional; で before て or た is 出る; な before に is 何, before れ, っ or る it is なる and
-  // before で 撫でる; ね before て or た is 寝る; よ before か is よかった and before ん 呼んだ; の
-  // before ん is 飲んだ (and のんびり); や before っ is やる; し before ま, れ, て or た is しまう,
-  // しれない and する; も before ら is もらう and before て もてる; か before っ or え is 買う and
-  // 帰る; と before っ is 取る.
-  const PARTICLE_NOT_BEFORE = {
-    なら: ["ない", "なく", "なかっ", "なけれ", "ん"],
-    で: ["て", "た"],
-    な: ["に", "れ", "っ", "る", "で"],
-    ね: ["て", "た"],
-    よ: ["か", "ん"],
-    の: ["ん"],
-    や: ["っ"],
-    し: ["ま", "れ", "て", "た"],
-    も: ["ら", "て"],
-    か: ["っ", "え"],
-    と: ["っ"],
-  };
-  // The particles no word begins with: を and へ are taken whatever kana follows them (猫|を|み|た,
-  // 猫|を|た|べた), where が, で or も would be the first kana of a verb as often as not. Not は:
-  // はいる, はしる, はなす and はじめる are common kana verbs.
-  const PARTICLES_ONLY = new Set(["を", "へ"]);
-  // The endings of いる that follow its い in a segment of their own: a single い before one of
-  // them is いる (猫|も|い|た, 猫|に|い|て), a word for the particle before it, and so is the い ICU
-  // fused with a one-kana particle (猫|がい|た, 猫|はい|て, 猫|とい|た, 猫|がい|ない, 猫|がい|ます,
-  // 猫|がい|れ|ば: がい, はい and とい are words to it), where the particle ends at no boundary.
-  const IRU_ENDINGS = ["た", "て", "ない", "なかっ", "なく", "ます", "まし", "ませ", "る", "れば", "よう", "たい"];
   // The て or で of a て-form ICU fuses with the く of the auxiliary after it (食|べ|てく|れ|た,
   // 書|い|てく|れ|た, かけ|てく|れ; not 読|んで|く|れ|た or 言|って|く|れ|た, which it cuts), so that
   // くれる never begins a segment there and かけて ends inside one: the index after such a て is
@@ -661,9 +628,9 @@ const SHISUKO_WORDS = (() => {
   // found whole also beats a form of itself that adds particles alone (the form is then the word
   // and its tails: です, でしょう, んだ): a kana noun ending in a verb's kana has a stem to the
   // tables (いくつ, きょう, けっこう, ふつう, ほんとう), and its copula would else join its run and
-  // carry its pitch overbar (いくつです), while a kana verb loses nothing, since the particles
-  // after its dictionary form take its colour as a chain (わかる|ん|だ, おいしい|です), as after
-  // a する verb's noun (勉強|です). A kanji word keeps the form (食べるでしょう is one run).
+  // carry its pitch overbar (いくつです), while a kana verb loses nothing, since the copula stays
+  // plain text either way (わかる|んだ, おいしい|です). A kanji word keeps the form (食べるでしょう
+  // is one run).
   function matchAt(text, i, index, starts) {
     const remaining = text.length - i;
     let end = i;
@@ -693,96 +660,24 @@ const SHISUKO_WORDS = (() => {
     return found ? { end, entry: found } : null;
   }
 
-  // Whether `at` holds the い of いる: い, then a boundary and one of IRU_ENDINGS.
-  function iruAt(text, at, starts) {
-    return text[at] === "い" && starts.has(at + 1) && IRU_ENDINGS.some((piece) => text.startsWith(piece, at + 1));
-  }
-
-  // The lengths of the pieces in a particle's shape at `pos`, longest first: the entries of
-  // PARTICLES there that end at a word boundary (には and に in 本|に|は, で in 中|で; not に in
-  // 猫|にんじん, not と in 食べる|という) or, one kana long, right before the い of いる that ICU
-  // fused with them (が in 猫|がい|た).
+  // The lengths of the entries of PARTICLES at `pos` that end at a word boundary, longest first
+  // (には and に in 本|に|は, で in 中|で; not に in 猫|にんじん, not と in 食べる|という). Only
+  // particlesOnly() and boundedEnd() ask: a particle after a word is plain text, and the word's
+  // own end is all this decides.
   function particleShapes(text, pos, starts) {
     const lens = [];
     for (let len = Math.min(PARTICLE_MAX_LEN, text.length - pos); len >= 1; len--) {
       if (!PARTICLES.has(text.slice(pos, pos + len))) continue;
-      if (atBoundary(text, pos + len, starts) || (len === 1 && iruAt(text, pos + 1, starts))) lens.push(len);
+      if (atBoundary(text, pos + len, starts)) lens.push(len);
     }
     return lens;
-  }
-
-  // Whether the particle of `len` characters at `pos` is one PARTICLE_NOT_BEFORE refuses there.
-  function refusedParticle(text, pos, len) {
-    const next = PARTICLE_NOT_BEFORE[text.slice(pos, pos + len)];
-    return !!next && next.some((kana) => text.startsWith(kana, pos + len));
-  }
-
-  // The lengths of the particles at `pos` that a colour may run on to: the shapes not refused.
-  function particleLens(text, pos, starts) {
-    return particleShapes(text, pos, starts).filter((len) => !refusedParticle(text, pos, len));
   }
 
   // Whether the text from `from` to `to` is such particles in a row and nothing else (です, ですか,
   // でしょう, んだ; `to` is a form's end, a few pieces past `from` at most).
   function particlesOnly(text, from, to, starts) {
     if (from >= to) return from === to;
-    return particleLens(text, from, starts).some((len) => particlesOnly(text, from + len, to, starts));
-  }
-
-  // Whether what begins at `at` reads as a word rather than as kana ICU has cut up: the end of
-  // the text, anything but hiragana (a kanji, katakana, punctuation, a space), a piece in a
-  // particle's shape (taken or not: 出て in 猫|が|で|て|きた lets が stand, and so does の in
-  // 猫|が|の|ぼ|っ|た), the い of いる (猫|も|い|た, 猫|がい|た), or a segment of two kana or more
-  // not ending in っ.
-  function wordFollows(text, at, starts) {
-    if (at === text.length || !isHiragana(text[at]) || particleShapes(text, at, starts).length || iruAt(text, at, starts)) return true;
-    let end = at + 1;
-    while (end < text.length && !starts.has(end)) end++;
-    return end - at >= 2 && text[end - 1] !== "っ";
-  }
-
-  // The particles after a word that take its colour, as their lengths in order: entries of
-  // PARTICLES in a row, each ending at a word boundary, the run reaching furthest of those that
-  // a word follows (wordFollows(), or a deck word, with or without an honorific or quotative in
-  // front: の in 私|の|お|風呂), or that end in one of PARTICLES_ONLY, cut to PARTICLE_CHAIN_MAX.
-  // ICU cuts a kana verb it does not know into single kana (猫|が|で|た, 猫|に|も|ら|っ|た,
-  // 猫|は|よ|か|っ|た), and the first of them is a particle as often as not: so a particle before
-  // a single kana that is no particle is not taken (猫|が|す|わっ|た colours nothing past 猫),
-  // PARTICLE_NOT_BEFORE names the verbs met most (が is taken in 猫がでた and 猫がでてきた, に in
-  // 猫にもらった, never にも, は in 猫はねた and 猫はよかった, かも in 猫かもしれない, and で, も, ね,
-  // よ and し are not, rather than でた, もらった, ねた, よかった and しれない being painted), and a
-  // verb cut into a particle and two kana or more (猫|が|に|げた, 猫|を|さ|が|した) is a known gap.
-  // A deck word at that position ends the chain and counts as a word (かもしれない in the deck,
-  // in 猫|かも|し|れ|ない). Without a segmenter every segment is one kana, so a particle is then
-  // taken at the end of the text, before anything but hiragana, before another particle or
-  // before the い of いる only.
-  function particlesAt(text, pos, starts, tryAt) {
-    let best = [];
-    let bestEnd = pos;
-    const walk = (at, lens) => {
-      const word = starts.has(at) && tryAt(at);
-      const last = lens.length ? text.slice(at - lens[lens.length - 1], at) : "";
-      if (lens.length && (word || PARTICLES_ONLY.has(last) || wordFollows(text, at, starts))) {
-        const taken = lens.slice(0, PARTICLE_CHAIN_MAX);
-        const end = pos + taken.reduce((sum, len) => sum + len, 0);
-        if (end > bestEnd) {
-          best = taken;
-          bestEnd = end;
-        }
-      }
-      // A chain of PARTICLE_CHAIN_MAX was recorded above whenever a further particle follows
-      // (its shape makes wordFollows() true), and a longer walk cuts to the same three pieces,
-      // so it never does better: this keeps the walk at PARTICLE_MAX_LEN ** PARTICLE_CHAIN_MAX
-      // nodes, where a line of alternating particles (猫のにのにのに…) would else cost 2 ** n.
-      if (word || lens.length >= PARTICLE_CHAIN_MAX) return;
-      for (const len of particleLens(text, at, starts)) {
-        lens.push(len);
-        walk(at + len, lens);
-        lens.pop();
-      }
-    };
-    walk(pos, []);
-    return best;
+    return particleShapes(text, from, starts).some((len) => particlesOnly(text, from + len, to, starts));
   }
 
   // The word boundaries the matcher goes by: `starts`, plus the index after a て or で that ICU
@@ -801,9 +696,10 @@ const SHISUKO_WORDS = (() => {
 
   // The text as runs, in order: a matched run carries its entry's status and pitch, the text
   // between matches is one run with neither. `starts` is the set of indices a word may begin at.
-  // Three things take a colour without being a deck word: the honorific prefix ICU cut off the
-  // word (お in お|風呂, its status and no pitch, before the word's own run), the particles after
-  // a word (の in お風呂の, で in 中で, each a run of its own with the word's status), and a
+  // The word alone takes the colour: a particle after it is not part of it and stays plain (まで
+  // has no card of its own, so 領域まで must not read as one red piece). Two things take a colour
+  // without being a deck word, both of them part of the word's own form: the honorific prefix ICU
+  // cut off the word (お in お|風呂, its status and no pitch, before the word's own run), and a
   // quotative that fronts a word inside one segment (って in っていう, with the status of the run
   // it follows, plain when none does).
   function markWords(text, index, starts) {
@@ -855,13 +751,6 @@ const SHISUKO_WORDS = (() => {
       last = hit.entry.status;
       runs.push({ text: s.slice(start, hit.end), status: last, pitch: hit.entry.pitch });
       i = hit.end;
-      // A word with a pitch and no status has no colour to run on: its particles stay plain text.
-      if (last !== null) {
-        for (const len of particlesAt(s, i, bounds, wordAt)) {
-          runs.push({ text: s.slice(i, i + len), status: last, pitch: null });
-          i += len;
-        }
-      }
       from = i;
     }
     if (from < s.length) plain(s.slice(from));

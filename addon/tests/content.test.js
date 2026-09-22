@@ -939,8 +939,8 @@ test("renderText marks the card's state only with cardStatus on, in spans holdin
   const { api, sandbox } = withIndex({ cardStatus: true });
   const el = sandbox.document.createElement("span");
   api.renderText(el, cue(0, LINE));
-  // の and です take the colour of the word they attach to (a run of their own, without its pitch).
-  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"]);
+  // の and です have no card of their own, so they stay plain text between the coloured words.
+  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"]);
   assert.equal(el.textContent, LINE); // the DOM text is the line, for Yomitan
   assert.equal(el.childNodes[1].childNodes[0].nodeType, 3);
   api.renderText(el, cue(1, "字幕")); // drawn again: the old children go
@@ -960,7 +960,7 @@ test("renderText marks both with both colours on", () => {
   const { api, sandbox } = withIndex({ cardStatus: true, pitchAccent: true });
   const el = sandbox.document.createElement("span");
   api.renderText(el, cue(0, LINE));
-  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new,pitch=heiban}:字幕", "shisuko-word{status=new}:です"]);
+  assert.deepEqual(nodes(el), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new,pitch=heiban}:字幕", "です"]);
   api.renderText(el, cue(1, ""));
   assert.deepEqual(nodes(el), []);
 });
@@ -980,7 +980,7 @@ test("setSubtitle and transcriptLine draw their text through renderText", () => 
   assert.equal(line.dataset.id, "0");
   const text = line.childNodes[1];
   assert.equal(text.className, "shisuko-linetext");
-  assert.deepEqual(nodes(text), ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"]);
+  assert.deepEqual(nodes(text), ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"]);
   assert.equal(api.state.lineById.get(0), line);
 
   api.setSubtitle(null);
@@ -1172,7 +1172,7 @@ test("a transcript built anew and the line on screen draw the runs of the last d
   api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "字幕" }, { id: 2, start: 5, end: 6, text: "はい" }]);
   assert.equal(rebuilds.count, 1);
   assert.deepEqual(counts, { matched: 3, segmented: 3 });
-  const look = ["これは", "shisuko-word{status=learned}:日本語", "shisuko-word{status=learned}:の", "shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"];
+  const look = ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"];
   assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), look);
   api.setSubtitle(api.cueById(0)); // the cue of a line already drawn
   assert.deepEqual(nodes(api.state.subText), look);
@@ -1199,8 +1199,8 @@ test("a transcript built anew and the line on screen draw the runs of the last d
   setIndex(api, words.buildIndex([["字幕", "learning", null]]));
   api.refreshWordMarks();
   assert.equal(rebuilds.count, 2);
-  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), ["これは日本語の", "shisuko-word{status=learning}:字幕", "shisuko-word{status=learning}:です"]);
-  assert.deepEqual(nodes(api.state.subText), ["これは日本語の", "shisuko-word{status=learning}:字幕", "shisuko-word{status=learning}:です"]);
+  assert.deepEqual(nodes(api.state.lineById.get(0).childNodes[1]), ["これは日本語の", "shisuko-word{status=learning}:字幕", "です"]);
+  assert.deepEqual(nodes(api.state.subText), ["これは日本語の", "shisuko-word{status=learning}:字幕", "です"]);
   assert.deepEqual(counts, { matched: 8, segmented: 3 });
 });
 
@@ -1290,13 +1290,13 @@ test("a cue drawn while the transcript is hidden keeps nothing of the index it w
   // matched against the index of now, and the look it gets is good until the next index.
   const counts = countingWords(sandbox);
   api.setSubtitle(api.cueById(0));
-  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=new}:字幕", "shisuko-word{status=new}:です"]);
+  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=new}:字幕", "です"]);
   assert.deepEqual(counts, { matched: 1, segmented: 0 });
   api.setSubtitle(api.cueById(0));
   assert.deepEqual(counts, { matched: 1, segmented: 0 });
   setIndex(api, words.buildIndex([["字幕", "learned", null]]));
   api.refreshWordMarks(); // the line on screen holds 字幕: drawn again under the index of now
-  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=learned}:字幕", "shisuko-word{status=learned}:です"]);
+  assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=learned}:字幕", "です"]);
   assert.deepEqual(counts, { matched: 2, segmented: 0 });
   setIndex(api, null);
   api.refreshWordMarks();
@@ -1403,7 +1403,7 @@ test("pollWordIndex keeps an unchanged index, moves the stamp for the same words
   assert.equal(asks[3].since, 2000);
   assert.equal(api.state.wordIndexAt, 3000);
   assert.equal(api.state.wordIndex.size, 1);
-  assert.deepEqual(nodes(api.state.subText), ["これは", "shisuko-word{status=learning}:日本語", "shisuko-word{status=learning}:の", "字幕です"]);
+  assert.deepEqual(nodes(api.state.subText), ["これは", "shisuko-word{status=learning}:日本語", "の字幕です"]);
 });
 
 test("pollWordIndex drops the index when the background says off, and logs other failures once a minute", async () => {

@@ -787,12 +787,12 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   written (the content script keeps it per cue), the set is copied when there is something to
   add. `matchAt()` takes the longest span, the exact word on
   a tie, and a kana-only (`bounded`) exact word over a form of itself that adds particles alone
-  (`particlesOnly()`: a walk over `particleLens()` from the word's end to the form's), so a kana
-  noun ending in a verb's kana (いくつ, きょう, けっこう, ふつう, ほんとう, whose stem is in the
-  tables) ends before its copula and carries no です in its pitch overbar (いくつ|です|か, the
-  copula a particle of its own with the status), a kana verb's んだ / でしょう being coloured by
-  the particle chain instead (わかる|ん|だ, おいしい|です), while a form that adds more than
-  particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is one
+  (`particlesOnly()`: a walk over `particleShapes()`, the entries of `PARTICLES` that end at a
+  word boundary, from the word's end to the form's), so a kana noun ending in a verb's kana
+  (いくつ, きょう, けっこう, ふつう, ほんとう, whose stem is in the tables) ends before its copula
+  and carries no です in its pitch overbar (いくつ|です|か), a kana verb losing nothing by it
+  (わかる|んだ, おいしい|です: the copula is plain text either way), while a form that adds more
+  than particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is one
   run): exact words longest first (`bounded` ones must end at a boundary or the end of the text,
   the others anywhere `endsWord()` admits: the end, a boundary, or not right before a kanji,
   katakana or ー, so 関 is not coloured in 関係, 飲み not in 飲み物, while 見た ends before 犬 and
@@ -855,53 +855,19 @@ marks the words of every line. Everything in words.js is pure, without DOM.
     かけたくさん (ICU かけ|たらしい, かけ|たくさん) stay plain, since らしい and くさん are no
     particles and `NOT_BEFORE` keeps た from ending the form before them.
   - It stays linear-ish: Maps keyed by the substring, never a loop over the deck per position.
-- Three things take a colour without being a deck word, so that a line reads in whole pieces
-  (ちょうどこのお風呂の中で with 風呂 and 中 in the deck is `[ちょうど][この][お風呂の][中で]`, not
-  `お[風呂]の[中]で`; 視聴者の方に話しかけていただくっていうね is `[視聴者の][方に][話しかけて
-  いただくって][いう][ね]`). Each is a run of its own with the word's `status` and `pitch` null;
-  content.js draws every run, and adjacent runs of one status stay separate. A word with a
-  pitch and no status has no colour to run on: what would take it is plain text.
+- The word alone takes the colour. A particle after it is not part of it and has no card of its
+  own, so it stays plain: 領域まで and 領域の with 領域 in the deck read `[領域]まで` and
+  `[領域]の`, not one red piece (the colour says "this word's card is new", and まで has no card).
+  ちょうどこのお風呂の中で with 風呂 and 中 in the deck is
+  `[ちょうどこの][お風呂][の][中][で]`. Two things do take a colour without being a deck word,
+  both of them part of the word's own form; each is a run of its own with the word's `status` and
+  `pitch` null, content.js draws every run, and adjacent runs of one status stay separate. A word
+  with a pitch and no status has no colour to run on: what would take it is plain text.
   - An honorific prefix (`HONORIFICS`: お, ご) joins the word it fronts: at a start `i` whose
     character is one AND `starts.has(i + 1)` (ICU cut the prefix off: お|風呂, ご|家族, お|仕事; it
     keeps お茶, お前, お金, ご飯, お母さん whole, so those are never tried and 前 never colours
     お前), when no word matches at `i`, the match is tried at `i + 1`; on a hit the prefix's run
     comes before the word's.
-  - The particles after a word take its colour (`particlesAt()`, handed `wordAt`): entries of
-    `PARTICLES` in a row (`particleLens()`: `particleShapes()` less what `PARTICLE_NOT_BEFORE`
-    refuses, longest first), each ending at a word boundary (には in 本|に|は, で in 中|で, です
-    in 学生|です; not に in 猫|にんじん, not と in 食べる|という: the boundary is the whole test,
-    and ICU's word list decides where one is) or, one kana long, right before the い of いる
-    (`iruAt()`: a single い before a boundary and one of `IRU_ENDINGS`, た て ない なかっ なく ます
-    まし ませ る れば よう たい, is a word to the particle before it, 猫|も|い|た, 猫|に|い|て, and a
-    one-kana particle ICU fused with that い, 猫|がい|た, 猫|はい|て, 猫|とい|た, 猫|がい|れ|ば, is
-    a shape although it ends at no boundary; not before an い that ends the text, 猫|がい, or that
-    is followed by anything else, 猫|はい|、), the chain reaching furthest of those that a word
-    follows (`wordFollows()`: the end of the text, anything but hiragana, a piece in a particle's
-    shape, the い of いる, or a segment of two kana or more not ending in っ; or a deck word,
-    `wordAt`, with or without an honorific or quotative in front, の in 私|の|お|風呂, which also
-    ends the chain: かもしれない in the deck, in 猫|かも|し|れ|ない) or that end in one of
-    `PARTICLES_ONLY` (を, へ: no word begins with them, so they are taken whatever follows,
-    猫|を|み|た, 猫|を|た|べた, 猫|へ|い|っ|た; not は, since はいる, はしる, はなす and はじめる are
-    common kana verbs), cut to `PARTICLE_CHAIN_MAX` (3): 本にはねよな takes には, ね and よ, and
-    the walk stops there too, at `PARTICLE_MAX_LEN ** PARTICLE_CHAIN_MAX` nodes at most (a line
-    of alternating particles, 猫のにのに…, used to cost 2 ** n). That
-    rule answers ICU's habit of cutting a kana verb it does not know into single kana, the first
-    of which is a particle as often as not (猫|が|で|た, 猫|に|も|ら|っ|た, 猫|は|よ|か|っ|た,
-    食|べ|て|し|まっ|た): a particle before a single kana that is no particle is not taken
-    (猫|が|す|わっ|た colours nothing past 猫), and `PARTICLE_NOT_BEFORE` refuses the particles a
-    following kana makes such a verb of (なら before ない/なく/なかっ/なけれ/ん: ならない; で before
-    て/た: 出る; な before に/れ/っ/る/で: 何, なる, 撫でる; ね before て/た: 寝る; よ before か/ん:
-    よかった, 呼んだ; の before ん: 飲んだ; や before っ: やる; し before ま/れ/て/た: しまう, しれない,
-    する; も before ら/て: もらう, もてる; か before っ/え: 買う, 帰る; と before っ: 取る), a refused
-    piece counting as a word for the particle before it, so が is taken in 猫がでた and 猫がでてきた,
-    に in 猫にもらった (never にも), は in 猫はねた and 猫はよかった, かも in 猫かもしれない, and で,
-    も, ね, よ and し are not. 〜といて, the contracted ておいて, colours the と with the verb
-    (勉強せんといて: ICU cuts 勉強|せん|とい|て, and と before the い of いる is a particle's shape;
-    いて after it is いる to the matcher). A particle after an uncoloured word stays plain.
-    Without a segmenter every segment is one kana, so a particle is then taken at the end of the
-    text, before anything but hiragana, before another particle or before the い of いる only.
-    Known gap: a verb cut into a particle and two kana or more takes the particle (猫|が|に|げた
-    colours に, 猫|を|さ|が|した さ and が).
   - A quotative (`QUOTATIVES`: って, と, longest first) may front いう, and いう alone
     (`QUOTED_WORD`), inside one segment: ICU keeps っていう and という (彼|という|人) whole, so
     いう never begins a segment, while it cuts って off every other word (って|こと, って|もの)
@@ -920,11 +886,11 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   real `wordStarts`: the examples above, the tails, `AFTER`, `OPEN_TAILS`, `NEXT`, `NOT_BEFORE`,
   the compounds, the bare stems, the particles and auxiliaries, the two lines of the viewer
   exactly as wanted, the honorific prefix (お茶 / お前 with 茶 / 前 stay plain, お茶 with お茶,
-  ご|家族, a status-less word's prefix), the particle chain (本には, 本からは, the fourth staying
-  plain, a particle after a plain word, に in にほん as one segment, the cut-up verbs, the
-  `PARTICLE_NOT_BEFORE` pieces, a deck word winning, no segmenter, the particle before a word
-  with an honorific prefix, を and へ whatever follows them and が before the い of いる, a line
-  of alternating particles staying quick), いう in という and っていう and not in そういう (and
+  ご|家族, a status-less word's prefix), the particles after a word staying plain (本には,
+  本からは, 学生です, 猫がでた, 猫にほん, the conjugation still going with the word, a deck word
+  after the particle still found, the plain pieces joined into one run) and the viewer's two
+  lines colouring 領域 alone (この時点でこっちの地声領域のE4に変えれる人なぁー and
+  で、余裕がある人はそのままA4の地声領域まで持っていってください。), いう in という and っていう and not in そういう (and
   ところ, とおる, とまる, とくに staying plain), the kana-only stems with their guards (いれば,
   かけら, かけに行く, the one-kana stems staying exact), a kana verb's form ending inside the
   segment ICU made of its ending and a particle (and the exact bounded word not), くれる after
