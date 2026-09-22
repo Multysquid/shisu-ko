@@ -116,23 +116,23 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
   file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
-  `load_cache()` brings them back from there after a switch back. A record carries `"lyrics"`,
-  the rule its covered ranges were made under (`--lyrics` as the server ran, see "How the server
-  schedules work"): a 0.11.2 server (format 3 without the key), or `--lyrics off`, marked a sung
-  stretch covered with nothing in it, so `load_cache()` under `--lyrics auto` gives a record
-  without `"lyrics": "auto"` its blank stretches back (`unheard_stretches()`: the parts of
-  `covered` that no speech interval and no cue touches, under two floors: 1.5 s, `plan_window()`'s
-  own floor, at either end of a covered range, where a video's music sits, and
-  `LYRICS_MIN_STRETCH_S` (4 s) between two heard things, `load_cache()` passing
-  `inner_seconds=LYRICS_MIN_STRETCH_S`, since every pause of a talk is a hole of a second or two
-  and a window per pause would fetch, walk and rewrite the record dozens of times over; taken
-  out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session, no
-  longer covered to its end, is fetched and planned again over them). `CACHE_FORMAT` is 3
-  (bumped by 0.11.2 for the cue geometry, see "How the server schedules work") and the format
-  check in `load_cache()` runs before this migration, so it reaches only a format-3 record
-  without the key: one written by 0.11.2, or by this version under `--lyrics off`. A format-2
-  record, from 0.11.0 or 0.11.1, is dropped whole by the format check and the video is
-  transcribed again from the start, which brings it under the lyrics rule as well.
+  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 4, bumped by
+  0.12.0 for the cue geometry (sentence marks, the row boundary at one, the anomaly gate); every
+  record of an older format is dropped whole by the check in `load_cache()`, the title kept, and
+  the video transcribed again from the start. That check is the only way a geometry change reaches
+  a video someone has already watched, so it runs before anything is read out of the record and
+  there is no migration behind it. A record carries `"lyrics"`, the rule its covered ranges were
+  made under (`--lyrics` as the server ran, see "How the server schedules work"), and under format
+  4 it always does. `--lyrics off` marks a sung stretch covered with nothing in it, so a record
+  written with the switch off, read by a server running `--lyrics auto`, gets its blank stretches
+  back (`unheard_stretches()`: the parts of `covered` that no speech interval and no cue touches,
+  under two floors: 1.5 s, `plan_window()`'s own floor, at either end of a covered range, where a
+  video's music sits, and `LYRICS_MIN_STRETCH_S` (4 s) between two heard things, `load_cache()`
+  passing `inner_seconds=LYRICS_MIN_STRETCH_S`, since every pause of a talk is a hole of a second
+  or two and a window per pause would fetch, walk and rewrite the record dozens of times over;
+  taken out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session,
+  no longer covered to its end, is fetched and planned again over them). That is not a migration
+  and does not date: it is what makes the switch reversible.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
@@ -141,7 +141,10 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
 
 `plan_window()` in `server/server.py` decides what to transcribe next: if the playhead is not
 inside a covered range, a short `--first-window` (20 s) starts at the playhead; otherwise the next
-`--window` (40 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
+`--window` (30 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
+30 s is faster-whisper's own chunk, and that is why the window is no longer 40: with
+`condition_on_previous_text` false the library drops the initial prompt after the first chunk of a
+call (checked in 1.2.1), so a 40 s window decoded its last ten seconds unprompted.
 A segment touching the end of a window is dropped and the covered range ends where that segment
 began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
@@ -149,6 +152,18 @@ module (register it in `sys.modules` before `exec_module` because of `from __fut
 Cue building (`docs/subtitle-quality.md` is the rationale and the measurements): the server runs
 Silero VAD itself on each window (`detect_speech()`, with `VAD_PARAMS`: min speech 250 ms, min
 silence 300 ms) and passes the same options to faster-whisper.
+
+Whisper is asked for punctuation rather than left to guess at it: `--initial-prompt` defaults to
+`DEFAULT_PROMPTS[args.language]` (resolved in `parse_args()`; only `ja` has an entry, any other
+language gets nothing, and an explicit `--initial-prompt ""` turns it off), a short punctuated
+sentence in the style the subtitles should read. Each window is decoded with nothing in front of
+it, so without the prompt the decoder has no reason to write a 。 at all: measured over 15 minutes
+of 5csq1MlSspA, marks land on 88% of the hand-labelled sentence ends with the prompt and 53%
+without, and not one line of the prompt reached the transcript. A lyrics window is decoded with
+`initial_prompt=None`: its gates were measured on unprompted decodes and the blocklist holds no
+sentence of the prompt, so a noisy window the language head lets through could echo the prompt
+itself into the cache with nothing to catch it. `dump_words.py` resolves the default and withholds
+it the same way, or dump plus replay would no longer be an A/B on the server's own decode.
 
 `repair_lead_words()` runs first, before the gates. faster-whisper anchors a segment's first word to
 the segment's own start, and segment starts run flush with the previous segment's end, so one or two
@@ -161,8 +176,65 @@ the previous utterance, where `cue_overlaps()` then deletes a whole good cue. It
 contained, and the VAD and anomaly gates then delete real speech — 29 lines in 17 minutes of the
 sample, against 8 once repaired.
 
+`punctuate_words()` runs next, over every kept segment of a talk window before any cues are built,
+because the pause behind a segment's last word, and the word that follows it, are in the next kept
+segment, which is handed over whole (`next_word`) so that every test below applies across a segment
+boundary as it does inside one. Never on a lyrics window: its `speech` is the padded word runs
+`lyrics_spans()` made, so every breath inside a sung line reads as a pause, and these thresholds
+were measured on talk. The cue
+builder has no sentence signal of its own — every cut in `group_words()` and every seam in
+`seam_for()` defers to Whisper's punctuation — and Whisper writes it inconsistently: at 18:06 of
+one video the live run decoded そうなんですよねおじいちゃん先生とゲームの話したりするの with no
+mark, one 29-character cue, while a second decode of the same audio wrote そうなんですよね。 and
+the same builder gave three. Neither half of the evidence stands alone (a speaker pauses inside a
+word; よね runs on mid-sentence), so the rule is the pair, the one Akita et al. (2006) reach F 0.85
+with on spontaneous Japanese: a word whose text so far ends in a sentence-final shape and is
+followed by a pause takes a `。`, or a `？` for か, かな, っけ, でしょ and でしょう. `SENTENCE_STRONG`
+(sentence-final particles and the polite and copula endings) needs `limits.sentence_pause` (0.30 s);
+`SENTENCE_WEAK` (the plain forms た, ない, る, い, which end a casual sentence as often as they run
+on into the next clause) needs `sentence_pause_weak` (0.60 s). The pause is the longer of the
+detector's silence inside [the word's own start, the next word's start] and Whisper's raw gap to
+the next word, because each hides what the other shows: Whisper anchors a segment's last word to
+the end of the audio it decoded, so the silence usually lies inside that word's span where the gap
+reads zero, while Silero refuses a silence under 300 ms and pads what it keeps by 200 ms on each
+side, so the measured 0.34 s after よね sat in the middle of one interval. Nothing is written over
+a mark already there, before a word opening on a character that can never open one, before a word
+that **is** a particle (`SENTENCE_PARTICLES`, the whole word and not its first character: です before
+か is left alone and the か judged instead, while はい, やっぱり, もう and ところで all open a sentence
+and all start with a particle kana), or after a word that nothing follows, since the pause is the
+evidence and a window's last segment has none. The particle test is skipped when the next word ends
+in a clause mark, or the word after it opens with one: Whisper writes the sentence-initial connective
+with its own comma, `で、` or `で` then `、`, and that comma says the で opens a sentence rather than
+closing a phrase. Three tables refuse a shape on the words in front of it, each from a measured false
+mark: `SENTENCE_NOT_ENDINGS` for a word that merely ends in a shape kana (何か, そんな, また — a shape
+is a suffix test, so without it 何か行きたい became 何か？行きたい), `FILLER_KA` for なんか, とか,
+というか … where the speaker is choosing the next word rather than asking (but not the nominaliser
+ことか, `SHAPE_EXCEPT`), and `SENTENCE_INTERJECTIONAL` after a connective (けど, から, し, て, で,
+のに, ので), where the speaker is holding the floor (めっちゃ偏見だけどさ ‖ はいはい). They cost no
+labelled sentence end on the measured range and take mark precision from 89.5% to 97.1%.
+`--sentence-ends off` (`limits.sentence_ends`) turns the rule off, and `replay_cues.py` and
+`retranscribe.py` take the same switch, so a before and after run on identical Whisper output.
+In `merge_segments()` a previous cue whose last row holds at least `MIN_PIECE_CHARS` characters and
+ends in a `SENTENCE_END` mark no longer counts as `short`: a finished sentence is not a stub, so it
+does not buy the `cross_reach` budget a half-line is given. Nor is `forced` allowed to override such
+a mark (`not ends_sentence(prev_row) and breaks_word(...)`): a next cue opening on ー or a small kana
+makes `breaks_word()` true, and its flat join put two sentences on one row (そうですね。ーっと言います),
+when nothing is split inside a word after the speaker has ended one. `carry_trailing_mark()` in
+`build_cues()` is the other half of keeping a mark: the word the rule marks is a segment's last, and
+that is the word Whisper stretches over the silence after the utterance, so `trim_words()` reads its
+midpoint as noise and drops it. The timings go, which is what P1.1 is for; the mark moves onto the
+word that now ends the cue.
+
 Segments go through gates before becoming cues: no words, VAD overlap under 0.5, faster-whisper's own
-word-anomaly score, repetition loops, and a gated phrase blocklist.
+word-anomaly score, repetition loops, and a gated phrase blocklist. The talk path scores the anomaly
+without the short-word term (`is_segment_anomaly(words, short_term=False)`): Whisper's Japanese words
+are sub-tokens, usually one kana, so they fall under the 133 ms it penalises whatever the speaker did,
+and the term measured the tokenizer rather than the audio. Over two 15-minute dumps the first-8-words
+score reached the threshold for 37 of 279 segments and 34 of 202 with the term and for 0 and 2 without
+it, and every segment the gate actually deleted was real speech - a 10 s block holding
+一応、担任の先生とかいるの? … そうなんですよね on the live run, a 9.6 s block of 31 words, three shorter
+lines - with no hallucination among them. `lyrics_reason()` keeps the term: its thresholds were measured
+with it, and nothing has re-measured them.
 
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
@@ -196,15 +268,29 @@ closes a broken word whatever the budget says (inside `cross_chars` and `cross_c
 shorter than `reach_chars` reach `cross_reach` for a partner, and joins the halves through
 `seam_for()`: `""` inside one sentence, `"\n"` where a viewer would see a new line. Three readers act
 on that newline — `.shisuko-sub` is `white-space: pre-wrap` so the overlay renders the second row,
-Yomitan ends its sentence there, and `match.js`'s `TERMINATORS` splits on it. A seam that would leave
-a row under `MIN_PIECE_CHARS`, or a third row, gives way to a plain join rather than the merge being
-refused; refusing leaves the stub alone on screen.
+Yomitan ends its sentence there, and `match.js`'s `TERMINATORS` splits on it. A seam the gap alone
+put there gives way to a plain join when it would leave a row under `MIN_PIECE_CHARS` or a third row
+(`rows_fit()`), rather than the merge being refused; refusing leaves the stub alone on screen.
+
+A sentence mark is the one seam that never gives way (`ends_sentence()`), in `merge_adjacent()` as
+well as `merge_segments()`: what the speaker finished and what follows it never share a row, and a
+merge that cannot give them a row each is refused instead of flattened. A short row is no reason
+to flatten one: `rows_fit(text, limits, at_mark=True)` only refuses a third row, because うん。 is a
+whole turn and not a stub we left by breaking badly, which is what `MIN_PIECE_CHARS` judges elsewhere. Measured on 15 minutes of
+5csq1MlSspA decoded with `--initial-prompt`, 22% of all cues held a mark mid-row and read as two
+people on one line (`マジで?それいいね。`, `出そう、出そう、出そう。だって、集合に行くの誰?`), which
+also put the other speaker's clause on every card mined from one. Hard boundary in both merges took
+the share of hand-labelled sentence ends the viewer actually sees from 66% to 90% on that decode, and
+from 71% to 82% on the unprompted one. `merge_adjacent()` seams only at a mark — a gap-based seam
+there would refuse the stub merges the anti-flicker rule exists for — so pieces without a mark join
+flat exactly as before. The cost is accepted: a short finished sentence (`まじ?`, `うん。`) now stands
+as its own cue for its `min_seconds` instead of riding on a neighbour's row.
 
 Every cue still carries `seg`, the id of the Whisper segment it came from, and a merge re-stamps
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
 not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
 mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment, and a stale
-id would mis-group it. Cue caches are format 3; older caches are ignored, which is the only way a
+id would mis-group it. Cue caches are format 4; older caches are ignored, which is the only way a
 geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
 compare two cue builders on identical Whisper output; keep them working (`retranscribe.py` wraps
@@ -276,11 +362,10 @@ a short or quiet stretch staying covered, a window the head refused covered whol
 verdict (another language, an unsure head, the target language, a song starting in the last
 seconds of a long window, a raising head, asked whatever the patience, not asked for talk,
 silence or `--lyrics off`), a live stream, `subtract_intervals()`, `unheard_stretches()` (and
-its inner floor), `load_cache()` on a record from before the rule (a music video offered again,
-a talk video keeping its cues and giving back its blank stretch, a talk record giving back its
-long holes and its ends but not its pauses, a format-2 record dropped by the format check and
-not migrated, a record under the rule untouched, one written with `--lyrics off` offered again
-under `auto`, `--lyrics off` loading an old record untouched), `save_cache()` writing the rule
+its inner floor), `load_cache()` (a format-3 record dropped whole whatever its `"lyrics"`
+says and a format-2 record with it, a record under the rule untouched, one written with
+`--lyrics off` offered again under `auto` and its talk twin giving back its long holes and its
+ends but not its pauses, `--lyrics off` loading a blank record untouched), `save_cache()` writing the rule
 and its own record reloading as covered, `parse_args(["--lyrics", "off"])`, `retranscribe.py`'s
 own `--lyrics` and its record of the cache shape, `replay_cues.py` taking a lyrics window
 through the lyrics gates, and `dump_words.py` deciding the lyrics path per window (with
@@ -701,12 +786,12 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   written (the content script keeps it per cue), the set is copied when there is something to
   add. `matchAt()` takes the longest span, the exact word on
   a tie, and a kana-only (`bounded`) exact word over a form of itself that adds particles alone
-  (`particlesOnly()`: a walk over `particleLens()` from the word's end to the form's), so a kana
-  noun ending in a verb's kana (いくつ, きょう, けっこう, ふつう, ほんとう, whose stem is in the
-  tables) ends before its copula and carries no です in its pitch overbar (いくつ|です|か, the
-  copula a particle of its own with the status), a kana verb's んだ / でしょう being coloured by
-  the particle chain instead (わかる|ん|だ, おいしい|です), while a form that adds more than
-  particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is one
+  (`particlesOnly()`: a walk over `particleShapes()`, the entries of `PARTICLES` that end at a
+  word boundary, from the word's end to the form's), so a kana noun ending in a verb's kana
+  (いくつ, きょう, けっこう, ふつう, ほんとう, whose stem is in the tables) ends before its copula
+  and carries no です in its pitch overbar (いくつ|です|か), a kana verb losing nothing by it
+  (わかる|んだ, おいしい|です: the copula is plain text either way), while a form that adds more
+  than particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is one
   run): exact words longest first (`bounded` ones must end at a boundary or the end of the text,
   the others anywhere `endsWord()` admits: the end, a boundary, or not right before a kanji,
   katakana or ー, so 関 is not coloured in 関係, 飲み not in 飲み物, while 見た ends before 犬 and
@@ -769,53 +854,19 @@ marks the words of every line. Everything in words.js is pure, without DOM.
     かけたくさん (ICU かけ|たらしい, かけ|たくさん) stay plain, since らしい and くさん are no
     particles and `NOT_BEFORE` keeps た from ending the form before them.
   - It stays linear-ish: Maps keyed by the substring, never a loop over the deck per position.
-- Three things take a colour without being a deck word, so that a line reads in whole pieces
-  (ちょうどこのお風呂の中で with 風呂 and 中 in the deck is `[ちょうど][この][お風呂の][中で]`, not
-  `お[風呂]の[中]で`; 視聴者の方に話しかけていただくっていうね is `[視聴者の][方に][話しかけて
-  いただくって][いう][ね]`). Each is a run of its own with the word's `status` and `pitch` null;
-  content.js draws every run, and adjacent runs of one status stay separate. A word with a
-  pitch and no status has no colour to run on: what would take it is plain text.
+- The word alone takes the colour. A particle after it is not part of it and has no card of its
+  own, so it stays plain: 領域まで and 領域の with 領域 in the deck read `[領域]まで` and
+  `[領域]の`, not one red piece (the colour says "this word's card is new", and まで has no card).
+  ちょうどこのお風呂の中で with 風呂 and 中 in the deck is
+  `[ちょうどこの][お風呂][の][中][で]`. Two things do take a colour without being a deck word,
+  both of them part of the word's own form; each is a run of its own with the word's `status` and
+  `pitch` null, content.js draws every run, and adjacent runs of one status stay separate. A word
+  with a pitch and no status has no colour to run on: what would take it is plain text.
   - An honorific prefix (`HONORIFICS`: お, ご) joins the word it fronts: at a start `i` whose
     character is one AND `starts.has(i + 1)` (ICU cut the prefix off: お|風呂, ご|家族, お|仕事; it
     keeps お茶, お前, お金, ご飯, お母さん whole, so those are never tried and 前 never colours
     お前), when no word matches at `i`, the match is tried at `i + 1`; on a hit the prefix's run
     comes before the word's.
-  - The particles after a word take its colour (`particlesAt()`, handed `wordAt`): entries of
-    `PARTICLES` in a row (`particleLens()`: `particleShapes()` less what `PARTICLE_NOT_BEFORE`
-    refuses, longest first), each ending at a word boundary (には in 本|に|は, で in 中|で, です
-    in 学生|です; not に in 猫|にんじん, not と in 食べる|という: the boundary is the whole test,
-    and ICU's word list decides where one is) or, one kana long, right before the い of いる
-    (`iruAt()`: a single い before a boundary and one of `IRU_ENDINGS`, た て ない なかっ なく ます
-    まし ませ る れば よう たい, is a word to the particle before it, 猫|も|い|た, 猫|に|い|て, and a
-    one-kana particle ICU fused with that い, 猫|がい|た, 猫|はい|て, 猫|とい|た, 猫|がい|れ|ば, is
-    a shape although it ends at no boundary; not before an い that ends the text, 猫|がい, or that
-    is followed by anything else, 猫|はい|、), the chain reaching furthest of those that a word
-    follows (`wordFollows()`: the end of the text, anything but hiragana, a piece in a particle's
-    shape, the い of いる, or a segment of two kana or more not ending in っ; or a deck word,
-    `wordAt`, with or without an honorific or quotative in front, の in 私|の|お|風呂, which also
-    ends the chain: かもしれない in the deck, in 猫|かも|し|れ|ない) or that end in one of
-    `PARTICLES_ONLY` (を, へ: no word begins with them, so they are taken whatever follows,
-    猫|を|み|た, 猫|を|た|べた, 猫|へ|い|っ|た; not は, since はいる, はしる, はなす and はじめる are
-    common kana verbs), cut to `PARTICLE_CHAIN_MAX` (3): 本にはねよな takes には, ね and よ, and
-    the walk stops there too, at `PARTICLE_MAX_LEN ** PARTICLE_CHAIN_MAX` nodes at most (a line
-    of alternating particles, 猫のにのに…, used to cost 2 ** n). That
-    rule answers ICU's habit of cutting a kana verb it does not know into single kana, the first
-    of which is a particle as often as not (猫|が|で|た, 猫|に|も|ら|っ|た, 猫|は|よ|か|っ|た,
-    食|べ|て|し|まっ|た): a particle before a single kana that is no particle is not taken
-    (猫|が|す|わっ|た colours nothing past 猫), and `PARTICLE_NOT_BEFORE` refuses the particles a
-    following kana makes such a verb of (なら before ない/なく/なかっ/なけれ/ん: ならない; で before
-    て/た: 出る; な before に/れ/っ/る/で: 何, なる, 撫でる; ね before て/た: 寝る; よ before か/ん:
-    よかった, 呼んだ; の before ん: 飲んだ; や before っ: やる; し before ま/れ/て/た: しまう, しれない,
-    する; も before ら/て: もらう, もてる; か before っ/え: 買う, 帰る; と before っ: 取る), a refused
-    piece counting as a word for the particle before it, so が is taken in 猫がでた and 猫がでてきた,
-    に in 猫にもらった (never にも), は in 猫はねた and 猫はよかった, かも in 猫かもしれない, and で,
-    も, ね, よ and し are not. 〜といて, the contracted ておいて, colours the と with the verb
-    (勉強せんといて: ICU cuts 勉強|せん|とい|て, and と before the い of いる is a particle's shape;
-    いて after it is いる to the matcher). A particle after an uncoloured word stays plain.
-    Without a segmenter every segment is one kana, so a particle is then taken at the end of the
-    text, before anything but hiragana, before another particle or before the い of いる only.
-    Known gap: a verb cut into a particle and two kana or more takes the particle (猫|が|に|げた
-    colours に, 猫|を|さ|が|した さ and が).
   - A quotative (`QUOTATIVES`: って, と, longest first) may front いう, and いう alone
     (`QUOTED_WORD`), inside one segment: ICU keeps っていう and という (彼|という|人) whole, so
     いう never begins a segment, while it cuts って off every other word (って|こと, って|もの)
@@ -834,11 +885,11 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   real `wordStarts`: the examples above, the tails, `AFTER`, `OPEN_TAILS`, `NEXT`, `NOT_BEFORE`,
   the compounds, the bare stems, the particles and auxiliaries, the two lines of the viewer
   exactly as wanted, the honorific prefix (お茶 / お前 with 茶 / 前 stay plain, お茶 with お茶,
-  ご|家族, a status-less word's prefix), the particle chain (本には, 本からは, the fourth staying
-  plain, a particle after a plain word, に in にほん as one segment, the cut-up verbs, the
-  `PARTICLE_NOT_BEFORE` pieces, a deck word winning, no segmenter, the particle before a word
-  with an honorific prefix, を and へ whatever follows them and が before the い of いる, a line
-  of alternating particles staying quick), いう in という and っていう and not in そういう (and
+  ご|家族, a status-less word's prefix), the particles after a word staying plain (本には,
+  本からは, 学生です, 猫がでた, 猫にほん, the conjugation still going with the word, a deck word
+  after the particle still found, the plain pieces joined into one run) and the viewer's two
+  lines colouring 領域 alone (この時点でこっちの地声領域のE4に変えれる人なぁー and
+  で、余裕がある人はそのままA4の地声領域まで持っていってください。), いう in という and っていう and not in そういう (and
   ところ, とおる, とまる, とくに staying plain), the kana-only stems with their guards (いれば,
   かけら, かけに行く, the one-kana stems staying exact), a kana verb's form ending inside the
   segment ICU made of its ending and a particle (and the exact bounded word not), くれる after

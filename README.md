@@ -287,11 +287,12 @@ in its usual conjugations and in its noun form: a card for 食べる colours 食
 食べたことがある and 食べ in 食べに行く, 書く colours 書かない and 書いて, 美しい colours
 美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり, and a word
 written in kana is found in its forms too (かける colours かけて, しまう colours しまった,
-おいしい colours おいしかった). The particles after a coloured word and the honorific お or ご
-before it take its colour (お風呂の, 中で, 学生です), and so does the quotative って or と between
-a coloured word and one found after it (話しかけていただくっていう with いう in the deck), so a
-line reads in whole pieces. A word is not coloured inside a compound (食べ物 for 食べる, 日本語
-for 日本, 走者 for 走る), and a card for a particle, the copula or an auxiliary (は, のは, から,
+おいしい colours おいしかった). The word alone takes the colour: a particle after it has no card
+of its own and stays plain (領域まで reads 領域 in colour and まで in black). The honorific お or
+ご before a word takes its colour, being part of the word (お風呂), and so does the quotative って
+or と between a coloured word and one found after it (話しかけていただくっていう with いう in the
+deck), which ICU holds in one piece. A word is not coloured inside a compound (食べ物 for 食べる,
+日本語 for 日本, 走者 for 走る), and a card for a particle, the copula or an auxiliary (は, のは, から,
 でも, だ, です, ます, ない, たい, ん …) never colours anything by itself, since it would paint every
 line the same way. Two cards for one word show the one with the least progress; a suspended card
 only counts when there is no other.
@@ -435,7 +436,7 @@ and the server does the heavy lifting with
 **Scheduling.** When you open a video the server fetches the audio track with
 [yt-dlp](https://github.com/yt-dlp/yt-dlp), decodes a minute around the playhead while the
 download is still running, and transcribes a short 20-second window there so the first subtitles
-appear quickly. It then continues in 40-second windows up to 15 minutes ahead of you. A sentence
+appear quickly. It then continues in 30-second windows up to 15 minutes ahead of you. A sentence
 cut at a window edge is dropped and re-transcribed at the start of the next window, so lines are
 never chopped. Seeking to an untranscribed part starts a new short window there. Only the tab you
 are looking at is served: the extension elects one, and the others are answered without the server
@@ -496,12 +497,13 @@ server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3
 | `--cookies-from-browser firefox` | Age-restricted or members-only videos, or when YouTube asks for a sign-in |
 | `--cookies /path/cookies.txt` | Same, with an exported cookies file (use this inside Docker) |
 | `--lookahead 0` | Transcribe to the end of the video instead of stopping 15 minutes ahead |
-| `--window 60` | Longer windows are slightly more efficient, shorter ones react faster to seeking (default 40) |
+| `--window 60` | Longer windows are slightly more efficient, shorter ones react faster to seeking (default 30, faster-whisper's own chunk: a longer window decodes its tail without the initial prompt) |
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
 | `--max-cue-seconds 7` / `--min-cue-seconds 0.8` | Longest and shortest cue (defaults 7, Netflix's own maximum, and 0.8); shorter ones are extended or merged |
-| `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
+| `--initial-prompt ""` | Turn off the prompt that asks Whisper for punctuation. Japanese gets one by default (`はい、そうですね。今日はよろしくお願いします。それで、どう思いますか？`), because a window is decoded with nothing in front of it and an unprompted decode writes a sentence mark at about half of the sentence ends; any other text replaces it, and a language other than Japanese has none |
 | `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop (0 = never listen for it, transcribe everything) |
 | `--lyrics off` | Transcribe a window in which the speech detector hears under a second of speech with the detector as before (blank when it heard nothing). The default `auto` transcribes such a window without the detector when its audio is not silent (sung lyrics, speech over music) and Whisper hears the target language in it, under stricter gates |
+| `--sentence-ends off` | Cut and merge lines on Whisper's own punctuation alone. The default `auto` writes the sentence mark Whisper left out where a word ending in a sentence-final expression (よね, です, ます, か, or a plain form) is followed by a pause, so a run-on line breaks where the speaker ended the sentence and a mined card gets that sentence and no more |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
@@ -576,7 +578,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
 | Badge says "the speech is not in the subtitle language" | The server heard a minute of another language and stopped; it starts again when the subtitle language returns. For a video that really does mix languages, start the server with `--language-patience 0`. |
 | Badge says "No speech found in this video" | The whole video, from its start, was transcribed and nothing was heard: a silent clip, an instrumental, a song Whisper does not hear as Japanese, or, with `--lyrics off`, any song. |
-| A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before that gets its lines on the next visit: the server transcribes it again where nothing was heard (a result saved by 0.11.2) or from the start (older results); nothing needs deleting from `~/.shisu-ko/cache`. A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
+| A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before 0.12.0 gets its lines on the next visit: that release changed the shape of the cue cache, so every older result is ignored and the video is transcribed again from the start; nothing needs deleting from `~/.shisu-ko/cache`. A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
