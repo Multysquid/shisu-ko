@@ -712,7 +712,7 @@ def make_app(monkeypatch, tmp_path, **args_overrides):
 
 
 def write_record(tmp_path, cues, covered, speech, duration=34.04, **extra):
-    """A format-3 record as a 0.11.2 server wrote it: no "lyrics" key (the key, or the rule, in `extra`)."""
+    """A record of the current format; `extra` carries the "lyrics" rule, or another format."""
     import json
 
     data = {"video_id": VIDEO, "title": "OP", "duration": duration, "format": server.CACHE_FORMAT,
@@ -722,54 +722,47 @@ def write_record(tmp_path, cues, covered, speech, duration=34.04, **extra):
     (tmp_path / f"{VIDEO}.cues.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-def test_a_music_video_cached_before_the_rule_is_offered_to_the_planner_again(monkeypatch, tmp_path, caplog):
-    # The Short's own record: covered to the end, nothing heard, nothing decoded. Loading it as
-    # ready would keep it blank for ever; instead nothing is covered and the audio is fetched anew.
+def test_a_format_3_record_is_dropped_by_the_format_check(monkeypatch, tmp_path, caplog):
+    # 0.11.x wrote format 3. The cue geometry has changed since (sentence marks, the row boundary
+    # at one, the anomaly gate), and a bumped format is the only way a change reaches a video
+    # someone has already watched: the record goes whole, the title stays, the video is
+    # transcribed again. With the key or without it - format 4 is what is read, not "lyrics".
     caplog.set_level(logging.INFO, logger="shisu-ko")
     app = make_app(monkeypatch, tmp_path)
-    write_record(tmp_path, cues=[], covered=[[0.0, 34.04]], speech=[])
-    s = server.Session(video_id=VIDEO, url="u")
-    app.load_cache(s)
-    assert s.title == "OP" and s.duration == 34.04
-    assert s.covered == [] and s.cues == [] and s.speech == []
-    assert s.status == "pending"
-    assert any("34 s were covered before the lyrics rule" in r.getMessage() for r in caplog.records)
+    for extra in ({}, {"lyrics": "auto"}, {"lyrics": "off"}):
+        write_record(tmp_path, cues=[{"start": 1.0, "end": 4.0, "text": "これは", "seg": 0}],
+                     covered=[[0.0, 34.04]], speech=[[0.8, 4.0]], format=3, **extra)
+        s = server.Session(video_id=VIDEO, url="u")
+        app.load_cache(s)
+        assert s.title == "OP"
+        assert s.cues == [] and s.covered == [] and s.speech == [], extra
+        assert s.status == "pending"
+    assert not any("loaded" in r.getMessage() and "cached cues" in r.getMessage() for r in caplog.records)
 
 
-def test_a_talk_video_cached_before_the_rule_keeps_its_cues_and_gives_back_its_blank_stretch(monkeypatch, tmp_path):
-    app = make_app(monkeypatch, tmp_path)
-    cues = [{"start": 1.0, "end": 4.0, "text": "これは", "seg": 0}, {"start": 4.2, "end": 20.0, "text": "テスト", "seg": 1}]
-    write_record(tmp_path, cues=cues, covered=[[0.0, 60.0]], speech=[[0.8, 19.5]], duration=60.0)
-    s = server.Session(video_id=VIDEO, url="u")
-    app.load_cache(s)
-    assert [c["text"] for c in s.cues] == ["これは", "テスト"]
-    assert [c["seg"] for c in s.cues] == [0, 1] and s.seg_next == 2
-    assert s.speech == [[0.8, 19.5]]
-    assert s.covered == [[0.0, 20.0]]  # the song bridge after the talk is transcribed again
-    assert s.status == "pending"
-
-
-def test_a_talk_record_gives_back_its_long_holes_and_its_ends_but_not_its_pauses(monkeypatch, tmp_path, caplog):
-    # A 0.11.2 talk record: an intro, lines with pauses of a few seconds between them (holes of
-    # 2.5 and 3.5 s, under LYRICS_MIN_STRETCH_S), a ten-second bridge, and an outro. The pauses
-    # stay covered, or every talk video would be fetched again and walked a window per pause.
+def test_a_lyrics_off_talk_record_gives_back_its_long_holes_and_its_ends_but_not_its_pauses(monkeypatch, tmp_path, caplog):
+    # A talk record written with the switch off: an intro, lines with pauses of a few seconds
+    # between them (holes of 2.5 and 3.5 s, under LYRICS_MIN_STRETCH_S), a ten-second bridge and
+    # an outro. The pauses stay covered, or every talk video would be fetched again and walked a
+    # window per pause; the cues and the speech are kept whatever is given back.
     caplog.set_level(logging.INFO, logger="shisu-ko")
     app = make_app(monkeypatch, tmp_path)
     cues = [{"start": 3.0, "end": 10.0, "text": "a", "seg": 0}, {"start": 12.5, "end": 20.0, "text": "b", "seg": 1},
             {"start": 23.5, "end": 30.0, "text": "c", "seg": 2}, {"start": 40.0, "end": 50.0, "text": "d", "seg": 3}]
-    write_record(tmp_path, cues=cues, covered=[[0.0, 60.0]], speech=[[3.2, 9.5], [12.7, 19.5], [23.7, 29.5], [40.2, 49.5]], duration=60.0)
+    write_record(tmp_path, cues=cues, covered=[[0.0, 60.0]], duration=60.0, lyrics="off",
+                 speech=[[3.2, 9.5], [12.7, 19.5], [23.7, 29.5], [40.2, 49.5]])
     s = server.Session(video_id=VIDEO, url="u")
     app.load_cache(s)
-    assert len(s.cues) == 4
+    assert [c["text"] for c in s.cues] == ["a", "b", "c", "d"]
+    assert [c["seg"] for c in s.cues] == [0, 1, 2, 3] and s.seg_next == 4
+    assert s.speech == [[3.2, 9.5], [12.7, 19.5], [23.7, 29.5], [40.2, 49.5]]
     assert s.covered == [[3.0, 30.0], [40.0, 50.0]]  # the intro, the bridge and the outro are offered again
     assert s.status == "pending"
-    assert any("23 s were covered before the lyrics rule" in r.getMessage() for r in caplog.records)
+    assert any("23 s were covered with --lyrics off" in r.getMessage() for r in caplog.records)
 
 
-def test_a_format_2_record_is_dropped_by_the_format_check_not_migrated(monkeypatch, tmp_path, caplog):
-    # 0.11.0 and 0.11.1 wrote format 2 (with the key on the branch that made the rule, without it
-    # on main); either way the format check drops the record whole, title kept, and the video is
-    # transcribed from scratch. The migration keys on the lyrics field of a format-3 record only.
+def test_a_format_2_record_is_dropped_by_the_format_check(monkeypatch, tmp_path, caplog):
+    # 0.11.0 and 0.11.1 wrote format 2. Like every other older cache it goes whole, title kept.
     caplog.set_level(logging.INFO, logger="shisu-ko")
     app = make_app(monkeypatch, tmp_path)
     write_record(tmp_path, cues=[{"start": 1.0, "end": 4.0, "text": "これは", "seg": 0}], covered=[[0.0, 34.04]],
@@ -779,7 +772,6 @@ def test_a_format_2_record_is_dropped_by_the_format_check_not_migrated(monkeypat
     assert s.title == "OP"
     assert s.cues == [] and s.covered == [] and s.speech == []
     assert s.status == "pending"
-    assert not any("covered before the lyrics rule" in r.getMessage() for r in caplog.records)
     assert not any("loaded" in r.getMessage() and "cached cues" in r.getMessage() for r in caplog.records)
 
 
@@ -793,7 +785,8 @@ def test_a_record_written_under_the_rule_loads_untouched(monkeypatch, tmp_path):
 
 
 def test_a_record_written_with_lyrics_off_is_offered_again_under_auto(monkeypatch, tmp_path):
-    # --lyrics off covers a sung window with nothing in it just as the old server did.
+    # --lyrics off covers a sung window with nothing in it; taking the switch off must not leave
+    # the video blank for ever, so those stretches go back to the planner.
     app = make_app(monkeypatch, tmp_path)
     write_record(tmp_path, cues=[], covered=[[0.0, 34.04]], speech=[], lyrics="off")
     s = server.Session(video_id=VIDEO, url="u")
@@ -801,9 +794,10 @@ def test_a_record_written_with_lyrics_off_is_offered_again_under_auto(monkeypatc
     assert s.covered == [] and s.status == "pending"
 
 
-def test_lyrics_off_loads_an_old_record_untouched(monkeypatch, tmp_path):
+def test_lyrics_off_loads_a_blank_record_untouched(monkeypatch, tmp_path):
+    # Nothing is offered again while the switch is off: it is the switch that covered it.
     app = make_app(monkeypatch, tmp_path, lyrics="off")
-    write_record(tmp_path, cues=[], covered=[[0.0, 34.04]], speech=[])
+    write_record(tmp_path, cues=[], covered=[[0.0, 34.04]], speech=[], lyrics="off")
     s = server.Session(video_id=VIDEO, url="u")
     app.load_cache(s)
     assert s.covered == [[0.0, 34.04]]
@@ -819,9 +813,8 @@ def test_save_cache_writes_the_rule_and_its_own_record_reloads_as_covered(monkey
     app.save_cache(s)
     data = json.loads((tmp_path / f"{VIDEO}.cues.json").read_text(encoding="utf-8"))
     assert data["lyrics"] == "auto"
-    # The migration keys on the lyrics field, not on the format: a 0.11.2 record (format 3, no
-    # key) is migrated, a format-2 record is dropped by the format check like any older cache.
-    assert data["format"] == server.CACHE_FORMAT == 3
+    # Every record carries the rule and the current format; an older one is dropped whole.
+    assert data["format"] == server.CACHE_FORMAT == 4
 
     reloaded = server.Session(video_id=VIDEO, url="u")
     app.load_cache(reloaded)

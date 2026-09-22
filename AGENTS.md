@@ -116,23 +116,23 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
   file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
-  `load_cache()` brings them back from there after a switch back. A record carries `"lyrics"`,
-  the rule its covered ranges were made under (`--lyrics` as the server ran, see "How the server
-  schedules work"): a 0.11.2 server (format 3 without the key), or `--lyrics off`, marked a sung
-  stretch covered with nothing in it, so `load_cache()` under `--lyrics auto` gives a record
-  without `"lyrics": "auto"` its blank stretches back (`unheard_stretches()`: the parts of
-  `covered` that no speech interval and no cue touches, under two floors: 1.5 s, `plan_window()`'s
-  own floor, at either end of a covered range, where a video's music sits, and
-  `LYRICS_MIN_STRETCH_S` (4 s) between two heard things, `load_cache()` passing
-  `inner_seconds=LYRICS_MIN_STRETCH_S`, since every pause of a talk is a hole of a second or two
-  and a window per pause would fetch, walk and rewrite the record dozens of times over; taken
-  out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session, no
-  longer covered to its end, is fetched and planned again over them). `CACHE_FORMAT` is 3
-  (bumped by 0.11.2 for the cue geometry, see "How the server schedules work") and the format
-  check in `load_cache()` runs before this migration, so it reaches only a format-3 record
-  without the key: one written by 0.11.2, or by this version under `--lyrics off`. A format-2
-  record, from 0.11.0 or 0.11.1, is dropped whole by the format check and the video is
-  transcribed again from the start, which brings it under the lyrics rule as well.
+  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 4, bumped by
+  0.12.0 for the cue geometry (sentence marks, the row boundary at one, the anomaly gate); every
+  record of an older format is dropped whole by the check in `load_cache()`, the title kept, and
+  the video transcribed again from the start. That check is the only way a geometry change reaches
+  a video someone has already watched, so it runs before anything is read out of the record and
+  there is no migration behind it. A record carries `"lyrics"`, the rule its covered ranges were
+  made under (`--lyrics` as the server ran, see "How the server schedules work"), and under format
+  4 it always does. `--lyrics off` marks a sung stretch covered with nothing in it, so a record
+  written with the switch off, read by a server running `--lyrics auto`, gets its blank stretches
+  back (`unheard_stretches()`: the parts of `covered` that no speech interval and no cue touches,
+  under two floors: 1.5 s, `plan_window()`'s own floor, at either end of a covered range, where a
+  video's music sits, and `LYRICS_MIN_STRETCH_S` (4 s) between two heard things, `load_cache()`
+  passing `inner_seconds=LYRICS_MIN_STRETCH_S`, since every pause of a talk is a hole of a second
+  or two and a window per pause would fetch, walk and rewrite the record dozens of times over;
+  taken out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session,
+  no longer covered to its end, is fetched and planned again over them). That is not a migration
+  and does not date: it is what makes the switch reversible.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
@@ -290,7 +290,7 @@ Every cue still carries `seg`, the id of the Whisper segment it came from, and a
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
 not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
 mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment, and a stale
-id would mis-group it. Cue caches are format 3; older caches are ignored, which is the only way a
+id would mis-group it. Cue caches are format 4; older caches are ignored, which is the only way a
 geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
 compare two cue builders on identical Whisper output; keep them working (`retranscribe.py` wraps
@@ -362,11 +362,10 @@ a short or quiet stretch staying covered, a window the head refused covered whol
 verdict (another language, an unsure head, the target language, a song starting in the last
 seconds of a long window, a raising head, asked whatever the patience, not asked for talk,
 silence or `--lyrics off`), a live stream, `subtract_intervals()`, `unheard_stretches()` (and
-its inner floor), `load_cache()` on a record from before the rule (a music video offered again,
-a talk video keeping its cues and giving back its blank stretch, a talk record giving back its
-long holes and its ends but not its pauses, a format-2 record dropped by the format check and
-not migrated, a record under the rule untouched, one written with `--lyrics off` offered again
-under `auto`, `--lyrics off` loading an old record untouched), `save_cache()` writing the rule
+its inner floor), `load_cache()` (a format-3 record dropped whole whatever its `"lyrics"`
+says and a format-2 record with it, a record under the rule untouched, one written with
+`--lyrics off` offered again under `auto` and its talk twin giving back its long holes and its
+ends but not its pauses, `--lyrics off` loading a blank record untouched), `save_cache()` writing the rule
 and its own record reloading as covered, `parse_args(["--lyrics", "off"])`, `retranscribe.py`'s
 own `--lyrics` and its record of the cache shape, `replay_cues.py` taking a lyrics window
 through the lyrics gates, and `dump_words.py` deciding the lyrics path per window (with

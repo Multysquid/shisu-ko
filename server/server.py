@@ -67,7 +67,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.11.3"
+VERSION = "0.12.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
 # GPU context, no model left) and
@@ -85,7 +85,7 @@ MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-
 MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
                    "or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
-CACHE_FORMAT = 3  # bumped when cue fields change; older caches are ignored and transcribed again
+CACHE_FORMAT = 4  # bumped when cue geometry or fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
 LANGUAGE_MIN_SPEECH = 4.0        # a window with less speech than this gets no language vote:
@@ -2785,22 +2785,20 @@ class App:
             heard = watch.get("heard")
             s.heard = heard if isinstance(heard, str) and heard else None
             s.language_paused = bool(watch.get("paused"))
-        # A cache made without the lyrics rule (a 0.11.2 server, which wrote format 3 without the
-        # key, or --lyrics off; an older format never gets here, the check above drops it whole)
-        # marked a sung stretch covered without a word in it: Silero heard nothing there, so
-        # nothing reached the decoder. Offer those stretches to the planner again, cues and the
-        # rest kept, so a music video watched before the rule is not blank for ever: one at either
-        # end of a covered range from 1.5 s (an intro, an outro, the whole of a Short), one between
-        # two lines from LYRICS_MIN_STRETCH_S, as process() plans them for a fresh window, since
-        # every pause of a talk is a hole of a second or two and a window per pause would fetch,
-        # walk and rewrite the record dozens of times over; wants_lyrics() judges each window anew
-        # (a silent one costs a Silero pass), and the record is written with the key by the first
-        # window walked.
-        if data.get("lyrics") != "auto" and getattr(self.args, "lyrics", "auto") == "auto":
+        # A record written with --lyrics off marked a sung stretch covered with nothing in it:
+        # Silero heard nothing there, so nothing reached the decoder. Under --lyrics auto those
+        # stretches go back to the planner, cues and the rest kept, so a video watched with the
+        # switch off is not blank for ever once it is taken off: one at either end of a covered
+        # range from 1.5 s (an intro, an outro, the whole of a Short), one between two lines from
+        # LYRICS_MIN_STRETCH_S, as process() plans them for a fresh window, since every pause of a
+        # talk is a hole of a second or two and a window per pause would fetch, walk and rewrite
+        # the record dozens of times over; wants_lyrics() judges each window anew (a silent one
+        # costs a Silero pass), and the first window walked rewrites the record under the rule.
+        if data.get("lyrics") == "off" and getattr(self.args, "lyrics", "auto") == "auto":
             unheard = unheard_stretches(s.covered, s.speech, s.cues, inner_seconds=LYRICS_MIN_STRETCH_S)
             if unheard:
                 s.covered = subtract_intervals(s.covered, unheard)
-                log.info("[%s] %.0f s were covered before the lyrics rule with nothing heard; transcribing them again",
+                log.info("[%s] %.0f s were covered with --lyrics off and nothing heard; transcribing them again",
                          s.video_id, sum(b - a for a, b in unheard))
         if s.fully_covered():
             s.status = "ready"  # nothing left to transcribe, no need to fetch the audio again
