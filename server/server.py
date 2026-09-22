@@ -372,6 +372,146 @@ def repair_lead_words(words, speech) -> list:
     return words
 
 
+# --------------------------------------------------------------------------- sentence ends
+
+# Sentence-final particles and the polite and copula endings. Sorted longest first, so よね is
+# matched before ね, でしょう before でしょ and ました before the weak た below.
+SENTENCE_STRONG = tuple(sorted((
+    "よね", "ね", "よ", "な", "なあ", "わ", "ぞ", "ぜ", "さ", "か", "かな", "っけ",
+    "でしょ", "でしょう", "じゃん", "もん", "です", "ます", "ました", "ません", "でした",
+    "ましょう", "ください", "なさい", "んだ", "のだ", "んです", "だ",
+), key=len, reverse=True))
+# Plain forms. They end a casual sentence, but they also run on into the next clause
+# (食べた + ので), so only a longer pause makes one an end.
+SENTENCE_WEAK = tuple(sorted(("た", "ない", "る", "い"), key=len, reverse=True))
+SENTENCE_QUESTION = frozenset({"か", "かな", "っけ", "でしょ", "でしょう"})
+# A mark is never written over one of these, ...
+SENTENCE_CLOSERS = SENTENCE_END | CLAUSE_BREAK | set("」』）)]】》〉”’\"'")
+CLOSER_CHARS = "".join(sorted(SENTENCE_CLOSERS))   # the same set as a str, for rstrip()
+# ... nor before a word that is one of these, which can only continue the sentence: です in ですか
+# is left alone and the か judged instead. The test is on the whole word, not its first character:
+# はい, やっぱり, もう, ところで and でも all open a sentence and all start with a particle kana.
+# Whisper writes the sentence-initial connective with its own comma (で、 / でも、), and that comma
+# is the evidence that this で opens a sentence rather than closing a phrase.
+SENTENCE_PARTICLES = frozenset((
+    "は", "が", "を", "に", "で", "と", "も", "の", "へ", "や", "か", "ね", "よ", "な",
+    "から", "まで", "より", "とか", "など", "って", "には", "では", "とは", "のは", "のに",
+    "ので", "のか",
+))
+# The か of these is a filler, not a question: the speaker is still choosing the next word
+# (悩んで、なんか || , 行きたい人多そうなんか || さ). Three of the four false marks measured.
+FILLER_KA = ("なんか", "とか", "なんとか", "というか", "っていうか", "なんつーか")
+# こと + か is the nominaliser and a real question (老害教師少なめってことか？), and it ends in とか.
+SHAPE_EXCEPT = ("ことか",)
+# Whole words that end in a shape kana without being sentence-final: 何か is not a question, そんな
+# is not a な, また is not a た. A shape is a suffix test, so without this table 何か行きたい becomes
+# 何か？行きたい.
+SENTENCE_NOT_ENDINGS = (
+    "何か", "誰か", "いつか", "どこか", "確か", "なにか", "だれか", "どっか",
+    "そんな", "こんな", "どんな", "あんな", "また", "まだ", "ただ",
+)
+# A sentence-final particle straight after a clause connective is interjectional - the speaker is
+# holding the floor, not ending the sentence (めっちゃ偏見だけどさ || はいはい). The cost is a real
+# だからね。 now and then; the gain is every けどさ, からさ, してね that used to cut a sentence in two.
+SENTENCE_CONNECTIVES = ("けど", "から", "し", "て", "で", "のに", "ので")
+SENTENCE_INTERJECTIONAL = frozenset({"さ", "ね", "よ", "な"})
+
+
+def longest_silence(start: float, end: float, intervals) -> float:
+    """The longest stretch of [start, end) that a sorted, merged interval list leaves uncovered."""
+    if end <= start:
+        return 0.0
+    longest, cursor = 0.0, start
+    for a, b in intervals:
+        if b <= start:
+            continue
+        if a >= end:
+            break
+        longest = max(longest, min(a, end) - cursor)
+        cursor = max(cursor, min(b, end))
+    return max(longest, end - cursor)
+
+
+def sentence_shape(text: str) -> tuple:
+    """(shape, strong) for the sentence-final expression this text ends in, else (None, False)."""
+    for shape in SENTENCE_STRONG:
+        if text.endswith(shape):
+            return shape, True
+    for shape in SENTENCE_WEAK:
+        if text.endswith(shape):
+            return shape, False
+    return None, False
+
+
+def punctuate_words(words, speech, next_word, limits: CueLimits) -> list:
+    """Write the sentence mark Whisper left out, where a sentence-final shape meets a pause.
+
+    Rewrites the Word objects in place and returns the same list, as repair_lead_words does; every
+    caller hands it a fresh list from absolute_words(), and one that did not would find its words
+    rewritten.
+
+    The cue builder has no sentence signal of its own: every cut in group_words() and every seam in
+    merge_segments() defers to Whisper's punctuation, and Whisper writes it inconsistently. The same
+    audio decoded twice gave そうなんですよねおじいちゃん先生とゲームの話したりするの?, which the
+    builder made one 29-character line of, and そうなんですよね。, which it made three readable ones
+    of. Neither half of the evidence stands alone - a Japanese speaker pauses inside a word, and よね
+    runs on mid-sentence - but a sentence-final expression followed by a pause is the signal Kyoto's
+    spontaneous-Japanese work (Akita et al. 2006) reaches F 0.85 with, and that pair is the rule here.
+
+    `next_word` is the next segment's first Word, or None; inside the list the next word answers for
+    it. It is the whole Word and not just its start because every test below asks what follows as
+    well as when: a segment opening on っと or on a particle continues the one before it, and a mark
+    between them would be as wrong across a segment boundary as inside one. A word with nothing
+    after it gets no mark at all: the pause is the evidence, and without something following there
+    is none to measure.
+
+    The pause is the longer of two measures, because each hides what the other shows. The detector's
+    intervals are read from the word's own start, not its end: Whisper anchors a segment's last word
+    to the end of the audio it decoded, so the silence that follows the utterance usually lies inside
+    that word's span, where the gap to the next word is zero. And the intervals miss a short pause
+    entirely - Silero refuses a silence under 300 ms and pads what it keeps by 200 ms on each side,
+    so the measured 0.34 s after よね at 18:06 sat in the middle of one interval - where Whisper's own
+    word timings still show it, flush as they otherwise are (two gaps over 0.25 s in 50 s of talk).
+    """
+    if not limits.sentence_ends:
+        return words
+    for i, w in enumerate(words):
+        # The next two words, the second only to see a comma Whisper split off as a token of its
+        # own (で then 、). Past the end of the segment the next segment's first word stands in.
+        ahead = words[i + 1:i + 3]
+        if len(ahead) < 2 and next_word is not None:
+            ahead = ahead + [next_word]
+        if not ahead:
+            break
+        nxt, after_next = ahead[0], (ahead[1] if len(ahead) > 1 else None)
+        if not (w.word or "").strip():
+            continue
+        text = word_text(words[:i + 1])
+        if not text or text[-1] in SENTENCE_CLOSERS:
+            continue
+        following = (nxt.word or "").strip()
+        # で、 and でも、 open a sentence; the comma is sometimes its own token, so look past it.
+        opens_clause = (following[-1:] in CLAUSE_BREAK
+                        or (after_next is not None and (after_next.word or "").strip()[:1] in CLAUSE_BREAK))
+        if following[:1] in NO_LINE_START:
+            continue
+        if following.rstrip(CLOSER_CHARS) in SENTENCE_PARTICLES and not opens_clause:
+            continue
+        shape, strong = sentence_shape(text)
+        if shape is None or (text.endswith(SENTENCE_NOT_ENDINGS) and not text.endswith(SHAPE_EXCEPT)):
+            continue
+        if shape == "か" and text.endswith(FILLER_KA) and not text.endswith(SHAPE_EXCEPT):
+            continue
+        if shape in SENTENCE_INTERJECTIONAL and text[:-len(shape)].endswith(SENTENCE_CONNECTIVES):
+            continue
+        gap = nxt.start - w.end
+        pause = max(gap, longest_silence(w.start, nxt.start, speech)) if speech else gap
+        if pause < (limits.sentence_pause if strong else limits.sentence_pause_weak):
+            continue
+        w.word = (w.word or "") + ("？" if shape in SENTENCE_QUESTION else "。")
+    return words
+
+
 # --------------------------------------------------------------------------- hallucination gates
 
 @dataclass
@@ -583,6 +723,10 @@ class CueLimits:
     cross_chars: int = 34        # nor a wider one than this
     reach_chars: int = 8         # a cue this short is worth reaching cross_reach for a partner
     max_lines: int = 2           # the professional ceiling, and what the overlay has room for
+    # Sentence ends (punctuate_words): how long a pause has to be behind a sentence-final shape.
+    sentence_pause: float = 0.30       # behind よね, です, か: the shape carries most of the evidence
+    sentence_pause_weak: float = 0.60  # behind た, ない, る, い, which run on as often as they end
+    sentence_ends: bool = True         # --sentence-ends off
 
 
 def cue_limits(args) -> CueLimits:
@@ -590,6 +734,7 @@ def cue_limits(args) -> CueLimits:
         max_chars=int(getattr(args, "max_cue_chars", 30)),
         max_seconds=float(getattr(args, "max_cue_seconds", 7.0)),
         min_seconds=float(getattr(args, "min_cue_seconds", 0.8)),
+        sentence_ends=getattr(args, "sentence_ends", "auto") != "off",
     )
 
 
@@ -759,8 +904,34 @@ def group_words(words, speech, limits: CueLimits) -> list:
     return [g for g in groups if word_text(g) and not JUNK_RE.match(word_text(g))]
 
 
+def ends_sentence(text: str) -> bool:
+    """True when this text's last row ends in a sentence mark, and so closes what it says."""
+    row = text.split("\n")[-1].rstrip()
+    return bool(row) and row[-1] in SENTENCE_END
+
+
+def rows_fit(text: str, limits: CueLimits, at_mark: bool = False) -> bool:
+    """Whether a seamed text is a cue a viewer can read. Never a third row, whatever put the seam there.
+
+    The two seams differ on a short row. A seam the gap guessed is our break, so a row under
+    MIN_PIECE_CHARS is a break we chose badly and the join goes flat instead. A seam at the speaker's
+    own mark is theirs: うん。 is a whole turn, not a stub, and it reads as one on a row of its own.
+    """
+    rows = text.split("\n")
+    if len(rows) > limits.max_lines:
+        return False
+    return at_mark or min(len(row) for row in rows) >= MIN_PIECE_CHARS
+
+
 def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) -> list:
-    """Fold neighbouring cues together while they stay inside the char and duration limits."""
+    """Fold neighbouring cues together while they stay inside the char and duration limits.
+
+    A sentence mark is a hard row boundary: what the speaker finished and what comes after it never
+    share a row, and when the second row would be too short to read, the merge is refused rather
+    than flattened. Two people on one row (マジで?それいいね。) is worse than a two-character cue of
+    its own, and Yomitan and match.js both cut a sentence at the newline. Pieces without a mark
+    merge flat as they always did: that rule is the anti-flicker one, and it is not about sentences.
+    """
     out: list = []
     for cue in cues:
         if out:
@@ -768,11 +939,14 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
             gap = cue["start"] - prev["end"]
             short = (prev["end"] - prev["start"] < limits.min_seconds
                      or cue["end"] - cue["start"] < limits.min_seconds)
+            seam = "\n" if ends_sentence(prev["text"]) else ""
+            text = prev["text"] + seam + cue["text"]
             if (gap <= max_gap and (short or not only_short)
-                    and len(prev["text"]) + len(cue["text"]) <= limits.max_chars
-                    and cue["end"] - prev["start"] <= limits.max_seconds):
+                    and len(text) - text.count("\n") <= limits.max_chars
+                    and cue["end"] - prev["start"] <= limits.max_seconds
+                    and (seam != "\n" or rows_fit(text, limits, at_mark=True))):
                 prev["end"] = cue["end"]
-                prev["text"] = prev["text"] + cue["text"]
+                prev["text"] = text
                 continue
         out.append(dict(cue))
     return out
@@ -786,7 +960,7 @@ def seam_for(prev_text: str, gap: float, limits: CueLimits) -> str:
     first half; and match.js's TERMINATORS splits on it, so cutFrom() scores the mined sentence
     exactly instead of falling back to coverage.
     """
-    if prev_text and prev_text[-1] in SENTENCE_END:
+    if ends_sentence(prev_text):
         return "\n"
     return "\n" if gap >= limits.seam_gap else ""
 
@@ -807,17 +981,30 @@ def merge_segments(cues, limits: CueLimits) -> list:
         if out:
             prev = out[-1]
             gap = cue["start"] - prev["end"]
-            forced = breaks_word(prev["text"].split("\n")[-1], cue["text"].split("\n")[0])
-            short = min(len(prev["text"]), len(cue["text"])) <= limits.reach_chars
+            prev_row = prev["text"].split("\n")[-1]
+            at_mark = ends_sentence(prev_row)
+            # Nothing is split inside a word after a sentence mark: the speaker ended there. Without
+            # this, a next cue opening on ー or a small kana made breaks_word() true and its flat
+            # join put two sentences on one row (そうですね。ーっと言います).
+            forced = not at_mark and breaks_word(prev_row, cue["text"].split("\n")[0])
+            # A finished sentence is not a stub. そうなんですよね。 is eight characters and reads on
+            # its own, so it must not buy the cross_reach budget a half-line is given.
+            finished = at_mark and len(prev_row) >= MIN_PIECE_CHARS
+            short = (len(cue["text"]) <= limits.reach_chars
+                     or (not finished and len(prev["text"]) <= limits.reach_chars))
             seam = "" if forced else seam_for(prev["text"], gap, limits)
             text = prev["text"] + seam + cue["text"]
-            # The line break is the first thing to give up. A row nobody can read, or a third row,
-            # is worse than no break at all, and refusing the merge over one leaves the stub alone
-            # on screen - which is how 言ってた ended up a four-character cue of its own.
-            if seam == "\n":
-                rows = text.split("\n")
-                if len(rows) > limits.max_lines or min(len(x) for x in rows) < MIN_PIECE_CHARS:
-                    text = prev["text"] + cue["text"]
+            if seam == "\n" and not rows_fit(text, limits, at_mark):
+                # A seam the speaker's own mark put there is not negotiable: flattening it would
+                # put two sentences, often two people, on one row. Refuse the merge instead - only
+                # a third row can fail the check at a mark, and a third row has nowhere to go.
+                if at_mark:
+                    out.append(dict(cue))
+                    continue
+                # Elsewhere the line break is the first thing to give up. A row nobody can read, or
+                # a third row, is worse than no break at all, and refusing the merge over one leaves
+                # the stub alone on screen - which is how 言ってた ended up a four-character cue.
+                text = prev["text"] + cue["text"]
             lines = text.split("\n")
             fits = (len(text) - text.count("\n") <= limits.max_chars
                     and len(lines) <= limits.max_lines
@@ -865,9 +1052,33 @@ def normalise_gaps(cues, limits: CueLimits) -> list:
     return cues
 
 
+def carry_trailing_mark(words, kept) -> list:
+    """Move a sentence mark off the words the trim dropped onto the one that now ends the cue.
+
+    The word punctuate_words() marks is a segment's last, and that is the word Whisper stretches
+    over the silence after the utterance - so its midpoint often lies outside speech and trim_words()
+    drops it. The timings have to go, which is what P1.1 exists for; the mark does not, since it
+    belongs to the sentence and not to that word. Trimming is left judging midpoints rather than
+    keeping the word by its start: the P1.1 measurements are about cue in and out times, and a
+    stretched last word kept for its mark would push every cue out by seconds.
+    """
+    if not kept or len(kept) == len(words):
+        return kept
+    end = next(i for i, w in enumerate(words) if w is kept[-1])
+    mark = ""
+    for w in words[end + 1:]:
+        text = (w.word or "").rstrip()
+        if text and text[-1] in SENTENCE_END:
+            mark = text[-1]
+    last = (kept[-1].word or "").rstrip()
+    if mark and not (last and last[-1] in SENTENCE_END):
+        kept[-1].word = (kept[-1].word or "") + mark
+    return kept
+
+
 def build_cues(words, speech, limits: CueLimits) -> list:
     """One Whisper segment's words -> display-ready cues [{start, end, text}] (P1 rules 1-7)."""
-    words = trim_words(words, speech, limits.trim_slack)
+    words = carry_trailing_mark(words, trim_words(words, speech, limits.trim_slack))
     cues = []
     for group in group_words(words, speech, limits):
         start = group[0].start
@@ -958,13 +1169,16 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
 
     `seg` ties every cue back to the Whisper segment it came from, which is a run of speech and
     not a sentence: mining reads the cue alone (see sentenceForCue in content.js). Kept for the
-    cache tools, which measure a change per segment. Returns (cues, next segment id). A lyrics
+    cache tools, which measure a change per segment. Every kept segment is punctuated before any
+    cues are built (punctuate_words), since the pause behind its last word is the gap to the next
+    segment's first. Returns (cues, next segment id). A lyrics
     window was transcribed without the detector: its segments go through lyrics_reason instead,
     and `speech` is what lyrics_spans() made of them (their word runs, padded like the detector's
     intervals and starting past a stranded head, so that the lead repair below slides it onto its
     line as it does on the talk path).
     """
     out: list = []
+    kept: list = []
     for seg in segs:
         # Before the gates, not after: an unrepaired first word makes the segment's span cover a
         # silence it never contained, and the VAD gate then deletes real speech (20 utterances in
@@ -977,6 +1191,16 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
                 drops[reason] = drops.get(reason, 0) + 1
                 drops.setdefault("_text", []).append((reason, (getattr(seg, "text", "") or "").strip()))
             continue
+        kept.append((seg, words))
+    # The pause behind a segment's last word, and what follows it, are in the next kept segment, so
+    # every segment is repaired before any is punctuated. Not on a lyrics window: its speech is the
+    # padded word runs lyrics_spans() made, so every breath inside a sung line reads as a pause, and
+    # the thresholds here were measured on talk.
+    for i, (_, words) in enumerate(kept):
+        following = kept[i + 1][1] if i + 1 < len(kept) else []
+        if not lyrics:
+            punctuate_words(words, speech, following[0] if following else None, limits)
+    for seg, words in kept:
         cues = build_cues(words, speech, limits)
         if not cues:
             if drops is not None:
@@ -3273,6 +3497,10 @@ def parse_args(argv=None):
                         "but the audio is not silent, sung lyrics or speech over music, is transcribed without the "
                         "detector when Whisper hears the target language in it, under stricter gates; off: such "
                         "windows go through the detector as before, blank when it heard nothing")
+    p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
+                   help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
+                        "sentence-final expression (よね, です, か, a plain form) is followed by a pause; "
+                        "off: cut and merge lines on Whisper's own punctuation alone")
     p.add_argument("--initial-prompt", default="", help="optional text prompt given to Whisper for every window")
     p.add_argument("--window", type=float, default=40.0, help="seconds of audio transcribed per step (shorter reacts faster to seeking, longer is slightly more efficient)")
     p.add_argument("--first-window", type=float, default=20.0, help="shorter first step after a seek so subtitles appear quickly")

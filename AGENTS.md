@@ -161,6 +161,55 @@ the previous utterance, where `cue_overlaps()` then deletes a whole good cue. It
 contained, and the VAD and anomaly gates then delete real speech — 29 lines in 17 minutes of the
 sample, against 8 once repaired.
 
+`punctuate_words()` runs next, over every kept segment of a talk window before any cues are built,
+because the pause behind a segment's last word, and the word that follows it, are in the next kept
+segment, which is handed over whole (`next_word`) so that every test below applies across a segment
+boundary as it does inside one. Never on a lyrics window: its `speech` is the padded word runs
+`lyrics_spans()` made, so every breath inside a sung line reads as a pause, and these thresholds
+were measured on talk. The cue
+builder has no sentence signal of its own — every cut in `group_words()` and every seam in
+`seam_for()` defers to Whisper's punctuation — and Whisper writes it inconsistently: at 18:06 of
+one video the live run decoded そうなんですよねおじいちゃん先生とゲームの話したりするの with no
+mark, one 29-character cue, while a second decode of the same audio wrote そうなんですよね。 and
+the same builder gave three. Neither half of the evidence stands alone (a speaker pauses inside a
+word; よね runs on mid-sentence), so the rule is the pair, the one Akita et al. (2006) reach F 0.85
+with on spontaneous Japanese: a word whose text so far ends in a sentence-final shape and is
+followed by a pause takes a `。`, or a `？` for か, かな, っけ, でしょ and でしょう. `SENTENCE_STRONG`
+(sentence-final particles and the polite and copula endings) needs `limits.sentence_pause` (0.30 s);
+`SENTENCE_WEAK` (the plain forms た, ない, る, い, which end a casual sentence as often as they run
+on into the next clause) needs `sentence_pause_weak` (0.60 s). The pause is the longer of the
+detector's silence inside [the word's own start, the next word's start] and Whisper's raw gap to
+the next word, because each hides what the other shows: Whisper anchors a segment's last word to
+the end of the audio it decoded, so the silence usually lies inside that word's span where the gap
+reads zero, while Silero refuses a silence under 300 ms and pads what it keeps by 200 ms on each
+side, so the measured 0.34 s after よね sat in the middle of one interval. Nothing is written over
+a mark already there, before a word opening on a character that can never open one, before a word
+that **is** a particle (`SENTENCE_PARTICLES`, the whole word and not its first character: です before
+か is left alone and the か judged instead, while はい, やっぱり, もう and ところで all open a sentence
+and all start with a particle kana), or after a word that nothing follows, since the pause is the
+evidence and a window's last segment has none. The particle test is skipped when the next word ends
+in a clause mark, or the word after it opens with one: Whisper writes the sentence-initial connective
+with its own comma, `で、` or `で` then `、`, and that comma says the で opens a sentence rather than
+closing a phrase. Three tables refuse a shape on the words in front of it, each from a measured false
+mark: `SENTENCE_NOT_ENDINGS` for a word that merely ends in a shape kana (何か, そんな, また — a shape
+is a suffix test, so without it 何か行きたい became 何か？行きたい), `FILLER_KA` for なんか, とか,
+というか … where the speaker is choosing the next word rather than asking (but not the nominaliser
+ことか, `SHAPE_EXCEPT`), and `SENTENCE_INTERJECTIONAL` after a connective (けど, から, し, て, で,
+のに, ので), where the speaker is holding the floor (めっちゃ偏見だけどさ ‖ はいはい). They cost no
+labelled sentence end on the measured range and take mark precision from 89.5% to 97.1%.
+`--sentence-ends off` (`limits.sentence_ends`) turns the rule off, and `replay_cues.py` and
+`retranscribe.py` take the same switch, so a before and after run on identical Whisper output.
+In `merge_segments()` a previous cue whose last row holds at least `MIN_PIECE_CHARS` characters and
+ends in a `SENTENCE_END` mark no longer counts as `short`: a finished sentence is not a stub, so it
+does not buy the `cross_reach` budget a half-line is given. Nor is `forced` allowed to override such
+a mark (`not ends_sentence(prev_row) and breaks_word(...)`): a next cue opening on ー or a small kana
+makes `breaks_word()` true, and its flat join put two sentences on one row (そうですね。ーっと言います),
+when nothing is split inside a word after the speaker has ended one. `carry_trailing_mark()` in
+`build_cues()` is the other half of keeping a mark: the word the rule marks is a segment's last, and
+that is the word Whisper stretches over the silence after the utterance, so `trim_words()` reads its
+midpoint as noise and drops it. The timings go, which is what P1.1 is for; the mark moves onto the
+word that now ends the cue.
+
 Segments go through gates before becoming cues: no words, VAD overlap under 0.5, faster-whisper's own
 word-anomaly score, repetition loops, and a gated phrase blocklist. The talk path scores the anomaly
 without the short-word term (`is_segment_anomaly(words, short_term=False)`): Whisper's Japanese words
@@ -204,9 +253,23 @@ closes a broken word whatever the budget says (inside `cross_chars` and `cross_c
 shorter than `reach_chars` reach `cross_reach` for a partner, and joins the halves through
 `seam_for()`: `""` inside one sentence, `"\n"` where a viewer would see a new line. Three readers act
 on that newline — `.shisuko-sub` is `white-space: pre-wrap` so the overlay renders the second row,
-Yomitan ends its sentence there, and `match.js`'s `TERMINATORS` splits on it. A seam that would leave
-a row under `MIN_PIECE_CHARS`, or a third row, gives way to a plain join rather than the merge being
-refused; refusing leaves the stub alone on screen.
+Yomitan ends its sentence there, and `match.js`'s `TERMINATORS` splits on it. A seam the gap alone
+put there gives way to a plain join when it would leave a row under `MIN_PIECE_CHARS` or a third row
+(`rows_fit()`), rather than the merge being refused; refusing leaves the stub alone on screen.
+
+A sentence mark is the one seam that never gives way (`ends_sentence()`), in `merge_adjacent()` as
+well as `merge_segments()`: what the speaker finished and what follows it never share a row, and a
+merge that cannot give them a row each is refused instead of flattened. A short row is no reason
+to flatten one: `rows_fit(text, limits, at_mark=True)` only refuses a third row, because うん。 is a
+whole turn and not a stub we left by breaking badly, which is what `MIN_PIECE_CHARS` judges elsewhere. Measured on 15 minutes of
+5csq1MlSspA decoded with `--initial-prompt`, 22% of all cues held a mark mid-row and read as two
+people on one line (`マジで?それいいね。`, `出そう、出そう、出そう。だって、集合に行くの誰?`), which
+also put the other speaker's clause on every card mined from one. Hard boundary in both merges took
+the share of hand-labelled sentence ends the viewer actually sees from 66% to 90% on that decode, and
+from 71% to 82% on the unprompted one. `merge_adjacent()` seams only at a mark — a gap-based seam
+there would refuse the stub merges the anti-flicker rule exists for — so pieces without a mark join
+flat exactly as before. The cost is accepted: a short finished sentence (`まじ?`, `うん。`) now stands
+as its own cue for its `min_seconds` instead of riding on a neighbour's row.
 
 Every cue still carries `seg`, the id of the Whisper segment it came from, and a merge re-stamps
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,

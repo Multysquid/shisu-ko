@@ -56,6 +56,9 @@ def parse_args(argv=None):
                         "but the audio is not silent, sung lyrics or speech over music, is transcribed without the "
                         "detector when Whisper hears the target language in it, under stricter gates; off: such "
                         "windows go through the detector as before, blank when it heard nothing")
+    p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
+                   help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
+                        "sentence-final expression is followed by a pause; off: Whisper's punctuation alone")
     p.add_argument("--initial-prompt", default="")
     p.add_argument("--window", type=float, default=40.0)
     p.add_argument("--first-window", type=float, default=20.0)

@@ -179,9 +179,14 @@ def test_build_window_cues_on_a_lyrics_window_snaps_to_the_segments_and_reaches_
 
 
 def talk_cues(segs, spoken):
-    """The same words through the talk path, on intervals shaped like Silero's (a pad each side)."""
+    """The same words through the talk path, on intervals shaped like Silero's (a pad each side).
+
+    With the sentence rule off on both sides: the claim under test is that lyrics_spans() hands the
+    cue builder what the detector would have handed it, which is about geometry. The rule itself is
+    a talk rule and never runs on a sung window (a padded breath inside a line is not a pause).
+    """
     speech = server.merge_intervals([[a - PAD, b + PAD] for a, b in spoken])
-    cues, _ = server.build_window_cues(segs, 0.0, speech, server.CueLimits(), 0, {}, 40.0)
+    cues, _ = server.build_window_cues(segs, 0.0, speech, server.CueLimits(sentence_ends=False), 0, {}, 40.0)
     return timed(cues)
 
 
@@ -203,6 +208,16 @@ def test_a_breath_between_two_sung_lines_keeps_them_apart():
     segs = [line("会いたくて震える", 1.0, 3.0), line("夜空を見上げて", 3.6, 5.6)]
     assert lyrics_cues(segs) == [(1.0, 6.3, "会いたくて震える\n夜空を見上げて")]
     assert lyrics_cues(segs) == talk_cues(segs, [[1.0, 3.0], [3.6, 5.6]])
+
+
+def test_a_sung_window_gets_no_sentence_marks():
+    # The rule is a talk rule: the spans of a sung window are padded word runs, so every breath
+    # reads as a pause, and 会いたくて震える + a breath would take a 。 in the middle of the line.
+    segs = [line("会いたくて震える", 1.0, 3.0), line("夜空を見上げて", 3.6, 5.6)]
+    assert lyrics_cues(segs) == [(1.0, 6.3, "会いたくて震える\n夜空を見上げて")]
+    spans = server.lyrics_spans(segs, 0.0)
+    talk, _ = server.build_window_cues(segs, 0.0, spans, server.CueLimits(), 0, {}, 40.0)
+    assert [c["text"] for c in talk] == ["会いたくて震える。\n夜空を見上げて"]  # the same window, judged as talk
 
 
 def test_a_pause_inside_a_sung_segment_splits_the_lines():
@@ -448,7 +463,7 @@ def test_the_song_before_the_mc_line_and_a_bridge_between_two_lines_are_planned_
     worker, model = timeline_worker(monkeypatch, tmp_path, segs, heard=heard, window=40.0)
     s = session(tone(80.0))
     worker.process(s, 0.0, 40.0)
-    assert [c["text"] for c in s.cues] == ["次の曲いきます", "ありがとう"]
+    assert [c["text"] for c in s.cues] == ["次の曲いきます。", "ありがとう"]
     assert close(s.covered, [[20.5, 22.5 + LEAD_OUT], [30.5, 32.5 + LEAD_OUT]])
 
     # The planner walks the stretches before the last spoken line (the first as a first window,
@@ -476,7 +491,7 @@ def test_a_short_or_quiet_unheard_stretch_stays_covered(monkeypatch, tmp_path):
     worker, _model = timeline_worker(monkeypatch, tmp_path, segs, heard=[[0.5, 2.5], [6.5, 8.5]], window=13.0)
     s = session(tone(80.0))
     worker.process(s, 0.0, 13.0)
-    assert [c["text"] for c in s.cues] == ["はい次の曲いきます", "次いきます"]
+    assert [c["text"] for c in s.cues] == ["はい次の曲いきます。", "次いきます"]
     assert close(s.covered, [[0.0, 13.0]])  # 3.2-6.5 and 9.2-13 are under the floor
 
     worker, _model = timeline_worker(monkeypatch, tmp_path, segs[:1], heard=[[0.5, 2.5]], window=40.0)
