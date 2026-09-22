@@ -141,7 +141,10 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
 
 `plan_window()` in `server/server.py` decides what to transcribe next: if the playhead is not
 inside a covered range, a short `--first-window` (20 s) starts at the playhead; otherwise the next
-`--window` (40 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
+`--window` (30 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
+30 s is faster-whisper's own chunk, and that is why the window is no longer 40: with
+`condition_on_previous_text` false the library drops the initial prompt after the first chunk of a
+call (checked in 1.2.1), so a 40 s window decoded its last ten seconds unprompted.
 A segment touching the end of a window is dropped and the covered range ends where that segment
 began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
@@ -149,6 +152,18 @@ module (register it in `sys.modules` before `exec_module` because of `from __fut
 Cue building (`docs/subtitle-quality.md` is the rationale and the measurements): the server runs
 Silero VAD itself on each window (`detect_speech()`, with `VAD_PARAMS`: min speech 250 ms, min
 silence 300 ms) and passes the same options to faster-whisper.
+
+Whisper is asked for punctuation rather than left to guess at it: `--initial-prompt` defaults to
+`DEFAULT_PROMPTS[args.language]` (resolved in `parse_args()`; only `ja` has an entry, any other
+language gets nothing, and an explicit `--initial-prompt ""` turns it off), a short punctuated
+sentence in the style the subtitles should read. Each window is decoded with nothing in front of
+it, so without the prompt the decoder has no reason to write a 。 at all: measured over 15 minutes
+of 5csq1MlSspA, marks land on 88% of the hand-labelled sentence ends with the prompt and 53%
+without, and not one line of the prompt reached the transcript. A lyrics window is decoded with
+`initial_prompt=None`: its gates were measured on unprompted decodes and the blocklist holds no
+sentence of the prompt, so a noisy window the language head lets through could echo the prompt
+itself into the cache with nothing to catch it. `dump_words.py` resolves the default and withholds
+it the same way, or dump plus replay would no longer be an A/B on the server's own decode.
 
 `repair_lead_words()` runs first, before the gates. faster-whisper anchors a segment's first word to
 the segment's own start, and segment starts run flush with the previous segment's end, so one or two

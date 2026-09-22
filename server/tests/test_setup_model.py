@@ -166,6 +166,22 @@ def test_a_config_model_that_is_not_a_name_is_ignored(tmp_path, value):
     assert server.parse_args([]).model == "large-v3"
 
 
+def test_the_initial_prompt_defaults_to_the_language_one(tmp_path):
+    # Whisper decodes each window with nothing in front of it, so the prompt is what asks it to
+    # punctuate. Only Japanese has one today; another language gets none, and so does "".
+    assert server.parse_args([]).initial_prompt == server.DEFAULT_PROMPTS["ja"]
+    assert server.parse_args(["--language", "en"]).initial_prompt == ""
+    assert server.parse_args(["--initial-prompt", ""]).initial_prompt == ""
+    assert server.parse_args(["--initial-prompt", "あ。"]).initial_prompt == "あ。"
+
+
+def test_the_window_default_is_one_whisper_chunk(tmp_path):
+    # faster-whisper drops the initial prompt after the first 30 s chunk of a call, so a longer
+    # window would decode its tail unprompted.
+    assert server.parse_args([]).window == 30.0
+    assert server.parse_args([]).first_window == 20.0
+
+
 def test_the_download_flag_takes_a_name_and_defaults_to_none():
     assert server.parse_args(["--download-model", "small"]).download_model == "small"
     assert server.parse_args([]).download_model is None

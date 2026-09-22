@@ -294,6 +294,20 @@ def session(audio):
     return server.Session(video_id=VIDEO, url="u", status="ready", audio=audio, duration=len(audio) / RATE)
 
 
+def test_a_lyrics_window_is_decoded_without_the_prompt(monkeypatch, tmp_path):
+    # The lyrics gates were measured on unprompted decodes and the blocklist holds no sentence of
+    # the prompt, so a noisy window the language head lets through could echo the prompt into the
+    # cache with nothing to catch it. A talk window keeps it.
+    prompt = server.DEFAULT_PROMPTS["ja"]
+    worker, model = make_worker(monkeypatch, tmp_path, initial_prompt=prompt)
+    worker.process(session(tone(40.0)), 0.0, 20.0)
+    assert model.calls[0]["vad_filter"] is False and model.calls[0]["initial_prompt"] is None
+
+    worker, model = make_worker(monkeypatch, tmp_path, initial_prompt=prompt, speech=[[1.0, 6.5]])
+    worker.process(session(tone(40.0)), 0.0, 20.0)
+    assert model.calls[0]["vad_filter"] is True and model.calls[0]["initial_prompt"] == prompt
+
+
 def test_no_speech_in_a_loud_window_is_transcribed_without_the_detector(monkeypatch, tmp_path):
     worker, model = make_worker(monkeypatch, tmp_path)
     s = session(tone(40.0))
