@@ -37,7 +37,7 @@ function fakeElement(tag = "div", attrs = {}) {
   const el = {
     tagName: tag.toUpperCase(),
     id: attrs.id || "",
-    type: tag === "select" ? "select-one" : attrs.type || (tag === "input" ? "text" : ""),
+    type: tag === "select" ? "select-one" : tag === "textarea" ? "textarea" : attrs.type || (tag === "input" ? "text" : ""),
     min: attrs.min || "",
     max: attrs.max || "",
     className: "",
@@ -88,7 +88,7 @@ function fakeElement(tag = "div", attrs = {}) {
 
 function elementsFromHtml() {
   const elements = new Map();
-  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|button|output|p|span|div|datalist)\b([^>]*)>/g)) {
+  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|textarea|button|output|p|span|div|datalist)\b([^>]*)>/g)) {
     const attrs = Object.fromEntries([...attrText.matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
     if (attrs.id) elements.set(attrs.id, fakeElement(tag, attrs));
   }
@@ -891,6 +891,37 @@ test("a text edit still on its way when the popup closes is saved from pagehide,
   assert.deepEqual(saves()[1], { serverUrl: "http://127.0.0.1:8791" });
   await wait(200);
   assert.equal(saves().length, 2);
+});
+
+// The viewer's own known words and the katakana switch: two settings like any other, the list a
+// textarea that saves once the edit is done (a save recolours every tab's lines), stored one word
+// per line with the blanks and the spaces out, the way the content script reads it.
+test("the known words and the katakana switch load into the form, and save trimmed, one word per line", async () => {
+  const state = { health: offline, settings: { knownWords: "食べる\n日本語", katakanaKnown: true } };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const list = popup.el("knownWords");
+  assert.equal(list.type, "textarea");
+  assert.equal(list.value, "食べる\n日本語");
+  assert.equal(popup.el("katakanaKnown").checked, true);
+  assert.deepEqual([...list.listeners.keys()], ["change"], "the list saves once the edit is done, not per keystroke");
+  list.value = "  食べる  \n\n 東京駅\n日本語\n   \n";
+  list.dispatch("change");
+  popup.el("katakanaKnown").checked = false;
+  popup.el("katakanaKnown").dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ knownWords: "食べる\n東京駅\n日本語", katakanaKnown: false }]);
+  assert.equal(state.settings.knownWords, "食べる\n東京駅\n日本語");
+  // Alt+Shift+K on the video added a word: it lands in the list, unless the list is being typed in.
+  elsewhere({ knownWords: "食べる\n東京駅\n日本語\n来る" });
+  assert.equal(list.value, "食べる\n東京駅\n日本語\n来る");
+  popup.document.activeElement = list;
+  list.value = "食べる\n東京";
+  elsewhere({ knownWords: "食べる" });
+  assert.equal(list.value, "食べる\n東京", "a list being typed in keeps its typing");
+  popup.document.activeElement = null;
+  // The legend names the blue of a place name or Latin text beside the four card states.
+  assert.match(HTML, /<span class="sw proper"><\/span>names and Latin text/);
+  assert.ok(cssDeclarations(".sw.proper,\n.sw.heiban").includes("background: #4da3ff"));
 });
 
 // The mousedown on the button blurs the text field, whose change event starts the 150 ms save;

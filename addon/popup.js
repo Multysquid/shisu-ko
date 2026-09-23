@@ -147,7 +147,23 @@ function readField(el) {
   if (el.type === "range" || el.type === "number") return Number(el.value);
   // A colour well always reports a normalised "#rrggbb"; trimming it would be harmless but a lie.
   if (el.type === "color") return el.value;
+  // The known words: one per line, each trimmed, blank lines out (the content script reads the
+  // setting the same way, so what is stored is what it uses).
+  if (el.type === "textarea") return knownWordsText(el.value);
   return el.value.trim();
+}
+
+function knownWordsText(value) {
+  return String(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+// A field the viewer types in: its edit is done at its change event, not at every keystroke.
+function typedField(el) {
+  return el.type === "text" || el.type === "textarea";
 }
 
 // Each range shows its value and paints the travelled part of its own track (the --fill custom
@@ -487,7 +503,7 @@ function onStorageChanged(changes, area) {
   const landed = new Set(); // the fields another writer changed
   for (const key of FIELDS) {
     const el = document.getElementById(key);
-    if (!el || dirty.has(key) || (el.type === "text" && el === document.activeElement) || !Object.hasOwn(next, key)) continue;
+    if (!el || dirty.has(key) || (typedField(el) && el === document.activeElement) || !Object.hasOwn(next, key)) continue;
     const sent = inFlight.get(key);
     if (sent) {
       if (next[key] !== sent[key]) continue;
@@ -952,9 +968,10 @@ async function init() {
   for (const key of FIELDS) {
     const el = document.getElementById(key);
     if (!el) continue;
-    // Text fields act once the edit is done (a URL, a model that would start a download); the
-    // font family is the exception, it previews and applies as it is typed, like a slider.
-    const live = el.type !== "text" || key === "subFontFamily";
+    // Text fields act once the edit is done (a URL, a model that would start a download, the
+    // known words, whose every save recolours every tab's lines); the font family is the
+    // exception, it previews and applies as it is typed, like a slider.
+    const live = !typedField(el) || key === "subFontFamily";
     const eventName = live && el.tagName !== "SELECT" ? "input" : "change";
     el.addEventListener(eventName, onChange);
   }

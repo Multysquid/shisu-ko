@@ -93,6 +93,12 @@
         "default": "Alt+Shift+M"
       },
       "description": "Mine the current subtitle: screenshot and audio clip to Anki or Downloads"
+    },
+    "mark-known": {
+      "suggested_key": {
+        "default": "Alt+Shift+K"
+      },
+      "description": "Mark the word under the pointer as known (or unmark it)"
     }
   }
 }

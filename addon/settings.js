@@ -59,4 +59,10 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // An overbar in the colour of the word's pitch accent pattern (blue heiban, red atamadaka,
   // orange nakadaka, green odaka), read from the card's pitch accent field of the same deck.
   pitchAccent: false,
+  // The viewer's own known words, one per line: drawn as learned whatever their card says, and
+  // words that are in no deck. Alt+Shift+K adds the word under the pointer, or takes it out again.
+  knownWords: "",
+  // Katakana words count as known: a katakana run that no card, known word or name rule takes is
+  // drawn as learned.
+  katakanaKnown: false,
 });

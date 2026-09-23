@@ -1595,6 +1595,321 @@ test("a new server session drops the cues but not the deck index", async () => {
   assert.equal(api.state.wordIndexAt, 1000);
 });
 
+// ------------------------------------------------------------------ known words
+
+// What content.js hands the matcher: the entries and the known list buildIndex() gets, and the
+// options markWords() gets; both delegate to the real functions.
+function recordingWords(sandbox) {
+  const real = sandbox.SHISUKO_WORDS;
+  const calls = { built: [], marked: [] };
+  sandbox.SHISUKO_WORDS = Object.assign({}, real, {
+    buildIndex: (entries, known) => {
+      calls.built.push({ entries: plain(entries), known: plain(known) });
+      return real.buildIndex(entries, known);
+    },
+    markWords: (text, index, starts, opts) => {
+      calls.marked.push({ text, opts: plain(opts) });
+      return real.markWords(text, index, starts, opts);
+    },
+  });
+  return calls;
+}
+
+test("knownList reads the setting one word per line, trimmed, blank lines out, each once", () => {
+  const { api } = loadContent();
+  assert.deepEqual(plain(api.knownList({ knownWords: "" })), []);
+  assert.deepEqual(plain(api.knownList({})), []);
+  assert.deepEqual(plain(api.knownList({ knownWords: "  食べる  \n\n東京駅\n 食べる\n   \n日本語" })), ["食べる", "東京駅", "日本語"]);
+  assert.deepEqual(plain(api.knownList({ knownWords: 42 })), []);
+});
+
+test("the deck index is built with the known list, and the katakana switch reaches the matcher", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  watching(api);
+  api.state.settings.cardStatus = true;
+  api.state.settings.knownWords = "テスト\nはい";
+  subtitleBox(api, sandbox);
+  const calls = recordingWords(sandbox);
+  backgroundAnswering(sandbox, [{ ok: true, deck: "Mining", automatic: true, at: 1000, entries: DECK }]);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
+  api.setSubtitle(api.cueById(0));
+  await api.pollWordIndex();
+  assert.deepEqual(calls.built, [{ entries: DECK, known: ["テスト", "はい"] }]);
+  assert.deepEqual(plain(api.state.wordEntries), DECK); // kept, for a list that changes
+  assert.deepEqual(calls.marked, [{ text: LINE, opts: { katakana: false } }]);
+  // The switch is part of a look: flipped, the line is matched again with it, and once only.
+  api.state.settings.katakanaKnown = true;
+  api.refreshWordMarks();
+  assert.deepEqual(calls.marked.slice(1), [{ text: LINE, opts: { katakana: true } }]);
+  api.refreshWordMarks();
+  assert.equal(calls.marked.length, 2);
+  api.renderText(sandbox.document.createElement("span"), api.cueById(0));
+  assert.equal(calls.marked.length, 2); // the look under the switch of now is on record
+});
+
+test("a known list that changed builds the index again from the deck in hand, asks nothing, and redraws the lines it changes", async () => {
+  const { api, sandbox, onSettingsChanged } = loadContent();
+  await settled();
+  watching(api);
+  giveIndex(api, { cardStatus: true, showTranscript: true });
+  api.state.wordEntries = plain(DECK);
+  const rebuilds = overlay(api, sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }, { id: 1, start: 3, end: 4, text: "はい" }, { id: 2, start: 5, end: 6, text: "字幕" }]);
+  api.setSubtitle(api.cueById(1));
+  api.refreshWordMarks(); // the index on record as drawn, so the next refresh looks for what changed
+  const lines = [0, 1, 2].map((id) => api.state.lineById.get(id).childNodes[1]);
+  const drawn = lines.map((text) => text.childNodes[0]);
+  assert.deepEqual(nodes(lines[1]), ["はい"]);
+  const asks = backgroundAnswering(sandbox, []);
+  const calls = recordingWords(sandbox);
+  const base = Object.assign({}, api.state.settings);
+  const serial = api.state.wordIndexSerial;
+
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base, { knownWords: "はい" }) } }, "local");
+  assert.deepEqual(calls.built, [{ entries: DECK, known: ["はい"] }]);
+  assert.equal(asks.length, 0); // the deck is the same: nothing asked
+  assert.equal(api.state.wordIndexAt, 1000); // the stamp stands, the index moved on
+  assert.equal(api.state.wordIndexSerial, serial + 1);
+  assert.equal(rebuilds.count, 1); // in place, never a rebuild
+  // Once the matcher takes the list, the line holding the word is drawn again (matched once: the
+  // line on screen and its transcript line share the cue's look) and the others keep their
+  // nodes: only the lines the two indexes disagree on are matched.
+  const known = api.state.wordIndex.exact.get("はい");
+  if (known) {
+    assert.equal(known.status, "learned");
+    assert.deepEqual(nodes(api.state.subText), ["shisuko-word{status=learned}:はい"]);
+    assert.deepEqual(nodes(lines[1]), ["shisuko-word{status=learned}:はい"]);
+    assert.deepEqual(calls.marked.map((c) => c.text), ["はい"]);
+  }
+  assert.equal(lines[0].childNodes[0], drawn[0]);
+  assert.equal(lines[2].childNodes[0], drawn[2]);
+
+  // The katakana switch: no new index, every cue looked at again (once: the line on screen and
+  // its transcript line share the cue's look) in place, none rebuilt.
+  calls.marked.length = 0;
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base, { knownWords: "はい", katakanaKnown: true }) } }, "local");
+  assert.equal(calls.built.length, 1);
+  assert.equal(asks.length, 0);
+  assert.deepEqual(calls.marked.map((c) => c.opts), [{ katakana: true }, { katakana: true }, { katakana: true }]);
+  assert.equal(rebuilds.count, 1);
+  assert.equal(lines[0].childNodes[0], drawn[0]); // no katakana in it: the same nodes
+  assert.equal(lines[2].childNodes[0], drawn[2]);
+
+  // A deck change still drops the index and asks; the list goes into the index the answer builds.
+  backgroundAnswering(sandbox, [{ ok: true, deck: "Vocab", automatic: false, at: 2000, entries: DECK }]);
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base, { knownWords: "はい", katakanaKnown: true, cardStatusDeck: "Vocab" }) } }, "local");
+  assert.equal(api.state.wordIndex, null);
+  assert.equal(api.state.wordEntries, null);
+  await settled();
+  assert.deepEqual(calls.built[1], { entries: DECK, known: ["はい"] });
+  await settled();
+});
+
+// The overlay as the shortcut finds it: a subtitle on screen and a transcript line, both drawn
+// through renderText, and the pointer's caret put where a test says (Firefox's API; Chrome's is
+// read the same way).
+function pointing(loaded, text, settings) {
+  const { api, sandbox } = loaded;
+  Object.assign(api.state.settings, settings || {});
+  api.state.toastEl = sandbox.document.createElement("div");
+  api.state.transcriptList = sandbox.document.createElement("div");
+  api.state.subBox = sandbox.document.createElement("div");
+  api.state.subText = sandbox.document.createElement("span");
+  api.state.subText.className = "shisuko-subtext";
+  api.state.subBox.appendChild(api.state.subText);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text }]);
+  api.setSubtitle(api.cueById(0));
+  api.state.lastPointer = { x: 100, y: 200 };
+  const caret = (node, offset) => {
+    sandbox.document.caretPositionFromPoint = (x, y) => {
+      assert.deepEqual([x, y], [100, 200]);
+      return { offsetNode: node, offset };
+    };
+  };
+  const saves = () => loaded.sent.filter((m) => m.type === "saveSettings").map((m) => plain(m.settings));
+  const toast = () => api.state.toastEl.textContent;
+  // A child of the line on screen (or of `el`) by its text, read live: a render replaces the
+  // child list, and which index a word sits at depends on the matcher's rules for the words
+  // around it, not on the test.
+  const nodeOf = (text, el = api.state.subText) => {
+    const node = el.childNodes.find((n) => n.textContent === text);
+    assert.ok(node, `no node "${text}" in ${JSON.stringify(nodes(el))}`);
+    return node;
+  };
+  return { caret, saves, toast, nodeOf };
+}
+
+test("Alt+Shift+K marks the word under the pointer as known: a word span, plain text, a verb by its stem", async () => {
+  const loaded = withIndex({ cardStatus: true });
+  const { api, sandbox, onCommand } = loaded;
+  const { caret, saves, toast, nodeOf } = pointing(loaded, LINE);
+  const word = nodeOf("字幕");
+  assert.equal(word.className, "shisuko-word");
+  caret(word.childNodes[0], 1); // in the span's text node
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves(), [{ knownWords: "字幕" }]);
+  assert.equal(toast(), "字幕 marked as known");
+  assert.equal(api.state.toastEl.className, "shisuko-toast shisuko-toast-ok");
+  // Plain text: the ICU segment under the caret (これ|は). The line's first node is text
+  // (これ, with は as it is drawn now); a caret at its end is the position after it.
+  const head = api.state.subText.childNodes[0];
+  assert.equal(head.nodeType, 3);
+  assert.ok(head.textContent.startsWith("これ"));
+  caret(head, 1);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[1], { knownWords: "これ" });
+  caret(head, 2);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[2], { knownWords: "は" });
+  // A caret on the span itself, or the element (between two children), counts its children.
+  caret(nodeOf("日本語"), 0);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[3], { knownWords: "日本語" });
+  caret(api.state.subText, api.state.subText.childNodes.indexOf(nodeOf("日本語")));
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[4], { knownWords: "日本語" });
+  // A conjugated form found by its stem goes on the list as the deck's word.
+  setIndex(api, words.buildIndex([["食べる", "new", null]]));
+  api.mergeCues([{ id: 1, start: 3, end: 5, text: "昨日食べた" }]);
+  api.setSubtitle(api.cueById(1));
+  assert.deepEqual(nodes(api.state.subText), ["昨日", "shisuko-word{status=new}:食べた"]);
+  caret(api.state.subText.childNodes[1].childNodes[0], 2);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[5], { knownWords: "食べる" });
+  assert.equal(toast(), "食べる marked as known");
+  // Plain text after a kanji ICU cut off its okurigana: the hiragana segments after it are joined
+  // (走|っ|た), and the deck's word is used when it knows the form.
+  api.mergeCues([{ id: 2, start: 6, end: 8, text: "今日は走った" }]);
+  api.setSubtitle(api.cueById(2));
+  assert.deepEqual(nodes(api.state.subText), ["今日は走った"]);
+  caret(api.state.subText.childNodes[0], 3);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[6], { knownWords: "走った" });
+  setIndex(api, words.buildIndex([["走る", "new", null], ["走", "learned", null]]));
+  api.refreshWordMarks();
+  caret(api.state.subText.childNodes[1].childNodes[0], 0);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[7], { knownWords: "走る" }); // the verb's span, not the one-kanji word's
+  assert.equal(sandbox.document.caretPositionFromPoint.length, 2);
+  await settled();
+});
+
+test("Alt+Shift+K takes a word selected in the subtitle or the transcript first, and a word already on the list comes off it", async () => {
+  const loaded = withIndex({ cardStatus: true, knownWords: "東京駅\n字幕" });
+  const { api, sandbox, onCommand } = loaded;
+  const { caret, saves, toast, nodeOf } = pointing(loaded, LINE);
+  caret(nodeOf("日本語").childNodes[0], 0); // the pointer is on 日本語
+  const select = (text, node) => {
+    sandbox.document.getSelection = () => ({ isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: node }), toString: () => text });
+  };
+  select("  日本語の  ", nodeOf("日本語"));
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves(), [{ knownWords: "東京駅\n字幕\n日本語の" }]);
+  assert.equal(toast(), "日本語の marked as known");
+  // A selection outside the overlay, over two lines, or too long, is not it: the pointer is.
+  select("日本語", sandbox.document.createElement("div"));
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[1], { knownWords: "東京駅\n字幕\n日本語" });
+  const line = api.transcriptLine(api.cueById(0));
+  api.state.transcriptList.appendChild(line);
+  select("日本語\n字幕", line.childNodes[1]);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[2], { knownWords: "東京駅\n字幕\n日本語" });
+  select("あ".repeat(41), line.childNodes[1]);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[3], { knownWords: "東京駅\n字幕\n日本語" });
+  select("。", line.childNodes[1]);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[4], { knownWords: "東京駅\n字幕\n日本語" });
+  // On the list already: off it goes, the rest of the list as it was.
+  sandbox.document.getSelection = () => null;
+  caret(nodeOf("字幕").childNodes[0], 0);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[5], { knownWords: "東京駅" });
+  assert.equal(toast(), "字幕 is no longer marked as known");
+  // The pointer over a transcript line's text finds the line's cue.
+  caret(nodeOf("日本語", line.childNodes[1]).childNodes[0], 1); // 日本語 in the line
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[6], { knownWords: "東京駅\n字幕\n日本語" });
+  await settled();
+});
+
+test("Alt+Shift+K with nothing under the pointer says so, and a switched-off add-on ignores it", async () => {
+  const loaded = withIndex({ cardStatus: true });
+  const { api, sandbox, onCommand } = loaded;
+  const { caret, saves, toast, nodeOf } = pointing(loaded, LINE);
+  // The pointer over YouTube's own text, a time stamp, or nowhere.
+  caret(sandbox.document.createElement("div"), 0);
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves(), []);
+  assert.equal(toast(), "No word under the pointer");
+  assert.equal(api.state.toastEl.className, "shisuko-toast shisuko-toast-warn");
+  const line = api.transcriptLine(api.cueById(0));
+  caret(line.childNodes[0].childNodes[0], 0); // the time stamp
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves(), []);
+  sandbox.document.caretPositionFromPoint = () => null;
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves(), []);
+  delete sandbox.document.caretPositionFromPoint;
+  onCommand({ type: "command", name: "mark-known" }); // no caret API at all
+  assert.deepEqual(saves(), []);
+  // Chrome's API is read the same way.
+  sandbox.document.caretRangeFromPoint = () => ({ startContainer: nodeOf("字幕").childNodes[0], startOffset: 0 });
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves(), [{ knownWords: "字幕" }]);
+  // Nothing on screen: no subtitle, so no cue under the pointer.
+  api.setSubtitle(null);
+  sandbox.document.caretRangeFromPoint = () => ({ startContainer: api.state.subText, startOffset: 0 });
+  onCommand({ type: "command", name: "mark-known" });
+  assert.equal(saves().length, 1);
+  assert.equal(toast(), "No word under the pointer");
+  // The master switch: the command returns before anything is looked at. The line is drawn anew
+  // (new nodes), and the same pointer saves once the switch is back on, so it is the switch
+  // that stopped it.
+  api.setSubtitle(api.cueById(0));
+  sandbox.document.caretRangeFromPoint = () => ({ startContainer: nodeOf("字幕").childNodes[0], startOffset: 0 });
+  api.state.toastEl.textContent = "";
+  api.state.settings.enabled = false;
+  onCommand({ type: "command", name: "mark-known" });
+  assert.equal(saves().length, 1);
+  assert.equal(toast(), "");
+  api.state.settings.enabled = true;
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[1], { knownWords: "字幕" });
+  assert.equal(toast(), "字幕 marked as known");
+  await settled();
+});
+
+test("segmentAt and entryWordFor: the piece under a position, and the deck's word for it", () => {
+  const { api } = withIndex({ cardStatus: true });
+  const starts = words.wordStarts("今日は走った");
+  assert.deepEqual(plain(api.segmentAt("今日は走った", starts, 0)), { start: 0, end: 2, text: "今日" });
+  assert.deepEqual(plain(api.segmentAt("今日は走った", starts, 2)), { start: 2, end: 3, text: "は" });
+  assert.deepEqual(plain(api.segmentAt("今日は走った", starts, 3)), { start: 3, end: 6, text: "走った" });
+  assert.deepEqual(plain(api.segmentAt("今日は走った", starts, 5)), { start: 5, end: 6, text: "た" });
+  assert.deepEqual(plain(api.segmentAt("今日は走った", starts, 99)), { start: 5, end: 6, text: "た" }); // past the end: the last
+  assert.deepEqual(plain(api.segmentAt("走", new Set([0]), 0)), { start: 0, end: 1, text: "走" });
+  assert.equal(api.segmentAt("", new Set([0]), 0), null);
+  // A kanji joins the hiragana after it, not the kanji or the punctuation.
+  assert.deepEqual(plain(api.segmentAt("見に行く", words.wordStarts("見に行く"), 0)), { start: 0, end: 2, text: "見に" });
+  assert.deepEqual(plain(api.segmentAt("走。", new Set([0, 1]), 0)), { start: 0, end: 1, text: "走" });
+
+  setIndex(api, words.buildIndex([["食べる", "new", null], ["食う", "new", null], ["勉強", "learned", null], ["勉強する", "new", null], ["日本", "new", null], ["食", "learned", null]]));
+  assert.equal(api.entryWordFor("食べた"), "食べる");
+  assert.equal(api.entryWordFor("食べる"), "食べる");
+  assert.equal(api.entryWordFor("食事"), null); // 事 continues no verb: not 食う, not 食
+  assert.equal(api.entryWordFor("食って"), "食う");
+  assert.equal(api.entryWordFor("勉強して"), "勉強する"); // the stem's span (3) beats the noun (2)
+  assert.equal(api.entryWordFor("勉強"), "勉強");
+  assert.equal(api.entryWordFor("日本語"), null); // 語 is no continuation of 日本
+  assert.equal(api.entryWordFor("東京駅"), null);
+  assert.equal(api.entryWordFor("の"), null);
+  setIndex(api, null);
+  assert.equal(api.entryWordFor("食べた"), null);
+});
+
 // ------------------------------------------------------------------ statusText
 
 // Everything updateStatus() reads, with nothing wrong and nothing in progress.
@@ -1969,8 +2284,9 @@ test("a request refused by the server drops the language pause, so its error sho
 
 // ------------------------------------------------------------------ keyboard commands
 
-test("the master switch stops the mine and transcript commands, and only the switch itself works", () => {
-  const { api, sent, onCommand } = loadContent();
+test("the master switch stops the mine, transcript and known-word commands, and only the switch itself works", () => {
+  const { api, sandbox, sent, onCommand } = loadContent();
+  subtitleBox(api, sandbox);
   api.mergeCues([{ id: 0, start: 4, end: 7, text: "これはテスト字幕です" }]);
   api.state.videoId = "abcdef1234";
   api.state.video = { currentTime: 5, paused: false };
@@ -1982,6 +2298,9 @@ test("the master switch stops the mine and transcript commands, and only the swi
   assert.equal(mines().length, 0); // used to capture a frame and write the newest card
   onCommand({ type: "command", name: "toggle-transcript" });
   assert.deepEqual(saves(), []);
+  sandbox.document.getSelection = () => ({ isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: api.state.subBox }), toString: () => "字幕" });
+  onCommand({ type: "command", name: "mark-known" }); // would put the selected word on the known list
+  assert.deepEqual(saves(), []);
   onCommand({ type: "command", name: "toggle-subtitles" });
   assert.deepEqual(saves(), [{ enabled: true }]);
 
@@ -1992,6 +2311,8 @@ test("the master switch stops the mine and transcript commands, and only the swi
   assert.equal(mines()[0].auto, false);
   onCommand({ type: "command", name: "toggle-transcript" });
   assert.deepEqual(saves()[1], { showTranscript: true });
+  onCommand({ type: "command", name: "mark-known" });
+  assert.deepEqual(saves()[2], { knownWords: "字幕" });
   onCommand({ type: "other" }); // not a command: nothing happens
   assert.equal(mines().length, 1);
 });

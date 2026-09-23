@@ -50,6 +50,16 @@ test("the content script runs as soon as the DOM is there, not after load", () =
   for (const entry of manifest.content_scripts) assert.equal(entry.run_at, "document_end");
 });
 
+// The keyboard commands: the background forwards each by name to the watched tab, and the
+// content script's listener answers to these names and no other.
+test("the manifest names the four commands, and the content script handles each", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
+  const keys = Object.fromEntries(Object.entries(manifest.commands).map(([name, cmd]) => [name, cmd.suggested_key.default]));
+  assert.deepEqual(keys, { "toggle-subtitles": "Alt+Shift+S", "toggle-transcript": "Alt+Shift+L", "mine-current": "Alt+Shift+M", "mark-known": "Alt+Shift+K" });
+  const content = fs.readFileSync(path.join(ADDON, "content.js"), "utf8");
+  for (const name of Object.keys(keys)) assert.ok(content.includes(`msg.name === "${name}"`), `content.js does not handle ${name}`);
+});
+
 test("settings.js is loaded before the scripts that use it", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   assert.deepEqual(manifest.background.scripts, ["browser-api.js", "settings.js", "match.js", "words.js", "background.js"]);

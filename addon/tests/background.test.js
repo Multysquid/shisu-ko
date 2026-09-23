@@ -2685,6 +2685,11 @@ test("another deck, or another field to read, drops the index; other settings le
   await sandbox.saveSettings({ fontScale: 1.2 });
   assert.equal((await sandbox.cardStatus({})).at, first.at, "a setting the index does not depend on");
   assert.equal(queriesAsked(anki).length, 5);
+  // The viewer's known words and the katakana switch are the content script's: the index is the
+  // deck's alone, and every tab folds the list in on its own.
+  await sandbox.saveSettings({ knownWords: "日本語", katakanaKnown: true });
+  assert.equal((await sandbox.cardStatus({})).at, first.at);
+  assert.equal(queriesAsked(anki).length, 5);
 
   await sandbox.saveSettings({ cardStatusDeck: "Other" });
   const switched = await sandbox.cardStatus({});
