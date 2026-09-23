@@ -1,0 +1,55 @@
+name: Attach the signed Firefox package
+
+# The release workflow submits each tag to addons.mozilla.org and waits a quarter of an hour for
+# the approval. A version held for a manual review is approved later; this picks its signed .xpi
+# up from AMO and attaches it to the GitHub release. It asks AMO only while the newest release
+# (or the one given by hand) has no .xpi yet.
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (default the newest release)
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: amo-xpi
+  cancel-in-progress: false
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    env:
+      AMO_KEY: ${{ secrets.WEB_EXT_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.AMO_KEY == 'true'
+      - uses: actions/setup-node@v4
+        if: env.AMO_KEY == 'true'
+        with:
+          node-version: "22"
+      - name: Attach the signed .xpi once AMO has approved it
+        if: env.AMO_KEY == 'true'
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          tag="${TAG:-$(gh release view --json tagName --jq .tagName)}"
+          case "$tag" in v[0-9]*) ;; *) echo "not a release tag: $tag"; exit 1 ;; esac
+          if gh release view "$tag" --json assets --jq '.assets[].name' | grep -q '\.xpi$'; then
+            echo "$tag already has its .xpi"
+            exit 0
+          fi
+          code=0
+          node scripts/amo-xpi.mjs fetch "${tag#v}" --out dist/signed || code=$?
+          case "$code" in
+            0) gh release upload "$tag" dist/signed/*.xpi --clobber ;;
+            3) echo "AMO is still reviewing $tag" ;;
+            *) exit "$code" ;;
+          esac
