@@ -21,8 +21,8 @@ public API (one anonymous GET, see PERMISSIONS). It contains no remote code, no
 minified or generated code, no third-party libraries and no build step: the uploaded zip is the
 source, identical to the addon/ folder of https://github.com/Multysquid/shisu-ko (tag v<version>).
 
-This add-on id (shisu-ko@multysquid.github.io) already has unlisted, self-distributed versions
-0.2.0 to 0.4.0 that were signed through the same account. This is the first listed version.
+The uploaded zip is dist/firefox from the release workflow (scripts/build.mjs): the addon/ folder
+without its tests. The same signed file is attached to the GitHub release.
 
 HOW TO TEST (about 10 minutes, no GPU or account needed)
 
@@ -160,8 +160,8 @@ PERMISSIONS
   of "Check for updates" in the popup; a profile that has never opened the popup makes no
   request at all. The answer (release version, tag, page URL, .xpi URL, time of the check) is
   kept in browser.storage.local under "updateCheck". The extension never downloads or installs
-  the .xpi: it links to the release page until this listing is live, and the manifest has no
-  update_url, so updates of the extension come from addons.mozilla.org.
+  the .xpi: it links to the release page, and the manifest has no update_url, so updates of the
+  extension come from addons.mozilla.org.
 - nativeMessaging (optional_permissions; requested with browser.permissions.request from the
   click on the popup's "Start server" button, which is shown only while the companion server
   does not answer): background.js sends the one message {cmd: "start"} to the native-messaging

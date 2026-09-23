@@ -20,8 +20,9 @@ server/       server.py (single file) + setup/run scripts + update.py; runtime d
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
 flake.nix        Nix package/app/dev shell for the server and the extension build
-sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner's API key)
-publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds the listing text and assets
+sign-addon.cmd   signs a local build through addons.mozilla.org, unlisted (manual fallback, owner's API key)
+publish-addon.cmd  submits a version to the public AMO listing by hand; the release workflow does it on
+                 every tag (see "Release"); docs/amo/ holds the listing text and assets
 ```
 
 ## Invariants (do not break these)
@@ -1257,8 +1258,8 @@ call, the variable inside the loop, the 0/2/4/restart order, `run.sh`'s export i
 
 The add-on side of updates lives in the "updates" section of `addon/background.js` and in
 `popup.js`; the extension never installs itself (no `update_url`, no `.xpi` handling: its
-updates come from addons.mozilla.org once the listing is live, and until then the release page
-has the `.xpi`), it only tells the viewer and asks the server to update itself.
+updates come from addons.mozilla.org, and the GitHub release carries the same signed `.xpi`),
+it only tells the viewer and asks the server to update itself.
 
 - Check. `fetchLatestRelease()` gets `GITHUB_LATEST_URL`
   (`https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, `Accept:
@@ -1542,12 +1543,24 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 
 ## Release
 
-- `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"` produces the zip (without the tests folder).
-- `sign-addon.cmd` (repository owner only) produces a signed `.xpi` for regular Firefox.
-- `publish-addon.cmd` (repository owner only) submits the build to the public listing on
-  addons.mozilla.org: `docs/amo/make_metadata.py` turns `docs/amo/{summary.txt,description.md,
-  release-notes.md,reviewer-notes.md}` into the metadata JSON that `web-ext sign --channel listed`
-  sends. The privacy policy, icon and screenshots in `docs/amo/` are set in the Developer Hub;
-  `docs/amo/README.md` is the checklist. AMO refuses a version number that was uploaded before in
-  either channel, so bump before signing or publishing. Update `release-notes.md` per release.
-- Attach the zip/xpi to a GitHub release; rebuild the Docker image with `docker compose build`.
+Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) releases
+everything; `.github/workflows/release.yml`:
+
+- runs the checks, builds the zips and creates the GitHub release with them;
+- submits `dist/firefox` to the public listing on addons.mozilla.org (`web-ext sign --channel
+  listed --approval-timeout 0`, with the AMO API key from the repository secrets
+  `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET`), the listing texts built from `docs/amo/` by
+  `make_metadata.py`; a version AMO already has is not uploaded again, so the job can be re-run;
+- waits up to 15 minutes for the approval (`scripts/amo-xpi.mjs fetch --wait 900`) and attaches
+  the signed `.xpi` AMO made, the same file the listing serves, to the release. A version held
+  for a manual review is attached later by `.github/workflows/amo-xpi.yml` (every three hours,
+  or by hand with a tag), which asks AMO only while the release has no `.xpi`.
+
+So every version is a listed one: there is no unlisted signing any more, because AMO refuses a
+version number that was uploaded before in either channel. `make_metadata.py` refuses a
+`release-notes.md` that does not mention the manifest's version, and the Tests workflow runs it on
+every push, so bump the version and write its notes in the same change. The privacy policy, icon
+and screenshots in `docs/amo/` are set in the Developer Hub by hand; `docs/amo/README.md` is the
+checklist. `publish-addon.cmd` and `sign-addon.cmd` (repository owner only) are the manual
+fallbacks for a listed submission and an unlisted build; an unlisted build takes its version
+number from the listing for good. Rebuild the Docker image with `docker compose build`.

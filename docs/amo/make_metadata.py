@@ -45,6 +45,10 @@ def main() -> None:
         fail(f"summary.txt is {len(summary)} characters, AMO allows 250")
     if re.search(r"https?://|www\.", summary):
         fail("summary.txt must not contain URLs")
+    # The release workflow submits every tag to the listing with these notes, so a version bump
+    # without new notes would publish the previous release's text; CI runs this on every push.
+    if not re.search(rf"(?<![\d.]){re.escape(version)}(?!\.?\d)", release_notes):
+        fail(f"release-notes.md does not mention {version}, the version in addon/manifest.json")
     if len(description) > 15000:
         fail("description.md is longer than AMO's 15000 characters")
 

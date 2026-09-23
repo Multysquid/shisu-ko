@@ -1,8 +1,9 @@
 # Publishing on addons.mozilla.org
 
-Everything the public listing needs, ready to paste or to send through the API. The extension
-already exists on AMO as an *unlisted* add-on (the self-distributed builds from `sign-addon.cmd`,
-id `shisu-ko@multysquid.github.io`); the first listed version is added to that same add-on.
+Everything the public listing needs, ready to paste or to send through the API. The listing is
+live at https://addons.mozilla.org/firefox/addon/shisu-ko/ (id `shisu-ko@multysquid.github.io`;
+0.7.0 was its first listed version, 0.2.0 to 0.4.0 and 0.8.0 to 0.13.0 are unlisted builds).
+Since 0.14.0 the release workflow publishes every tag there, see *Every release* below.
 
 | File | Used for |
 |---|---|
@@ -13,7 +14,7 @@ id `shisu-ko@multysquid.github.io`); the first listed version is added to that s
 | `privacy-policy.md` | Privacy policy; Developer Hub only |
 | `icon-128.png`, `icon-256.png` | Listing icon (rendered from `addon/icons/icon.svg`); Developer Hub only |
 | `screenshots/` | Listing screenshots with the captions below; Developer Hub only |
-| `make_metadata.py` | Builds `amo-metadata.json` from the files above for `publish-addon.cmd` |
+| `make_metadata.py` | Builds `amo-metadata.json` from the files above for the release workflow and `publish-addon.cmd` |
 
 Listing values that are not in a file: categories **Language Support** and **Photos, Music &
 Videos**; tags **youtube**, **streaming** (AMO's tag list is fixed); license **MIT License**;
@@ -34,24 +35,23 @@ Screenshot captions, in order:
 ## Before every submission
 
 1. Bump `version` in `addon/manifest.json` and `VERSION` in `server/server.py` together. AMO
-   refuses a version number that was uploaded before, in either channel (0.2.0 to 0.4.0 are
-   taken by the unlisted builds).
+   refuses a version number that was uploaded before, in either channel (0.2.0 to 0.4.0 and
+   0.8.0 to 0.13.0 are taken by unlisted builds).
 2. Run the checks: `for f in addon/*.js; do node --check "$f"; done` (`node --check` takes one file),
    `npx web-ext lint --source-dir addon --ignore-files "tests/**"`,
    `node --test addon/tests/*.test.js`, `python -m pytest server/tests`.
 3. Build: `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"`
    gives `dist/shisu-ko-<version>.zip`. The zip is the source: there is no build step, so answer
    **No** when AMO asks whether source code needs to be submitted.
-4. Update `release-notes.md`, and `reviewer-notes.md` if permissions or the test steps changed.
+4. Update `release-notes.md` (it has to mention the new version: `make_metadata.py` refuses it
+   otherwise, and the Tests workflow runs that check on every push), and `reviewer-notes.md` if permissions or the test steps changed.
    A changed `privacy-policy.md` is pasted into the Developer Hub by hand (the listing's **Edit**
    pages): only the first submission takes it from the file, `publish-addon.cmd` never uploads
    it. 0.9.0 changes it (the release check against GitHub), and so does the word colours
    release (what is read from Anki and stored, and the model download at setup).
-5. Commit and tag (`v<version>`); the reviewer notes point to the tag. Mind that pushing the tag
-   runs the release workflow, which signs that version in the *unlisted* channel, and AMO then
-   refuses the same number in the listed channel: submit the listing first and tag afterwards
-   (the workflow's signing step then fails for that version, so re-run it or attach the zips by
-   hand), or give the listed submission a version number of its own.
+5. Merge, then tag the merge commit (`v<version>`); the reviewer notes point to the tag, and
+   pushing it publishes the version (below). Do not also run `sign-addon.cmd` or
+   `publish-addon.cmd` for it: the number would be taken before the workflow gets to it.
 
 ## First listed version: Developer Hub
 
@@ -76,9 +76,27 @@ first submission can instead be held for a manual review that takes days to a fe
 Reviewers also look at published versions afterwards. Their questions arrive by email and on the
 version's page in the Developer Hub, and are answered there.
 
-## Later versions: `publish-addon.cmd`
+## Every release: the release workflow
 
-`publish-addon.cmd` (needs the AMO API key like `sign-addon.cmd`) regenerates
+Pushing the tag runs `.github/workflows/release.yml`, which after the checks and the GitHub
+release (with the zips) submits `dist/firefox` to the listed channel with the metadata from
+`make_metadata.py` (`web-ext sign --channel listed --approval-timeout 0`; the AMO API key lives in
+the repository secrets `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET`). It then waits up to 15
+minutes for AMO's approval (`scripts/amo-xpi.mjs fetch`) and attaches the signed
+`shisu_ko-<version>.xpi` to the GitHub release: the file AMO serves, so a GitHub install is the
+listed add-on and updates from AMO like any other. A version held for a manual review gets its
+`.xpi` from `.github/workflows/amo-xpi.yml`, which runs every three hours and asks AMO only while
+the newest release has no `.xpi`; run it by hand (**Actions** > **Attach the signed Firefox
+package** > **Run workflow**, optionally with a tag) to pick one up at once. The job can be
+re-run: a version AMO already has is not uploaded twice. A version AMO rejects fails the attach
+step; answer the reviewer in the Developer Hub, bump, and release again.
+
+`node scripts/amo-xpi.mjs status <version>` (with the API key in the environment) says what AMO
+knows of a version: `missing`, `pending`, `public`, or `disabled` for a rejected one.
+
+## By hand: `publish-addon.cmd`
+
+The fallback when the workflow cannot run. `publish-addon.cmd` (needs the AMO API key like `sign-addon.cmd`) regenerates
 `amo-metadata.json` and runs `web-ext sign --channel listed`, which uploads the build, creates the
 version with the release notes and reviewer notes, and rewrites the listing text from the files
 here. It returns as soon as the version exists; approval happens later. The privacy policy, icon
@@ -89,11 +107,8 @@ It also works for the very first listed version (AMO accepts the metadata on ver
 the privacy policy, icon and screenshots then still have to be added in the Developer Hub before
 or during the review.
 
-## After approval
+## Installs from the GitHub releases
 
-- Put the listing link into the README's *Install the extension* section, before the GitHub
-  release route: `https://addons.mozilla.org/firefox/addon/shisu-ko/` (check the slug in the
-  Developer Hub; AMO may have assigned a different one).
-- Attach `dist/shisu-ko-<version>.zip` to the GitHub release as before. Self-distributed
-  `.xpi` builds from `sign-addon.cmd` keep working next to the listing, but users installed from
-  AMO get updates from AMO, so publish every release there.
+The unlisted `.xpi` files of 0.8.0 to 0.13.0 carry the same id and no `update_url`, so Firefox
+asks AMO for their updates and moves them to the first listed version newer than theirs. From
+0.14.0 on the GitHub release's `.xpi` is the listed file itself.

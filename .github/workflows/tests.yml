@@ -110,6 +110,10 @@ jobs:
         run: npm ci
       - name: Run build tests
         run: npm run test:build
+      # The release workflow publishes these texts with every tag; a version bump without new
+      # release notes fails here rather than after the tag.
+      - name: Check the addons.mozilla.org listing texts
+        run: python3 docs/amo/make_metadata.py
       - name: Lint Firefox package
         run: npx --yes web-ext lint --source-dir addon
       - name: Build browser packages
