@@ -199,6 +199,7 @@ comes back.
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
 | Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
+| Alt+Shift+K | Mark the word under the pointer (or the word selected in a line) as known, or take it off the list again; see [Word colours](#word-colours) |
 | ← / → | Jump to the start of the previous / next subtitle. In a gap between lines, Left goes back to the line that just ended. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
@@ -278,46 +279,101 @@ need Anki running with AnkiConnect, the same as mining, and share its permission
 **Colour words by their Anki card** colours each word of a subtitle line, and of the transcript
 panel, by the state of its card: green for a card you have learned (in review), yellow for one you
 are still learning, orange for a suspended card, red for a new one. A word with no card keeps the
-text colour. The cards come from one deck. Left on *Automatic*, that is the deck your last mined
-card went to: nothing is looked up until you have mined a card, and the first mine then names the
-deck (the hint under the **Deck** select says which, or "no card mined yet"). Choose a deck in
-the select to look at that one instead; its subdecks count. Words are taken from the note's word
-field (the popup's **Word field**, else the note's first field), and a verb or adjective is found
-in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
+text colour, unless it is a name, a word on your list of known words, or a particle or katakana word
+counted as known (below). The cards come from one deck. Left on *Automatic*, that is the deck your
+last mined card went to: nothing is looked up until you have mined a card, and the first mine then
+names the deck (the hint under the **Deck** select says which, or "no card mined yet"). Choose a
+deck in the select to look at that one instead; its subdecks count. Words are taken from the note's
+word field (the popup's **Word field**, else the note's first field), and a verb or adjective is
+found in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
 食べたことがある and 食べ in 食べに行く, 書く colours 書かない and 書いて, 美しい colours
 美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり, and a word
-written in kana is found in its forms too (かける colours かけて, しまう colours しまった,
-おいしい colours おいしかった). A card whose dictionary entry marks the word as usually written in
-kana (Jitendex's "kana" tag, JMdict's `uk`) colours its reading as well: a card for 更に colours
-さらに. The word alone takes the colour: a particle after it has no card
-of its own and stays plain (領域まで reads 領域 in colour and まで in black). The honorific お or
-ご before a word takes its colour, being part of the word (お風呂), and so does the quotative って
-or と between a coloured word and one found after it (話しかけていただくっていう with いう in the
-deck), which ICU holds in one piece. A word is not coloured inside a compound (食べ物 for 食べる,
-日本語 for 日本, 走者 for 走る), and a card for a particle, the copula or an auxiliary (は, のは, から,
-でも, だ, です, ます, ない, たい, ん …) never colours anything by itself, since it would paint every
-line the same way. Two cards for one word show the one with the least progress; a suspended card
-only counts when there is no other.
+written in kana is found in its forms too (かける colours かけて, しまう colours しまった, おいしい
+colours おいしかった). A card for a noun written with kanji or katakana also colours the する forms
+after it (お願い colours お願いします, スタート colours スタートしました); one written in kana, such
+as びっくり, does not, nor does a time word, an adverb, a counter or a single kanji (今日します,
+全然しない, 何かしたい, 一回した, 顔する keep the する apart), and a card for the verb itself keeps
+its own forms (with 話 and 話す in the deck, 話して is 話す's). A card whose dictionary entry marks
+the word as usually written in kana (Jitendex's "kana" tag, JMdict's `uk`) colours its reading as
+well: a card for 更に colours さらに.
+A particle does not take the colour of the word before it (領域まで is 領域 in the card's colour and
+まで apart: まで has no card), save one: with particles not counted as known (below), the quotative
+って or と between a word coloured by its card and いう found after it (話しかけていただくっていう),
+which ICU holds in one piece, takes the colour of the word before it. The honorific お or ご before
+a word takes its colour, being part of the word (お風呂). A word is not coloured inside a compound
+(食べ物 for 食べる, 日本語 for 日本, 走者 for 走る), and a card for a particle, the copula or an
+auxiliary (は, のは, から, でも, だ, です, ます, ない, たい, ん …) never colours anything by itself,
+since it would paint every line by that card's state. Two cards for one word show the one with the
+least progress; a suspended card only counts when there is no other.
+
+The colours below need no card, but they come with the card colours: they show only while **Colour
+words by their Anki card** is on, and **Overbar by pitch accent** on its own colours none of them.
+They need no deck either: with no card mined and no deck chosen, or with Anki closed, the names,
+your known words and the particles and katakana words counted as known are coloured all the same,
+and the card colours join them once a deck has been read.
+
+**Particles count as known** (on by default) colours green every particle the browser's word
+splitter sets apart as a word of its own, whatever stands before it, and the combinations of
+particles, the copula and the auxiliaries along with them (は, には, から, まで, です, ですね, という
+…; と alone when いう has a card of its own), as grammar you know rather than words with a card;
+turned off, particles keep the text colour. A particle the splitter joins to a verb's ending keeps
+the text colour too (the よ of できますよ). Most verbs the deck lacks are not taken apart for it:
+the splitter cuts a kana one it does not know into pieces that look like particles (やって, なった,
+よかった, してます, もらって), and the kana ending of a kanji one into more of them (飲んだ,
+書かない, 呼ばれた), while the endings after its stem are its own (ございます,
+見えてきました), so those keep the text colour whole. Measured on real subtitles, about one green
+particle in thirty is still such a piece, among them a negative cut into particle shapes of two
+kana (わからない and 分からない show わ, から and ない green); the other way round, the Kansai
+copula や before った or って (日本初やった) looks like やる and stays uncoloured.
+
+Names and Latin text are blue, no card needed: Latin letters (jr, YouTube, iPhone, Ｗｉ－Ｆｉ, and
+Tシャツ as one word; www laughter is no name), place names (the prefectures, their capitals and
+big cities, Tokyo's wards, the districts and sights a travel video names, the countries and cities
+abroad: 東京, 丸の内, 北海道, アメリカ), and a place, or any word of two kanji or katakana or more
+that has no card, with a suffix such as 駅, 区, 寺 or 通り after it (東京駅, 渋谷区, 品川駅,
+金閣寺), which turns an ordinary word without a card before such a suffix blue as well (予定通り,
+時間通り); a word with a card keeps its colour and the suffix its own (地元駅 with cards for 地元
+and 駅). A card for the same word wins (東京 alone, with 東京 in the deck, is the card's colour),
+a longer name wins over a shorter card (東京駅 over 東京, 丸の内 over 丸).
+
+A word on your list of known words is green whatever its card says (its pitch overbar stays), and a
+known word with no card is found in its conjugations like a deck word. The list is the **Known
+words** field in the Word colours section, one word per line. **Alt+Shift+K** adds the word under
+the pointer in a subtitle or the transcript, or the word you selected there (a word Yomitan has
+selected counts too, so the shortcut works with its popup open), and takes it off the list again
+when it is on it already. The word is the one under the pointer's tip, down to the character: a
+coloured word whole, else the word the browser's word splitter makes of the text there, a single
+kanji with the kana that follow it up to the next particle (食べて, but 私 in 私はこれが), お or ご
+with the word it fronts (風呂 for お風呂), and a verb or adjective in the form your deck holds it in
+(食べる for 食べた) when the deck has it. A particle is not added, since the **Particles count as
+known** switch decides its colour, but one you typed into the list comes off it. With the pointer
+moved off the player the shortcut marks nothing and says "No word under the pointer", unless the
+video is paused by a hover and waiting for you. With **Katakana words count as known**, every
+katakana word of two characters or more that no card, known word or name covers is green too.
 
 **Overbar by pitch accent** draws a bar over each word that has a card, in the colour of its pitch
 accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka (the colours Migaku and
-Yomitan use). The pattern is read from the card's pitch accent field in whichever form Yomitan
-wrote it: a category name (`{pitch-accent-categories}`), a position such as `[2]`
-(`{pitch-accent-positions}`) or the drawn graph (`{pitch-accents}`). A position needs the word's
-mora count to tell odaka from nakadaka; it comes from the graph, else from the card's reading
-field (a field named reading or furigana, not the sentence's), else from the word itself when it
-is kana, and without any of them the word counts as nakadaka. The field is found by itself: the
-first one whose name contains "pitch" or "accent" and holds a readable value, unless you name one
-under **Pitch accent field** in the *Anki, clips and server* drawer. Verbs and adjectives, which
-Yomitan files under kifuku, get no bar rather than a wrong one. Both colourings can be on at once:
-the text colour is the card's state, the bar its pitch.
+Yomitan use). The pattern is read from the card's pitch accent field in whichever form Yomitan wrote
+it: a category name (`{pitch-accent-categories}`), a position such as `[2]`
+(`{pitch-accent-positions}`), the drawn marks (`{pitch-accents}`) or the drawn graph
+(`{pitch-accent-graphs}`). A position needs the word's mora count to tell odaka from nakadaka; it
+comes from the drawing, else from the card's reading field (a field named reading or furigana, not
+the sentence's), else from the word itself when it is kana, and without any of them the word counts
+as nakadaka. A field holding the bare reading and nothing else says nothing about the pitch (old
+templates wrote it there whatever the pattern). The field is found by itself: the first one whose
+name contains "pitch" or "accent" and holds a readable value, unless you name one under **Pitch
+accent field** in the *Anki, clips and server* drawer; when none reads, a reading field Yomitan drew
+the pitch into is read instead. Verbs and adjectives, which Yomitan files under kifuku, get no bar
+rather than a wrong one. Both colourings can be on at once: the text colour is the card's state, the
+bar its pitch.
 
 The deck is looked at again every 30 seconds while a video is open, and only the lines whose
 colours changed are redrawn, so a card you review in Anki changes colour within a minute and a
 card you have just mined shows red within seconds. The words stay ordinary page text, so Yomitan
 scans across the colours as before. When Anki is closed the colours stay as they were last read,
-or off when nothing was read yet; a deck that no longer exists colours nothing; either way the
-hint under the deck select says what stands in the way, and nothing is ever toasted on the video.
+or, when nothing was read yet, only the colours that need no card show; a deck that no longer
+exists colours no card; either way the hint under the deck select says what stands in the way,
+and nothing is ever toasted on the video.
 
 ## Live streams
 
@@ -368,8 +424,11 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Left/Right jump between subtitles | Arrow keys move between cues instead of seeking five seconds |
 | Transcript panel | List of all cues so far, with jump and mine buttons |
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
-| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
+| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; blue for names and Latin text, green for your known words and, as the two switches below say, for particles and katakana words; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
+| Particles count as known | On by default: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) are green, as grammar you know; off, they keep the text colour |
+| Katakana words count as known | Katakana words of two characters or more that no card, known word or name covers are green |
+| Known words | Your own list, one word per line: green whatever the card says, and found in their conjugations without a card. Alt+Shift+K adds the word under the pointer, or takes it off again |
 | Overbar by pitch accent | Draws a bar over each word that has a card, in the colour of its pitch accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka, read from the card's pitch accent field |
 | Font size, keep line after speech | Presentation; the linger time keeps short lines readable |
 | Hide YouTube's own captions | Avoids two subtitle layers |

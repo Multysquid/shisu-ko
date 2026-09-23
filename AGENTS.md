@@ -82,13 +82,14 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   `large-v3` are one model) and resolved through `faster_whisper.download_model()` before it is
   loaded. A raw client string must never reach `WhisperModel()`, which also opens local
   directories; only the operator's `--model` may be a folder, and it skips the download.
-- `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S).
-  Off must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption
-  hiding, no arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so
-  Alt+Shift+M would still find one), no `cardStatus` asks for the word colours' deck index
-  (`wordColoursOn()` in `content.js` includes `enabled`, and the poll runs from `syncTick()`),
-  so no request reaches Anki from a YouTube tab. Only the toggle command itself keeps working:
-  the command listener in `content.js` returns for every other command while `enabled` is false.
+- `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S). Off
+  must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption hiding, no
+  arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so Alt+Shift+M would
+  still find one), no known word marked (Alt+Shift+K, `markKnown()`, would find one in them too and
+  write the setting), no `cardStatus` asks for the word colours' deck index (`wordColoursOn()` in
+  `content.js` includes `enabled`, and the poll runs from `syncTick()`), so no request reaches Anki
+  from a YouTube tab. Only the toggle command itself keeps working: the command listener in
+  `content.js` returns for every other command while `enabled` is false.
 - The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on
   it, so its handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`,
   the transcript's close button) act only on trusted events (`ev.isTrusted`): a synthetic click
@@ -710,17 +711,27 @@ does not remove an entry: two words from one line make two cards.
 
 Two opt-in colourings of the words of a line, both off by default: `cardStatus` colours a word by
 the state of its Anki card (`data-status`: `learned` green, `learning` yellow, `suspended`
-orange, `new` red; colours as custom properties on `.shisuko-root` in `content.css`), `pitchAccent`
-draws an overline in the colour of its pitch accent pattern (`data-pitch`: `heiban` blue,
-`atamadaka` red, `nakadaka` orange, `odaka` green). `cardStatusDeck` names the deck (empty is
-automatic: the deck the last mined card went to; nothing mined and nothing chosen means no deck,
-so a collection is never searched by guesswork), `ankiPitchField` the note field holding the
-pitch (empty: found by name). `addon/words.js` (`SHISUKO_WORDS`, a plain frozen object like
-`SHISUKO_MATCH`, loaded between `match.js` and the two scripts in both `background.scripts` and
-`content_scripts[0].js`, and by `service-worker.js`) is shared: the background turns one deck's
-notes into `[word, status, pitch]` entries (a word usually written in kana twice, under its
-reading as well), the content script builds an index from them and
-marks the words of every line. Everything in words.js is pure, without DOM.
+orange, `new` red, and `proper` blue for a name or Latin text, which no card has; colours as
+custom properties on `.shisuko-root` in `content.css`), `pitchAccent` draws an overline in the
+colour of its pitch accent pattern (`data-pitch`: `heiban` blue, `atamadaka` red, `nakadaka`
+orange, `odaka` green). `cardStatusDeck` names the deck (empty is automatic: the deck the last
+mined card went to; nothing mined and nothing chosen means no deck, so a collection is never
+searched by guesswork), `ankiPitchField` the note field holding the pitch (empty: found by
+name). Three settings refine what `cardStatus` shows, and none of them asks Anki: `knownWords`
+(the viewer's own list, one word per line, `learned` whatever the card says; Alt+Shift+K, the
+`mark-known` command, puts the word under the pointer on it or takes it off), `particlesKnown`
+(on by default: a particle is `learned`) and `katakanaKnown` (a katakana word no card, known
+word or name takes is `learned`). Like the names, what they add is a status (a known word keeps
+its card's pitch, the rest have none), so it shows only with `cardStatus` on; it needs no deck:
+until a deck answer builds the index, a failed ask (no card mined and no deck chosen, Anki closed
+or refusing) builds one of the known list alone, and the names, known words, particles and
+katakana words are drawn from that (`lookOf()` draws plain text only before the first answer, see
+"The content side"). `addon/words.js`
+(`SHISUKO_WORDS`, a plain frozen object like `SHISUKO_MATCH`, loaded between `match.js` and the
+two scripts in both `background.scripts` and `content_scripts[0].js`, and by `service-worker.js`)
+is shared: the background turns one deck's notes into `[word, status, pitch]` entries (a word
+usually written in kana twice, under its reading as well), the content script builds an index
+from them and marks the words of every line. Everything in words.js is pure, without DOM.
 
 ### words.js
 
@@ -738,23 +749,32 @@ marks the words of every line. Everything in words.js is pure, without DOM.
 - `parsePitch(text, reading, word)` -> category or null, in this order: a category name in the
   plain text, the first by position (`heiban|平板|atamadaka|頭高|nakadaka|中高|odaka|尾高`,
   case-insensitive: Yomitan's `{pitch-accent-categories}`; its `kifuku` for verbs and adjectives
-  is no category, so no overbar rather than a wrong one); else a position `n`: the `{pitch-accents}`
-  markup (`drawnPitch()`: one `display:inline-block` span per mora holding a `border-color:` line
-  span, the drop after the mora whose line has `border-right-width`; the first `<li>` of a list
-  counts; a nasal mora's extra inline-block span is not a mora, the line spans are counted), else
-  the first `[n]` of the plain text (`{pitch-accent-positions}`, a list's first), else a plain
-  text of digits alone, else `ꜜ` in the plain text (n = the moras before it), else a raw value
-  without any tag that is kana-only (n = 0); else null. Then 0 -> heiban, 1 -> atamadaka, else
-  `n === m` -> odaka, otherwise nakadaka, with `m` the drawn mora count, else `moraCount()` of the
-  pitch text without ꜜ when kana-only, else of `reading`, else of `word`, else unknown (nakadaka).
+  is no category, so no overbar rather than a wrong one); else a drawn pattern (`drawnPitch()`,
+  per `<li>` of a list, the first that draws one counting): the `{pitch-accents}` markup (one
+  `display:inline-block` span per mora holding a `border-color:` line span, the drop after the
+  mora whose line has `border-right-width`; a nasal mora's extra inline-block span is not a mora,
+  the line spans are counted), else the `{pitch-accent-graphs}` SVG (`graphPitch()`, the first
+  `<svg>`: the `<circle>`s of radius 10 or more are the moras in document order, the radius-5 dot
+  inside the hollow one is not; the drop after the first circle whose style or attribute says
+  `fill:none`, none hollow is heiban; the particle's triangle `<path>` is not read; Jidoujisho's
+  graph, dots of radius 4 and 5, reads nothing); else a position `n`: the first `[n]` of the plain
+  text (`{pitch-accent-positions}`, a list's first), else a plain text of digits alone, else `ꜜ`
+  in the plain text (n = the moras before it); else null. A kana-only value without a mark is null
+  (it used to be heiban: the viewer's oldest 302 cards hold the bare reading in the pitch field
+  whatever the pattern). `categoryOf(n, m)`: 0 -> heiban, 1 -> atamadaka, else `n === m` ->
+  odaka, otherwise nakadaka, with `m` the drawn mora count, else `moraCount()` of the pitch text
+  without ꜜ when kana-only, else of `reading`, else of `word`, else unknown (nakadaka).
 - `pitchOf(fields, settings)`: `fields` is `notesInfo`'s `{name: {value, order}}`. The candidates
   are the field `ankiPitchField` names (trimmed, when present), else every field whose name
   matches `/pitch|accent|アクセント/i` in `order`; the first whose value `parsePitch()` reads
-  decides (a `{pitch-accent-graphs}` SVG before a position field does not hide it). The reading is
-  the lowest-order field other than the candidate matching `/reading|furigana|読み|よみ/i` and not
-  `/sentence|文/i` (`SentenceFurigana` holds the sentence's kana, whose mora count would make every
-  odaka word nakadaka), through `readingOf()`; the word is `ankiWordField`, else order 0, through
-  `plainWord()`. Null without a candidate or a readable value.
+  decides (a field drawing nothing this reads, such as Jidoujisho's graph, before a position field
+  does not hide it). The reading is the lowest-order field other than the candidate matching
+  `/reading|furigana|読み|よみ/i` and not `/sentence|文/i` (`isReadingField()`; `SentenceFurigana`
+  holds the sentence's kana, whose mora count would make every odaka word nakadaka), through
+  `readingOf()`; the word is `ankiWordField`, else order 0, through `plainWord()`. When no
+  candidate reads, or there is none, the reading fields are the last resort, in order, through
+  `drawnPitch()` alone: Yomitan's `{pitch-accents}` is often the reading field itself, while a
+  plain reading draws nothing. Null otherwise.
 - `usuallyKana(fields)`: true when a field's value holds `usually written using kana alone`
   (Jitendex's tag title, JMdict's note; case-insensitive, the whole value scanned, since a
   glossary runs past `MAX_FIELD_HTML_LEN`) or a parenthesised list with an item that is exactly
@@ -770,11 +790,17 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   -> `learning`; in `review` -> `learned`; else `learning` (an Anki before 2.1.44, or a set a
   search left out). `mergeStatus(a, b)` for two notes of one word: the least progress wins
   (`new` < `learning` < `learned`), `suspended` only when both are, null the identity.
-- `buildIndex(entries)`: words trimmed; empty, over `MAX_WORD_LEN` or in `PARTICLES` dropped
-  (case, binding, adverbial, conjunctive and sentence-final particles, Yomitan's fusions such as
-  のは, への, かも, and the copula and auxiliaries a learner mines: だ, です, ます, ない, たい, ん,
-  じゃ, もん …: a card for one would paint every line); duplicates merged (`mergeStatus`, the
-  first non-null pitch). Returns a frozen `{size, exact, stems, heads, maxLen, maxStemLen}`:
+  `STATUSES` ends in `proper`, the colour of a name (below), which no card has: `mergeStatus()`
+  lets any card's status beat it.
+- `buildIndex(entries, known)`: words trimmed; empty, over `MAX_WORD_LEN` or in `PARTICLES`
+  dropped (case, binding, adverbial, conjunctive and sentence-final particles, Yomitan's fusions
+  such as のは, への, かも, the んじゃ ICU keeps whole, and the copula and auxiliaries a learner
+  mines: だ, です, ます, ない, たい, ん, じゃ, もん …: a card for one would paint every line);
+  duplicates merged (`mergeStatus`, the first non-null pitch). `known`, the viewer's known words
+  (an array of strings, the same rules), are `learned` over whatever their cards say, the card's
+  pitch kept, and one without a card is an entry of its own with its stems, so its forms are
+  found like a deck word's; a kana reading's entry (`kanaReadingOf()`) is overridden like any.
+  Returns a frozen `{size, exact, stems, heads, maxLen, maxStemLen}`:
   `exact` Map word -> `{word, status, pitch, bounded}` (`bounded` for a word without kanji or
   katakana, which must end at a word boundary in every form, else ある is found in あるいは);
   `stems` Map stem -> `[{entry, kind}]` from `stemOf()`: a stem of at least one character for a
@@ -790,10 +816,16 @@ marks the words of every line. Everything in words.js is pure, without DOM.
 - `wordStarts(text)`: the indices where a word may begin, `Intl.Segmenter("ja", {granularity:
   "word"})` segment starts (the instance cached) plus 0; every index without a segmenter or on
   any error; it never throws. ICU keeps a compound in one segment (日本語, あるいは, 見せかけ).
-- `markWords(text, index, starts)` -> runs `[{text, status, pitch}]` covering the text in order,
-  unmatched characters joined into one run with nulls. Left to right; only a position in `starts`
-  (an iterable, `wordStarts(text)` by default) whose character is in `heads` is tried; after a
-  match `i` jumps to its end (no overlaps). The boundaries it goes by are `boundsOf(text,
+- `markWords(text, index, starts, opts)` -> runs `[{text, status, pitch}]` covering the text in
+  order, unmatched characters joined into one run with nulls; `opts.particles` and
+  `opts.katakana` count the particles and the katakana words as known (below), and without
+  `opts` the deck, the known words and the names are all it colours. Left to right; only a
+  position in `starts` (an iterable, `wordStarts(text)` by default) is tried, a deck word only
+  where the character is in `heads` (a null or empty index finds none, the names and options
+  still apply); after a run `i` jumps to its end (no overlaps). At a position, in this order: a
+  deck or known word (with its honorific prefix or quotative, below) unless a name from the same
+  start is longer, a name, a katakana word (`opts.katakana`), a particle (`opts.particles`). The
+  boundaries it goes by are `boundsOf(text,
   starts)`: `starts` plus the index after a て or で at a start that ICU fused with the く of the
   auxiliary behind it (`TE_FORM`: 食|べ|てく|れ|た, 書|い|てく|れ|た, かけ|てく|れ|た; not
   読|んで|く|れ|た, which it cuts), where くれる begins and かけて ends; `starts` itself is never
@@ -804,17 +836,34 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   word boundary, from the word's end to the form's), so a kana noun ending in a verb's kana
   (いくつ, きょう, けっこう, ふつう, ほんとう, whose stem is in the tables) ends before its copula
   and carries no です in its pitch overbar (いくつ|です|か), a kana verb losing nothing by it
-  (わかる|んだ, おいしい|です: the copula is plain text either way), while a form that adds more
-  than particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is one
-  run): exact words longest first (`bounded` ones must end at a boundary or the end of the text,
-  the others anywhere `endsWord()` admits: the end, a boundary, or not right before a kanji,
-  katakana or ー, so 関 is not coloured in 関係, 飲み not in 飲み物, while 見た ends before 犬 and
-  電話 before 番号); then every stem length from `maxStemLen` down, `continuationEnd()` giving the
+  (わかる|んだ, おいしい|です: the copula is no part of it either way), while a form that adds
+  more than particles still wins (わかりました) and a kanji word keeps the form (食べるでしょう is
+  one run): exact words longest first (`bounded` ones must end at a boundary or the end of the
+  text, the others anywhere `endsWord()` admits: the end, a boundary, or not right before a
+  kanji, katakana or ー, so 関 is not coloured in 関係, 飲み not in 飲み物, while 見た ends before
+  犬 and 電話 before 番号, and never inside a segment that is a particle, `insideParticle()`:
+  電話|しか has no form 電話し, unless `NOT_BEFORE` makes the particle another word's start,
+  食べ|たら|しく); an exact word `suruNoun()` admits then runs on over する's pieces and tails,
+  `continuationEnd(..., "suru")` (勉強している, お願いします, スタートしました with スタート known,
+  no card for 勉強する needed): a word holding a kanji or katakana, of two characters or more
+  (顔する, 数する stay two runs, and so do 損する and 得する, the few single-kanji する nouns), not
+  ending in する (its own forms, below), not in `NOT_SURU` (the time words, adverbs, pronouns and
+  counters a する form follows as often as any noun: 明日, 最近, 一番, 一回, 全然, 絶対, 結構,
+  多分, 本当, 少し, 自分, 皆さん …; a noun ending in し is one, 引っ越しします, so 少し is listed
+  by name), not opening on 何, 毎 or 今 (`NOT_SURU_HEAD`: 何してるの, 毎日します, 今日します) and
+  not ending in か, も, で, に, と or は (`NOT_SURU_END`: 何かしたい, 何もしない, 後でします,
+  静かにして). The run must reach past a lone し, which is the conjunctive particle as often
+  (勉強し、 is 勉強 alone), and past every form a deck word found below reaches from the same
+  start, so a card for the verb keeps its own forms when they are as long (話して is 話す's with
+  話 and 話す in the deck, 思い出して 思い出す's; without the verb's card the noun runs on as
+  before); and it never ends on ちゃ or じゃ before っ (勉強しちゃった, 渋滞しちゃってる: the
+  tables cannot follow ちゃった, and a run ending at ちゃ kept a card for ちゃう from the rest; the
+  noun stays alone). Then every stem length from `maxStemLen` down, `continuationEnd()` giving the
   furthest end `endsWord()` admits, or, for a `bounded` entry, one at a boundary or where
   `boundedEnd()` admits: inside the segment ICU made of the form's ending and the particle
   after it (わか|っ|たよ, かけ|たよ, でき|ますよ, ちがい|ますよ: the segment holding the end must
-  begin after the form's start and what remains of it must be a particle, which then takes the
-  colour), while the exact bounded word, having no ending to be fused, still ends at a boundary
+  begin after the form's start, be no particle itself, and what remains of it must be a
+  particle), while the exact bounded word, having no ending to be fused, still ends at a boundary
   only (ことば, あいだ, はなし and こんにちは with こと, あい, はな and こんにち in the deck stay
   plain, and so does はし in ICU's は|しか). ICU cuts a kana run it does not know into single
   kana (い|れ|ば, かけ|ら, し|まっ|た), so かけて in 話し|かけ|て|いただく, しまった and わかった are
@@ -868,19 +917,19 @@ marks the words of every line. Everything in words.js is pure, without DOM.
     かけたくさん (ICU かけ|たらしい, かけ|たくさん) stay plain, since らしい and くさん are no
     particles and `NOT_BEFORE` keeps た from ending the form before them.
   - It stays linear-ish: Maps keyed by the substring, never a loop over the deck per position.
-- The word alone takes the colour. A particle after it is not part of it and has no card of its
-  own, so it stays plain: 領域まで and 領域の with 領域 in the deck read `[領域]まで` and
-  `[領域]の`, not one red piece (the colour says "this word's card is new", and まで has no card).
-  ちょうどこのお風呂の中で with 風呂 and 中 in the deck is
-  `[ちょうどこの][お風呂][の][中][で]`. Two things do take a colour without being a deck word,
-  both of them part of the word's own form; each is a run of its own with the word's `status` and
-  `pitch` null, content.js draws every run, and adjacent runs of one status stay separate. A word
-  with a pitch and no status has no colour to run on: what would take it is plain text.
+- A particle never takes the colour of the word before it (the one exception is the quotative
+  before いう without the particles option, below): 領域まで and 領域の with 領域 in the
+  deck read `[領域]まで` and `[領域]の`, not one red piece (the colour says "this word's card is
+  new", and まで has no card). ちょうどこのお風呂の中で with 風呂 and 中 in the deck is
+  `[ちょうどこの][お風呂][の][中][で]` without the particles option. What takes a colour without
+  being a deck word is a run of its own; content.js draws every run, and adjacent runs of one
+  status stay separate. A word with a pitch and no status has no colour to run on: what would
+  take its colour is plain text.
   - An honorific prefix (`HONORIFICS`: お, ご) joins the word it fronts: at a start `i` whose
     character is one AND `starts.has(i + 1)` (ICU cut the prefix off: お|風呂, ご|家族, お|仕事; it
     keeps お茶, お前, お金, ご飯, お母さん whole, so those are never tried and 前 never colours
-    お前), when no word matches at `i`, the match is tried at `i + 1`; on a hit the prefix's run
-    comes before the word's.
+    お前), when no word matches at `i`, the match is tried at `i + 1`; on a hit the prefix's run,
+    the word's status and no pitch, comes before the word's.
   - A quotative (`QUOTATIVES`: って, と, longest first) may front いう, and いう alone
     (`QUOTED_WORD`), inside one segment: ICU keeps っていう and という (彼|という|人) whole, so
     いう never begins a segment, while it cuts って off every other word (って|こと, って|もの)
@@ -888,21 +937,127 @@ marks the words of every line. Everything in words.js is pure, without DOM.
     those stay plain with ころ, おる, まる or くに in the deck. At a start `i` holding one, when
     no word matches at `i`, the match is tried at `i + prefix.length` and taken only when it is
     いう and ends at a boundary or the text end, so いう is found in っていう / という and not in
-    そういう or といった. The quotative takes the status of the run that ends at `i` (って after
-    話しかけていただく, と after 猫), else it stays plain (彼と | いう).
+    そういう or といった. With the particles option the quotative is a particle, `learned`;
+    without it, it takes the status of the run that ends at `i` (って after 話しかけていただく, と
+    after 猫), else it stays plain (彼と | いう, and after a name: blue is no card's colour).
+  - Names, status `proper` (blue in content.css), where no deck or known word from the same start is
+    as long (`nameAt()`; a card wins the tie, so 東京 alone is the card's, while 東京駅 and 丸の内
+    are blue with 東京, 駅 and 丸 in the viewer's deck, whose の of 丸の内 was left white by "the
+    deck always wins"): Latin text (`LATIN`, sticky: a letter, then letters, digits, `'`, `&`, `.`
+    and `-`, ending in a letter or digit, or the full-width twin with its own ’ ＇ ＆ ． and －
+    inside, which ICU cuts apart: jr, YouTube, iPhone, E4, ＪＲ, Ｗｉ－Ｆｉ, Ｑ＆Ａ; digits alone are a
+    number; a single letter takes the katakana segment it is fused to, `latinEnd()` and
+    `KATAKANA_WORD`, so Tシャツ and Jリーグ, cut T|シャツ, are one name; laughter, `w` or `ｗ` alone
+    however many, `LAUGHTER`, is none: www, ｗｗｗ, 草www); a place (`PLACES`, 406 of them: the
+    prefectures with and without their suffix, 大分 bare left out for だいぶ, their capitals but 津
+    (Mie's, not in the list), the cities over half a million, the 23 wards with 区 and the
+    unambiguous ones bare, the districts and sights a travel video names, 日光, 両国, 新世界 and 高山
+    left out as common nouns, the regions, Japan and the countries and cities abroad that come up,
+    チリ left out as the chili of エビ|チリ and チリ|ソース; longest first, `placeAt()`, ending where
+    `endsWord()` admits, so 日本 is not in 日本語); and a place, or, where no deck or known word is
+    found at the same start (`nameAt()`'s `pair`), a kanji or katakana segment of two characters or
+    more (`KANJI_OR_KATAKANA_RUN`), with a `PLACE_SUFFIXES` segment after it (駅 県 市 区 町 村 郡
+    都 府 島 山 川 湖 海 港 寺 城 橋 線 湾 峠 岬 滝 岳 空港 公園 神社 通り 温泉 半島 高原 海岸 商店街
+    タワー ドーム) as one run (`suffixEnd()`: the rest of the segment the name ends in, 東京駅 kept
+    whole, or the segment after it, 品川|駅; 駅前 and 駅舎 are words and take none: 東京|駅前,
+    丸の内|駅舎). The pair of a segment and a suffix is a guess, and a card for the segment says
+    otherwise: 結構|山, 昨日|海, 地元|駅 and 天然|温泉 are a word and a noun, each in its own
+    card's colour, while 主要駅 without a card for 主要 is a name. ICU cuts 東|急|線, so 東急線 is
+    no name (a known gap), and an ordinary word of two kanji without a card before 通り is one
+    (予定通り, 時間通り).
+  - With `opts.katakana`, a katakana word (`KATAKANA_RUN`: two characters or more, ー and ・
+    inside, never one) that no deck word, known word or name takes is `learned`, cut before a
+    deck word that begins inside it at a boundary (`katakanaAt()`: コーヒー|カップ).
+  - With `opts.particles` (the setting `particlesKnown`, on by default: a particle counts as grammar
+    the viewer knows, another claim than the one 0.12.0 removed, where a particle took the card
+    state of the word before it), at a start where nothing above matched, `particleAt()`: the
+    quotative with いう ICU keeps whole (`QUOTE_PHRASES`: っていう, ていう, という; という only
+    where no card holds いう or という and っていう only where none holds いう, since the quotative
+    rule above, tried first, fronts いう with って or と, and a card for という is a word of its
+    own; ていう whatever the deck says, since no quotative fronts いう with て, so a card for いう
+    does not show in こと|ていう|か), else the longest entry of `PARTICLES` that ends at a boundary,
+    is `learned`, one run each (本|には|ね, です|ね), never the colour of the word before it; else
+    a one-kana particle ICU fused with the い of いる after it (`IRU_PARTICLES`: が, と, も, に,
+    で; 人|がい|た, 猫|とい|た, 猫|がい|れ|ば), that い followed by a boundary and one of
+    `IRU_ENDINGS` (た て ない なかっ なく ます まし ませ る れば よう たい), never at the end of the
+    text (猫|がい); not は (靴|を|はい|た is 履いた: はいた, はいて and はいる are 履く, 吐く and 入る
+    in kana as often, and ICU fuses them the same way), nor と after the 音便 kana い, っ or ん
+    (`ONBIN_KANA`: 置い|とい|て is ておいて). ICU cuts a kana word it does not know into pieces
+    whose first often has a particle's shape (や|って, な|っ|た, お待ち|し|て, も|ら|って), and the
+    auxiliaries after a verb stem the deck lacks are its inflection (ござい|ます, あっ|て), so
+    `shreddedVerb()` refuses a piece, a shorter particle standing where a longer one is refused
+    (に of 猫|に|も|ら|っ|た):
+    - a one-kana particle before っ, the 音便 of the verb it begins (やった, なって, よかった,
+      つながった, かかった; not だ, whose past is だった, nor the の of 見るのって, nor ね or よ
+      before a quotative って of its own that ends at a boundary, 楽しい|ね|って, while
+      すごい|な|って stays plain, なる's as often), or before a た or て that ICU left alone or
+      fused with a particle only (`pastAlone()`: 猫|が|で|た, 猫|が|で|たよ; 出る, 寝る, 似る);
+    - a piece `PARTICLE_NOT_BEFORE` names before the kana after it: し before て, ま, ち and な
+      (する) and before れ and ろ (しれない, しろ); も, にも, でも, とも and ても before ら (もらう);
+      か before か (かかる); や before り and れ (やる) and ば (やばい); よ before か (よい); へ
+      before え (へえ); っけ before え (でっけえ);
+    - な before the whole segments に, さ and さそう (`PARTICLE_NOT_BEFORE_SEGMENT`: な|に is 何,
+      な|さ and な|さそう are ない's, 情け|な|さ, 申し訳|な|さそう; whole segments, so 変|な|におい
+      and 好き|な|さかな keep their な), and the second half of such a pair after plain text (the に
+      of な|に, the さ of 情け|な|さ);
+    - a one-kana particle, or っけ, before a small kana that glides onto the kana before it
+      (`GLIDES`: ゃ ゅ ょ ャ ュ ョ ゎ ヮ; おっ|し|ゃ; not the small vowels, which draw a particle
+      out, だ|よ|ぉ), and a one-kana particle before a single-kana segment that is no particle with
+      a small kana after it (だ|せ|ぇ: slang ICU does not know);
+    - after a kanji, the kana a verb the deck lacks is cut into: ん (飲|ん|だ, and the ん of
+      僕|ん|家 with it), a piece opening on だ or で after that ん (飲|ん|だ, 死|ん|で,
+      飲|ん|だら), and the a-row okurigana さ, わ, ば, な and か (`A_ROW_OKURIGANA`) before the
+      negative, the passive or the causative (`NEGATIVE_HEAD`: な, ず, れ, せ; 書|か|ない,
+      話|さ|ない, 言|わ|ない, 呼|ば|れ|た, 移|さ|れる, 行|か|せ|て), except after 何 and 誰, where
+      the か is the particle (何|か|ない);
+    - って, the て-form of an う, つ or る verb, after an a-row kana (`A_ROW_BEFORE_TE`:
+      あかさなはまやらわがざばぱ and ゃ) where plain text ends (な|って, や|って, もら|って,
+      強ま|って; not とか|って, where a particle ends, nor after a deck word, さくら|って), and
+      after ちゃ or じゃ whatever ends there (使っちゃ|って, where the form of a deck verb stops, as
+      the tables do); た|って and から|って stand;
+    - an entry of `INFLECTIONS` (て ば たら たり ても ながら ます ません ました ない たい) right
+      after plain hiragana (ござい|ます, やり|たい; after a particle, a word, a kanji or punctuation
+      it stands: お金が|ない, んじゃ|ない, 問題|ない).
+
+    Measured on 668 of the viewer's subtitle lines with their 13,730 deck entries, known list
+    empty, katakana off and Node 24's ICU: 2,198 particle runs unguarded, 18 of a sample of 200
+    judged by hand no particle (91% right; 94% counting a verb's inflection as a particle); the
+    guard as it stood then refused 206 (196 no particle; the ten were the Kansai copula や before
+    った/って, 日本初やった, and ない after an unfound word, もちろん|ない, もんじゃ|ない) and the
+    quotative phrase and んじゃ added 34, all right, for 2,026 runs, of which two samples judged by
+    hand (188 and 142) were 96.8% and 96.5% right. The rules added after those samples (the glides,
+    the second kana of a slang word, な|に, the kana a kanji verb is cut into) took 8 more of the
+    2,026 off those lines, and 25 of 2,237 with an empty deck, where no card holds the verb: none
+    of them a particle. The rule that comes to mind first, a one-kana particle before any
+    single-kana segment that is no particle, refused 25 particles with its 33 pieces (を|お|ご|ら,
+    に|い|ます, で|ご|ざ|い: ICU cuts the word after a true particle the same way), hence the small
+    kana it now asks for after that segment. Left, listed rather than promised: shapes too rare to
+    list (つ|な|が|っ|た, な|げー, と|ろ, へ|ん, な|け|れ|ば), words the cue boundary cut (さ|に of
+    まさに), a katakana word used as a verb stem (シュイ|ません); a verb that no deck holds cut into
+    particle shapes of two kana, a kana one (わ|から|ない) or a kanji one's okurigana (分|から|ない:
+    から after a kanji is the particle as often, 朝|から|ない), stays green; the Kansai copula や
+    before った and って stays plain; and a deck verb's form that ends inside a particle ICU fused
+    to its ending stays plain whole (読|ん|だって with 読む in the deck: 読んだ would end inside
+    だって, and ん and だって are the verb's to the guard).
 - Tests: `addon/tests/words.test.js` covers every function above: the field readers and their
   bounds (a passage, a field of `<` never closed), `moraCount`, `parsePitch` in each form and its
-  mora sources, `pitchOf` (the named field, the fallback, the sentence reading skipped, a graph
-  field before a position field), `usuallyKana` (the title, the tag list, prose `UK` refused, a
+  mora sources (the bare kana value null; Yomitan's SVG graph built as its renderer writes it, the
+  viewer's five shapes 家 動画 観 お母さん 一週間, a list's first, Jidoujisho's dots read as
+  nothing), `pitchOf` (the named field, the fallback, the sentence reading skipped, a field that
+  reads nothing before a position field, a graph field, the reading field drawn as the last
+  resort and a plain one not), `usuallyKana` (the title, the tag list, prose `UK` refused, a
   field of brackets), `kanaReadingOf` (更に -> さらに, no tag, a kana word, a ruby field, the
-  sentence, word and pitch fields skipped), さらに coloured by its reading entry, `statusOf` and `mergeStatus`, `buildIndex` (trimming, the
-  particles, the stems, the kana-only stems of two kana at least), `wordStarts` with Node's ICU,
+  sentence, word and pitch fields skipped), さらに coloured by its reading entry, `statusOf` and
+  `mergeStatus` (`proper` beaten by any card), `buildIndex` (trimming, the particles, the stems,
+  the kana-only stems of two kana at least, the known words over their cards with the pitch
+  kept, a known word's own stems), `wordStarts` with Node's ICU,
   and the matcher rule by rule with explicit `starts` sets mirroring ICU and once more with the
   real `wordStarts`: the examples above, the tails, `AFTER`, `OPEN_TAILS`, `NEXT`, `NOT_BEFORE`,
   the compounds, the bare stems, the particles and auxiliaries, the two lines of the viewer
   exactly as wanted, the honorific prefix (お茶 / お前 with 茶 / 前 stay plain, お茶 with お茶,
-  ご|家族, a status-less word's prefix), the particles after a word staying plain (本には,
-  本からは, 学生です, 猫がでた, 猫にほん, the conjugation still going with the word, a deck word
+  ご|家族, a status-less word's prefix), without the options the particles after a word staying
+  plain (本には, 本からは, 学生です, 猫がでた, 猫にほん, the conjugation still going with the word,
+  a deck word
   after the particle still found, the plain pieces joined into one run) and the viewer's two
   lines colouring 領域 alone (この時点でこっちの地声領域のE4に変えれる人なぁー and
   で、余裕がある人はそのままA4の地声領域まで持っていってください。), いう in という and っていう and not in そういう (and
@@ -913,7 +1068,26 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   a particle getting no forms, the っ of a く verb admitted after 行 alone (あるって, はたらって
   and 書って staying plain, あるいて, 書いた and 行った found), a kana word found whole winning
   over a form of it that adds particles alone (いくつ|です|か, きょう|です, わかる|ん|だ, わかるまい
-  and 食べるでしょう as one run), and a long line against a large deck.
+  and 食べるでしょう as one run), a long line against a large deck, and what needs no card: the
+  viewer's two lines (おはようございます jr 東京駅に来てますよろしくお願いします and
+  さあ今日は東京駅丸の内駅舎の前からスタートということでですね) with a deck of their words, katakana
+  off and on, and with the 14 entries of the viewer's real deck that touch them (東京駅 and
+  丸の内 blue, no white の), the particles counted as known (after a plain word, at the start, after
+  a deck word in its colour's stead, one run per entry, never over a word, a name or a katakana
+  word, plain without the option), the quotative and its phrase (a card for という not reaching
+  into っていう, one for いう not showing in ていう), the guard on the measured shapes and on
+  猫|が|で|た and 猫|に|も|ら|っ|た, with what it leaves (な|が) and costs (the Kansai や), the true
+  particles the tempting guards would refuse, the kana a kanji verb the deck lacks is cut into
+  (飲んだ, 書かない, 呼ばれた, 行かせて; が, 何か and ん beside them kept), the slang and
+  interjections ICU cuts up (な|に, おっ|し|ゃ, や|ば|ぁ, だ|せ|ぇ, で|っけ|え, へ|え, し|ろ,
+  な|さそう; 変なにおい and 好きなさかな keeping their な, a particle drawn out by a small vowel),
+  the particle fused with the い of いる (not at the end, not は, not the と of ておいて), ね before
+  its own って, って after a deck word and after ちゃ, the する forms after a noun (a card for the
+  verb keeping its own forms, no time word, adverb, pronoun, counter or single kanji running on,
+  never ending inside ちゃった), Latin text (full-width with its marks, a letter with its
+  katakana, laughter plain), places and their suffixes, the suffix joined only where no card
+  begins (結構|山, 昨日|海, 地元|駅, 天然|温泉), チリ no place, the longer span between a card and a
+  name, katakana words, known words, and a long line with every option on.
 
 ### The background index (`addon/background.js`, "word colours" section)
 
@@ -1010,42 +1184,48 @@ read again, a merged duplicate, the fields the viewer named, the TTL
 ### The content side (`addon/content.js`, "word colours" section)
 
 - `wordColoursOn()` = `enabled && (cardStatus || pitchAccent)`. State: `wordIndex` (a
-  `buildIndex()` result), `wordIndexSerial` (moves on with every index put in `wordIndex`, a new
-  one or none: what dates a cue's look), `wordIndexAt` (the background's `at`, the `since` of the
-  next ask), `wordIndexKey` (`JSON.stringify(entries)`), `wordIndexAskedAt`, `wordIndexInFlight`,
-  `wordIndexGeneration` (times the index was started over), `wordIndexDrawn` /
-  `wordIndexDrawnSerial` (the index the last `refreshWordMarks()` ran with), and three WeakMaps:
-  `lineTexts` (transcript line -> its `.shisuko-linetext` span), `drawnKeys` (element -> the
-  `drawKey()` of what `renderText()` last drew in it), `cueLooks` (cue -> `{serial, cardStatus,
-  pitchAccent, starts, runs, key}`). Constants `WORD_INDEX_REFRESH_MS` 30 s, `WORD_INDEX_LOG_MS`
-  60 s, `WORD_INDEX_MINE_DELAY_MS` 1.5 s, `WORD_INDEX_PROBE_MAX` 64, `WORD_SETTINGS` =
-  `cardStatus`, `pitchAccent`, `cardStatusDeck`, `ankiPitchField`, `ankiWordField` (if the
-  background's `CARD_INDEX_SETTINGS` ever gains `ankiUrl`, add it here too).
+  `buildIndex(entries, knownList(settings))` result), `wordEntries` (the entries of the deck answer
+  it was built from, kept so that a new known list builds it again without an ask),
+  `wordIndexSerial` (moves on with every index put in `wordIndex`, a new one or none: what dates a
+  cue's look), `wordIndexAt` (the background's `at`, the `since` of the next ask), `wordIndexKey`
+  (`JSON.stringify(entries)`), `wordIndexAskedAt`, `wordIndexInFlight`, `wordIndexGeneration` (times
+  the index was started over), `wordIndexDrawn` / `wordIndexDrawnSerial` (the index the last
+  `refreshWordMarks()` ran with), and three WeakMaps: `lineTexts` (transcript line -> its
+  `.shisuko-linetext` span), `drawnKeys` (element -> the `drawKey()` of what `renderText()` last
+  drew in it), `cueLooks` (cue -> `{serial, cardStatus, pitchAccent, katakana, particles, starts,
+  runs, key}`). Constants `WORD_INDEX_REFRESH_MS` 30 s, `WORD_INDEX_LOG_MS` 60 s,
+  `WORD_INDEX_MINE_DELAY_MS` 1.5 s, `WORD_INDEX_PROBE_MAX` 64, `WORD_SETTINGS` = `cardStatus`,
+  `pitchAccent`, `cardStatusDeck`, `ankiPitchField`, `ankiWordField` (if the background's
+  `CARD_INDEX_SETTINGS` ever gains `ankiUrl`, add it here too).
 - `renderText(el, cue)` is the one writer of a cue's text, used by `setSubtitle()` for
   `state.subText` and by `transcriptLine()` for the line's span: `lookOf(cue)` gives the runs,
-  `drawRuns()` puts them in a `DocumentFragment` and `replaceChildren()`s it: a string run is a
-  text node, a marked run `<span class="shisuko-word">` with `dataset.status` only when
-  `cardStatus` is on and the run has a status, `dataset.pitch` only when `pitchAccent` is on and
-  it has a pitch, and its text as a text node; a run with neither is joined into the plain text
-  around it. Without `wordColoursOn()` or an index, `el.textContent = cue.text`. `lookOf()`
-  answers from `cueLooks` when the entry's `serial` is `wordIndexSerial` under the same pair of
-  colours, else runs `SHISUKO_WORDS.markWords(cue.text, index, starts)` with the entry's `starts`
-  (`wordStarts(cue.text)` the first time, kept whatever the index) and records it under the serial
-  of now; a look never holds an index, so a cue drawn while the transcript was hidden pins no old
-  index. A rebuilt panel and the line on screen for a cue whose line is up ask the matcher and the
-  segmenter nothing.
+  `drawRuns()` puts them in a `DocumentFragment` and `replaceChildren()`s it: a string run is a text
+  node, a marked run `<span class="shisuko-word">` with `dataset.status` only when `cardStatus` is
+  on and the run has a status, `dataset.pitch` only when `pitchAccent` is on and it has a pitch, and
+  its text as a text node; a run with neither is joined into the plain text around it. Without
+  `wordColoursOn()` or an index, `el.textContent = cue.text`, so the names, the particles, the known
+  words and the katakana words wait for the poll's first answer (a deck's, or a failure that builds
+  the index of the known list alone, below), and, being statuses (a known word's card pitch
+  aside), show only with `cardStatus` on. `lookOf()` answers from `cueLooks` when the entry's
+  `serial` is `wordIndexSerial` under the same pair of colours and the same switches
+  (`sameSwitches()`: `katakanaKnown`, `particlesKnown`), else runs
+  `SHISUKO_WORDS.markWords(cue.text, index, starts, {katakana, particles})` with the entry's
+  `starts` (`wordStarts(cue.text)` the first time, kept whatever the index) and records it under the
+  serial of now; a look never holds an index, so a cue drawn while the transcript was hidden pins no
+  old index. A rebuilt panel and the line on screen for a cue whose line is up ask the matcher and
+  the segmenter nothing.
 - `refreshWordMarks()`: with the last drawn index and the new one both held and the colours on,
   `indexProbes(prev, next)` lists the words the two disagree on (present in one only, or another
   status or pitch), each replaced by its stem where it has one (a prefix of the word and of every
-  form), `[]` when they agree, null over `WORD_INDEX_PROBE_MAX`. The active cue's text and, when
-  the transcript is shown, every line are left alone when `sameLook(el, cue, prevSerial, probes)`
-  holds (the look carries `prevSerial` with the colours of now, `drawnKeys.get(el)` is its key,
-  and the text includes no probe; the look's serial then moves on) and otherwise go through
+  form), `[]` when they agree, null over `WORD_INDEX_PROBE_MAX`. The active cue's text and, when the
+  transcript is shown, every line are left alone when `sameLook(el, cue, prevSerial, probes)` holds
+  (the look carries `prevSerial` with the colours and switches of now, `drawnKeys.get(el)` is its
+  key, and the text includes no probe; the look's serial then moves on) and otherwise go through
   `refreshText()` (a redraw only when the `drawKey()` differs), so a card reviewed in Anki costs a
   look at each line's text and a match of the lines holding that word, and replaces neither the
   nodes of any other line nor what Yomitan holds on them. Lines still pending (none, as a rule: a
-  shown panel renders on arrival) are put in first by `renderTranscript()`, drawn under the index
-  of now; the panel is never rebuilt for a refresh.
+  shown panel renders on arrival) are put in first by `renderTranscript()`, drawn under the index of
+  now; the panel is never rebuilt for a refresh.
 - `pollWordIndex()` runs from `syncTick()` and asks only when `wordColoursOn()`, `state.video &&
   state.videoId` (the home page and a player left behind off a watch page never ask, a settings
   change included), the tab visible, nothing in flight and `WORD_INDEX_REFRESH_MS` past: `{type:
@@ -1054,67 +1234,143 @@ read again, a merged duplicate, the fields the viewer named, the TTL
   server, which this never reaches, and the standby tab's lines stay on screen and must be
   recoloured too. An answer from before `wordIndexGeneration` moved is thrown
   away. `unchanged` keeps everything; a new `at` with the same key moves the stamp only; new
-  entries rebuild the index, move the serial and call `refreshWordMarks()`; `reason: "off"` drops
-  the index and takes the colours off; any other failure is a `console.debug` line at most once
-  per `WORD_INDEX_LOG_MS`, never a toast; `stale` answers count as fresh. After a successful mine
+  entries go into `wordEntries`, rebuild the index with the known list of now, move the serial
+  and call `refreshWordMarks()`; `reason: "off"` drops
+  the index and takes the colours off; any other failure (`noDeck`, `offline`, `denied`, `error`)
+  is a `console.debug` line at most once per `WORD_INDEX_LOG_MS`, never a toast, and, while no
+  index is held, builds one of the known list alone (`rebuildWordIndex()` over no entries) and
+  draws it with `refreshWordMarks()`: the known words, the particles, the katakana words and the
+  names need no deck. Its stamp and key stay unset, so the first deck answer with entries replaces
+  it; an index already held (a deck read before Anki closed) stays as it was. `stale` answers
+  count as fresh. After a successful mine
   `mineCue()` sets `wordIndexAskedAt` so the next ask goes out `WORD_INDEX_MINE_DELAY_MS` after
   it, once the background has expired its index.
-- The storage listener: a change to any of `WORD_SETTINGS` runs `dropWordIndex()` (index null,
-  serial and generation on, stamp, key and `askedAt` 0), then `refreshWordMarks()` (plain text
-  again at once, in place) and, with the colours on, `pollWordIndex()`. `applySettings()` never
-  rebuilds the transcript (only `state.transcriptRebuild`, set by `dropCues()` or a new panel,
-  makes `renderTranscript()` build every line anew): a panel shown again renders what arrived
-  while it was hidden (`renderTranscript()`) and then runs `refreshWordMarks()` and
-  `highlightTranscript()`, so its lines catch up in place on the index and the active line; a
-  style setting written (a slider dragged) leaves the lines and the line on screen as they are.
-  `dropCues()` leaves the index alone (it belongs to the deck, not the video).
-- Tests: `addon/tests/content.test.js`: `wordColoursOn`, `renderText` plain and with either or
-  both attributes in spans holding text nodes, `setSubtitle` / `transcriptLine` drawing through
-  it, the refresh redrawing only the changed lines, a word setting taking the colours off in
-  place, a style write leaving the lines alone, one card reviewed matching only the lines holding
-  the word or its stem (`countingWords()` wraps `markWords` / `wordStarts`; `_loadContent.js`
-  declares words.js's export with `var` for that), a hidden transcript's cue pinning nothing, the
-  poll's conditions and answers, the deck change, the overtaken answer, the mine re-ask, the
-  master switch off sending nothing, a new server session keeping the index.
+- The storage listener: a change to any of `WORD_SETTINGS` runs `dropWordIndex()` (index and entries
+  null, serial and generation on, stamp, key and `askedAt` 0), then `refreshWordMarks()` (plain text
+  again at once, in place) and, with the colours on, `pollWordIndex()`. A change to `knownWords`
+  alone runs `rebuildWordIndex()` (the index again from `wordEntries`, or from no entries while no
+  deck answer is in hand, with the new `knownList()`, the serial on), a change to `katakanaKnown`
+  or `particlesKnown` needs no new index (every look found under the old switch fails
+  `sameSwitches()`); either is then drawn in place by `refreshWordMarks()`, with no drop and no
+  ask, `refreshText()` replacing only the lines whose `drawKey()` moved. While `enabled` is off
+  that draw waits: the lines keep their colours under the hidden root, and turning the add-on on
+  runs the refresh, which compares against the index last drawn and the switches each look was
+  found under, and so draws again just the lines the list or a switch changed meanwhile.
+  `applySettings()` never rebuilds the transcript (only
+  `state.transcriptRebuild`, set by `dropCues()` or a new panel, makes `renderTranscript()` build
+  every line anew): a panel shown again renders what arrived while it was hidden
+  (`renderTranscript()`) and then runs `refreshWordMarks()` and `highlightTranscript()`, so its
+  lines catch up in place on the index and the active line; a style setting written (a slider
+  dragged) leaves the lines and the line on screen as they are. `dropCues()` leaves the index alone
+  (it belongs to the deck, not the video).
+- Known words. `knownList(settings)` (pure): the lines of `knownWords`, trimmed, blank ones out,
+  each once, in the order written. `markKnown()` answers the `mark-known` command (Alt+Shift+K in
+  the manifest; like every command but the switch, not while `enabled` is off; the colours need
+  not be on). `knownTarget()`: the selection when it lies inside the subtitle box or the
+  transcript list (`selectedText()`, through `knownWordFrom()`; Yomitan selects the text it
+  scanned while its popup is up), replaced by the index's own word like the rest; else the caret
+  at `state.lastPointer` (`caretAt()`: Firefox's `caretPositionFromPoint`, Chrome's
+  `caretRangeFromPoint`) inside what `renderText()` drew (`drawnAround()`: the line on screen or
+  a transcript line's text), but only while the pointer is over the player
+  (`state.pointerInPlayer`, set by `onPlayerMouseMove()` and cleared by `onPlayerMouseLeave()`:
+  once it has left, the line under its last position has moved on or the transcript has
+  scrolled) or the video is hover-paused (the line waits where it was for a pointer gone to a
+  dictionary popup); otherwise there is no word under the pointer. The caret APIs answer the gap
+  nearest the point, which over a character's right half is the gap after it, so
+  `characterUnder()` takes the character whose box holds the point (`drawnCharacter()` and a
+  one-character range's `getBoundingClientRect()`, the character before the gap first, then the
+  one after, as Yomitan checks the box), else the gap as it came. There: a word span's text, and
+  for an honorific prefix drawn as a span of its own the word span after it (`wordAfter()`:
+  [お][風呂] marks 風呂); else the ICU segment (`segmentAt()`; an honorific prefix segment gives
+  the segment after it, お|風呂; a single kanji takes the hiragana segments after it up to the
+  first particle the matcher finds, `particleStarts()`, `markWords()` over an empty index with the
+  particles counted as known, whose guard keeps the okurigana and a verb's inflection out of
+  them: 食|べ|て is 食べて, 私|は|これ|が is 私, 本|を|読|ん|だ is 読んだ), through
+  `knownWordFrom()` (one line, at most `MAX_WORD_LEN`, a letter or digit in it) and replaced by
+  the index's own word when it knows the form (`entryWordFor()`: 食べる for 食べた, 勉強 for
+  勉強している). A word `buildIndex()` drops, a particle (`buildIndex([], [word]).size === 0`), is
+  refused with a warn toast (`X is a particle: the "Particles count as known" switch decides its
+  colour`): on the list it would colour nothing; one on the list already (typed in the popup)
+  still comes off it. The word comes off the list when it is on it, else goes on;
+  `saveSettings({knownWords})` and a toast (`X marked as known`, `X is no longer marked as known`,
+  `No word under the pointer` without one); every tab follows through the storage listener. A
+  command comes from the browser, never from the page.
+- Tests: `addon/tests/content.test.js`: `wordColoursOn`, `renderText` plain and with either or both
+  attributes in spans holding text nodes, `setSubtitle` / `transcriptLine` drawing through it, the
+  refresh redrawing only the changed lines, a word setting taking the colours off in place, a style
+  write leaving the lines alone, one card reviewed matching only the lines holding the word or its
+  stem (`countingWords()` wraps `markWords` / `wordStarts`; `_loadContent.js` declares words.js's
+  export with `var` for that), a hidden transcript's cue pinning nothing, the poll's conditions and
+  answers, the deck change, the overtaken answer, the mine re-ask, the master switch off sending
+  nothing, a new server session keeping the index; `knownList`, the index built with the known list
+  and both switches reaching the matcher, a new known list building the index again from the entries
+  in hand without an ask and redrawing the lines it changes, the particles counted as known by
+  default and only with the card colours on, the particle switch redrawing in place (no ask, the
+  index kept, new nodes only for the lines holding a particle), no deck to colour by (the known
+  words, the particles and the katakana words drawn all the same; a known word changed with no
+  deck in hand colouring in place without an ask, a deck answer then replacing the list-only
+  index, and off leaving nothing), the known list and the switches changed while off redrawing
+  nothing until the add-on is on and then only the lines they changed, Alt+Shift+K (a word span,
+  plain text, a verb by its stem, a one-kanji word in plain text stopping at the particle after
+  it, the character under the pointer read by its box, its right half included, an honorific
+  prefix marking the word it fronts, a particle refused and one on the list taken off, the
+  pointer gone from the player marking nothing unless a selection or a hover pause says
+  otherwise, the selection first and through the deck's word, a word on the list taken off,
+  nothing under the pointer, the add-on off), and the master switch stopping the known-word
+  command. `_loadContent.js` also returns `onPlayerMouseLeave`, `knownList`, `rebuildWordIndex`,
+  `segmentAt`, `entryWordFor`, `knownTarget` and `markKnown`, and its document has no selection,
+  no caret API and no ranges unless a test puts them there.
 
 ### The popup (`addon/popup.html` / `popup.js`)
 
-The "Word colours" section holds `#cardStatus`, the `#cardStatusDeck` select (first option value
-`""`), `#deck-hint`, `#pitchAccent` and the two legends (swatches in `popup.css`); `#ankiPitchField`
-sits in the "Anki, clips and server" drawer after the word field. `renderDeckOptions(decks,
-seen, current)` keeps the automatic entry first (`automaticDeckText(seen)`: `Automatic: <deck>`
-once Anki has been asked, `Automatic: no card mined yet` for `seen` null, and the page's own
-`Automatic: the deck of the last mined card` for `seen` undefined, before any ask or after a
-message that failed outright), then one option per name, sorted, the stored value kept as an
-option even when unlisted (a select drops a value without an option, and the setting would go
-with it at the next save); `init()` calls it before the `setField` loop. `refreshDecks()` sends
-`{type: "ankiDecks"}` (answers numbered by `decksAsked`, an overtaken one dropped; `decksOk` true
-for a listed set, false for a failure, null while an ask is out) and paints `#deck-hint` only
-while a checkbox is on: the error (warn) when not ok, `No deck named <name> in Anki` (error) for
-an unlisted manual deck, nothing for a listed one, `The last mined card's deck <seen> is no
-longer in Anki; mine a card, or choose a deck` (warn), `Looking at <seen>`, or `Automatic: no
-card mined yet — mine one, or choose a deck` (warn). Anki is asked from `init()` only when
-`cardStatus || pitchAccent` is stored on (the first ask brings up AnkiConnect's dialog, which a
-viewer who never uses the feature must not meet), from `onChange` after the debounced save when
-a checkbox was turned on or `ankiUrl` edited (`decksCheckPending = "feature"`, only when a
-feature is on in the form the save wrote) or the deck select changed (`"deck"`, always), and,
-while the newest answer failed and a feature is on, again every `DECKS_RETRY_MS` (30 s) from a
-clock `init()` sets beside the health refresh (`retryDecks()`; a good answer is never re-asked by
-the clock, and the clock, like the health poll, ticks only while the page is visible,
-`document.hidden`), because the options page (`options_ui.page` = popup.html) lives for hours.
-The save clears the hint when both features are off. A deck, a checkbox or `ankiUrl` written by
-the other copy of the form (the options page and the toolbar popup) lands through
-`onStorageChanged()`, which rebuilds the deck option from Anki's last list
-(`renderDeckOptions(decksListed, decksSeen, value)`: a select shows nothing for a value without
-an option) and asks Anki by the `onChange` rules less the save (`landed`: a deck, a feature that
-landed checked, or the URL while a feature is on; a feature landing unchecked asks nothing; both
-features off clears the hint). Tests:
-`addon/tests/popup.test.js` (the fake document's `options`, `replaceChildren`,
-`createElement("option")`): `renderDeckOptions`, every hint, the overtaken answer, `init()`
-asking only with a feature on and keeping the stored deck, the retry clock and when it stays
-quiet, the asks after a save, both features off clearing the hint, a new AnkiConnect URL, the
-word colours edited in the other copy of the form landing in the select and the hint, and Reset
-style taking a pending deck edit with it, the ask it carried following that one save.
+The "Word colours" section holds `#cardStatus` and its legend (the four states and a blue swatch,
+`proper`, for names and Latin text), the `#cardStatusDeck` select (first option value `""`),
+`#deck-hint`, `#particlesKnown` (checked by default) above `#katakanaKnown`, the `#knownWords`
+textarea (a typed field, saved at its change event; `readField()` stores it through
+`knownWordsText()`, one word per line, each trimmed, blank lines out, as `knownList()` reads it)
+with a hint naming Alt+Shift+K, and `#pitchAccent` with its legend (swatches in `popup.css`); none
+of the three new fields asks Anki. Alt+Shift+K writes `knownWords` from a YouTube tab while the
+options page may hold the list focused for hours, so a focused text field keeps a change made
+elsewhere out only while the viewer is typing in it (`typing()`: its value, as `readField()` reads
+it, differs from `typedBaseline`, what `init()` or `onStorageChanged()` last put in or `flushSave()`
+last sent); a list that skipped the marks on focus alone would save itself over them at its next
+edit. `#ankiPitchField` sits in the "Anki, clips and server" drawer
+after the word field. `renderDeckOptions(decks, seen, current)` keeps the automatic entry first
+(`automaticDeckText(seen)`: `Automatic: <deck>` once Anki has been asked, `Automatic: no card mined
+yet` for `seen` null, and the page's own `Automatic: the deck of the last mined card` for `seen`
+undefined, before any ask or after a message that failed outright), then one option per name,
+sorted, the stored value kept as an option even when unlisted (a select drops a value without an
+option, and the setting would go with it at the next save); `init()` calls it before the `setField`
+loop. `refreshDecks()` sends `{type: "ankiDecks"}` (answers numbered by `decksAsked`, an overtaken
+one dropped; `decksOk` true for a listed set, false for a failure, null while an ask is out) and
+paints `#deck-hint` only while a checkbox is on: the error (warn) when not ok, `No deck named <name>
+in Anki` (error) for an unlisted manual deck, nothing for a listed one, `The last mined card's deck
+<seen> is no longer in Anki; mine a card, or choose a deck` (warn), `Looking at <seen>`, or
+`Automatic: no card mined yet — mine one, or choose a deck` (warn). Anki is asked from `init()` only
+when `cardStatus || pitchAccent` is stored on (the first ask brings up AnkiConnect's dialog, which a
+viewer who never uses the feature must not meet), from `onChange` after the debounced save when a
+checkbox was turned on or `ankiUrl` edited (`decksCheckPending = "feature"`, only when a feature is
+on in the form the save wrote) or the deck select changed (`"deck"`, always), and, while the newest
+answer failed and a feature is on, again every `DECKS_RETRY_MS` (30 s) from a clock `init()` sets
+beside the health refresh (`retryDecks()`; a good answer is never re-asked by the clock, and the
+clock, like the health poll, ticks only while the page is visible, `document.hidden`), because the
+options page (`options_ui.page` = popup.html) lives for hours. The save clears the hint when both
+features are off. A deck, a checkbox or `ankiUrl` written by the other copy of the form (the options
+page and the toolbar popup) lands through `onStorageChanged()`, which rebuilds the deck option from
+Anki's last list (`renderDeckOptions(decksListed, decksSeen, value)`: a select shows nothing for a
+value without an option) and asks Anki by the `onChange` rules less the save (`landed`: a deck, a
+feature that landed checked, or the URL while a feature is on; a feature landing unchecked asks
+nothing; both features off clears the hint). Tests: `addon/tests/popup.test.js` (the fake document's
+`options`, `replaceChildren`, `createElement("option")`): `renderDeckOptions`, every hint, the
+overtaken answer, `init()` asking only with a feature on and keeping the stored deck, the retry
+clock and when it stays quiet, the asks after a save, both features off clearing the hint, a new
+AnkiConnect URL, the word colours edited in the other copy of the form landing in the select and the
+hint, Reset style taking a pending deck edit with it, the ask it carried following that one save,
+the known words and the katakana switch loading and saving trimmed, one word per line, a focused
+known-words list nobody is typing in taking the marks made on the video and its next edit keeping
+them, and the particle switch loading checked, above the katakana one, and saving when unticked.
+`addon/tests/settings.test.js` holds the defaults: the colours off, `particlesKnown` true,
+`katakanaKnown` false, `knownWords` empty.
 
 ## How the Start server button works
 
@@ -1505,10 +1761,11 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
   `change` event fires on that very close: `flushSave()` in `popup.js` sends the save before any
   `await`, from `pagehide` and `visibilitychange` as well as the 150 ms debounce, and sends only
   the fields edited since the last save (`dirty`), because the form is not the only writer (the
-  content script saves `enabled` and `showTranscript` for the commands) and a whole-form save
-  would put back what another writer changed; `browser.storage.onChanged` brings such changes
-  into the form. `saveSettings()` in `background.js` is a read-modify-write, so it runs one save
-  at a time (`saveChain`): two in flight would drop a patch.
+  content script saves `enabled`, `showTranscript` and `knownWords` for the commands) and a
+  whole-form save would put back what another writer changed; `browser.storage.onChanged` brings
+  such changes into the form, a focused text field included unless the viewer is typing in it
+  (`typing()`, `typedBaseline`). `saveSettings()` in `background.js` is a read-modify-write, so it
+  runs one save at a time (`saveChain`): two in flight would drop a patch.
 - YouTube's SPA keeps the watch page in the DOM when it leaves it: on a Short reached from a
   watch page `#movie_player` still exists, hidden, with its video, so `findPlayer()` asks for
   `#shorts-player` on `/shorts/` addresses first, or the Short would be fetched and transcribed
