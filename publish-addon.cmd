@@ -1,6 +1,6 @@
 @echo off
 REM Submits a new version of the extension to the public listing on addons.mozilla.org (listed
-REM channel). The listing text comes from docs\amo (make_metadata.py builds the JSON web-ext
+REM channel) by hand; the release workflow does the same on every tag. The listing text comes from docs\amo (make_metadata.py builds the JSON web-ext
 REM sends); the privacy policy, icon and screenshots are set once in the Developer Hub, see
 REM docs\amo\README.md. Needs Node.js, Python and the same AMO API key as sign-addon.cmd:
 REM   1. https://addons.mozilla.org/developers/addon/api/key/
