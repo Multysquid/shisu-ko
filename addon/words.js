@@ -89,6 +89,7 @@ const SHISUKO_WORDS = (() => {
   const HIRAGANA = /^\p{Script=Hiragana}$/u;
   const KATAKANA = /^\p{Script=Katakana}$/u;
   const KANJI_OR_KATAKANA = /[\p{Script=Han}\p{Script=Katakana}]/u;
+  const HAS_KANJI = /\p{Script=Han}/u;
   // What a word never ends before, short of a word boundary: a kanji or katakana continues it
   // (関係, 日本語), and so does ー. Tested on a two-character slice, so a kanji beyond the BMP counts.
   const KANJI_OR_KATAKANA_NEXT = /^[\p{Script=Han}\p{Script=Katakana}ーｰ]/u;
@@ -263,27 +264,75 @@ const SHISUKO_WORDS = (() => {
     return list.sort((a, b) => a.order - b.order);
   }
 
-  // The pitch field is the one the settings name, else every field whose name says pitch in
-  // order, the first with a readable value deciding: a graph field ({pitch-accent-graphs}, an SVG
-  // with no text) before a position field must not hide the position.
-  function pitchOf(fields, settings) {
-    const s = settings || {};
-    const list = fieldsInOrder(fields);
-    const wanted = str(s.ankiPitchField).trim();
+  // The field the word is read from: the one the settings name, else the first, the same rule
+  // as the background's noteSummary().
+  function wordFieldOf(list, settings) {
+    const wordName = str((settings || {}).ankiWordField).trim();
+    return wordName ? list.find((field) => field.name === wordName) : list.find((field) => field.order === 0);
+  }
+
+  // The pitch fields: the one the settings name, else every field whose name says pitch, in order.
+  function pitchFieldsOf(list, settings) {
+    const wanted = str((settings || {}).ankiPitchField).trim();
     const named = wanted ? list.find((field) => field.name === wanted) : undefined;
-    const candidates = named ? [named] : list.filter((field) => PITCH_FIELD.test(field.name));
+    return named ? [named] : list.filter((field) => PITCH_FIELD.test(field.name));
+  }
+
+  // The word's reading, from the lowest-order field whose name says reading and not sentence,
+  // `skip` aside.
+  function readingFrom(list, skip) {
+    const field = list.find((f) => !skip(f) && READING_FIELD.test(f.name) && !SENTENCE_FIELD.test(f.name));
+    return field ? readingOf(field.value) : "";
+  }
+
+  // The first pitch field with a readable value decides: a graph field ({pitch-accent-graphs},
+  // an SVG with no text) before a position field must not hide the position.
+  function pitchOf(fields, settings) {
+    const list = fieldsInOrder(fields);
+    const candidates = pitchFieldsOf(list, settings);
     if (!candidates.length) return null;
-    // The same rule as the background's noteSummary(): the named field, else the first one.
-    const wordName = str(s.ankiWordField).trim();
-    const wordField = wordName ? list.find((field) => field.name === wordName) : list.find((field) => field.order === 0);
+    const wordField = wordFieldOf(list, settings);
     const word = wordField ? plainWord(wordField.value) : "";
     for (const pitch of candidates) {
-      const readingField = list.find((field) => field !== pitch && READING_FIELD.test(field.name) && !SENTENCE_FIELD.test(field.name));
-      const reading = readingField ? readingOf(readingField.value) : "";
-      const found = parsePitch(pitch.value, reading, word);
+      const found = parsePitch(pitch.value, readingFrom(list, (field) => field === pitch), word);
       if (found) return found;
     }
     return null;
+  }
+
+  // Jitendex writes the tag as a title (title="word usually written using kana alone"), JMdict's
+  // entity says the same, and Yomitan's plain glossary lists it as `uk` in a parenthesised tag
+  // list: "(adv, uk, JMdict (English))". A glossary runs past MAX_FIELD_HTML_LEN and the tag may
+  // sit anywhere in it, so the whole value is read, by scans that stay linear on a field of
+  // nothing but "(" or "<". Only a list item that is exactly `uk` counts: (UK) and (uk-based)
+  // are prose.
+  const USUALLY_KANA = "usually written using kana alone";
+  // A parenthesised run up to the next parenthesis of either kind: the list before a nested
+  // "(English)" is still read, and the lookahead leaves that "(" to start a match of its own.
+  const TAG_LIST = /\(([^()]{0,200})(?=[()])/g;
+
+  function usuallyKana(fields) {
+    for (const field of fieldsInOrder(fields)) {
+      if (field.value.toLowerCase().includes(USUALLY_KANA)) return true;
+      for (const found of field.value.matchAll(TAG_LIST)) {
+        if (found[1].split(",").some((item) => item.replace(TAGS, "").trim() === "uk")) return true;
+      }
+    }
+    return false;
+  }
+
+  // The reading a kanji word is heard and subtitled as, when its dictionary says it is usually
+  // written in kana (更に, subtitled さらに). Only then: every note's reading, indexed, measured
+  // half false on real subtitles (勝手 in 向かって, 内容 in 出さないように). "" otherwise, and for a
+  // word without kanji, which the index holds as it is.
+  function kanaReadingOf(fields, settings) {
+    const list = fieldsInOrder(fields);
+    const wordField = wordFieldOf(list, settings);
+    const word = wordField ? plainWord(wordField.value) : "";
+    if (!HAS_KANJI.test(word) || !usuallyKana(fields)) return "";
+    const pitches = pitchFieldsOf(list, settings);
+    const reading = readingFrom(list, (field) => field === wordField || pitches.includes(field));
+    return reading && reading !== word && reading.length <= MAX_WORD_LEN ? reading : "";
   }
 
   // `sets` holds the note ids of the five findNotes queries the background runs on a deck.
@@ -771,6 +820,8 @@ const SHISUKO_WORDS = (() => {
     readingOf,
     parsePitch,
     pitchOf,
+    usuallyKana,
+    kanaReadingOf,
     statusOf,
     mergeStatus,
     buildIndex,

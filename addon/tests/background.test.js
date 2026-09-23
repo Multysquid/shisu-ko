@@ -3185,7 +3185,8 @@ test("the notes read outlive the event page, and a record for other fields does 
   assert.deepEqual([record.wordField, record.pitchField], ["", ""]);
   assert.equal(typeof record.checkedAt, "number");
   assert.equal(record.notes.length, 8);
-  assert.deepEqual(plain(record.notes.find((row) => row[0] === 3)), [3, "橋", "odaka", 1700000003]);
+  assert.deepEqual(plain(record.notes.find((row) => row[0] === 3)), [3, "橋", "odaka", 1700000003, ""]);
+  assert.equal(record.format, first.sandbox.DECK_NOTES_FORMAT);
   assert.equal(record.at, res.at);
   assert.deepEqual(sortedEntries(record.entries), DECK_ENTRIES);
   // The page ended; the next one searches the deck but reads no note it already knows, and
@@ -3377,8 +3378,62 @@ test("a note read again whose chunk fails keeps what it said, and a chunk failin
   assert.deepEqual(sortedEntries(res.entries), sortedEntries([["犬", "new", null], ["猫", "new", "heiban"], ["鳥", "new", null]]));
   const written = session._dump()[sandbox.DECK_NOTES_KEY];
   assert.notEqual(written, record);
-  assert.deepEqual(plain(written.notes.find((row) => row[0] === 2)), [2, "猫", "heiban", 1800000000]);
+  assert.deepEqual(plain(written.notes.find((row) => row[0] === 2)), [2, "猫", "heiban", 1800000000, ""]);
   assert.equal(written.notes.length, 3);
+});
+
+// Jitendex's glossary tag on a note of a word usually written in kana, as Yomitan writes it.
+const KANA_TAG = '<span title="word usually written using kana alone">kana</span> further; furthermore';
+const KANA_NOTES = {
+  1: note(1, "更に", { Reading: "さらに", PitchAccent: "[1]", SecondaryDef: KANA_TAG }),
+  2: note(2, "勝手", { Reading: "かって", PitchAccent: "[0]" }),
+};
+const KANA_SETS = { suspended: [], unsuspended: [1, 2], new: [2], learning: [], review: [1] };
+const KANA_ENTRIES = sortedEntries([
+  ["更に", "learned", "atamadaka"],
+  ["さらに", "learned", "atamadaka"],
+  ["勝手", "new", "heiban"],
+]);
+
+test("a word usually written in kana is indexed by its reading too, with its status and pitch", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, KANA_SETS, KANA_NOTES));
+  const { sandbox, session } = loadBackground({ storage: colourSettings({ pitchAccent: true }), fetch: anki.fetch });
+  const res = await sandbox.cardStatus({});
+  assert.equal(res.ok, true, JSON.stringify(res));
+  // 勝手's reading is not indexed: かって is in every 向かって.
+  assert.deepEqual(sortedEntries(res.entries), KANA_ENTRIES);
+  const record = session._dump()[sandbox.DECK_NOTES_KEY];
+  assert.equal(record.format, sandbox.DECK_NOTES_FORMAT);
+  assert.deepEqual(plain(record.notes.find((row) => row[0] === 1)), [1, "更に", "atamadaka", 1700000001, "さらに"]);
+  assert.deepEqual(plain(record.notes.find((row) => row[0] === 2)), [2, "勝手", "heiban", 1700000002, ""]);
+  // The next page restores the reading from the record and reads no note again.
+  const second = loadBackground({ storage: colourSettings({ pitchAccent: true }), session, fetch: anki.fetch });
+  const again = await second.sandbox.cardStatus({ since: 0 });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(sortedEntries(again.entries), KANA_ENTRIES);
+  assert.equal(again.at, res.at);
+  assert.equal(notesAsked(anki).length, 1);
+});
+
+test("a notes record of an older format is ignored and every note read again", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, KANA_SETS, KANA_NOTES));
+  const first = loadBackground({ storage: colourSettings({ pitchAccent: true }), fetch: anki.fetch });
+  const res = await first.sandbox.cardStatus({});
+  const record = first.session._dump()[first.sandbox.DECK_NOTES_KEY];
+  // What the page before readings wrote: no format, four columns, no reading entry.
+  const old = {
+    ...plain(record),
+    notes: plain(record.notes).map((row) => row.slice(0, 4)),
+    entries: plain(record.entries).filter((entry) => entry[0] !== "さらに"),
+  };
+  delete old.format;
+  await first.session.set({ [first.sandbox.DECK_NOTES_KEY]: old });
+  const second = loadBackground({ storage: colourSettings({ pitchAccent: true }), session: first.session, fetch: anki.fetch });
+  const again = await second.sandbox.cardStatus({ since: res.at });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(sortedEntries(again.entries), KANA_ENTRIES);
+  assert.deepEqual(notesAsked(anki), [[1, 2], [1, 2]]);
+  assert.equal(second.session._dump()[second.sandbox.DECK_NOTES_KEY].format, second.sandbox.DECK_NOTES_FORMAT);
 });
 
 test("a deck named as one of Anki's keywords is searched by id, its subdecks included", async () => {
