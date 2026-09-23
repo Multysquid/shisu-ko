@@ -1717,6 +1717,11 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 
 ## Gotchas learned the hard way
 
+- addons.mozilla.org checks the listing texts only when a version is submitted, which the release
+  workflow does after the tag is pushed and the GitHub release exists: release notes and reviewer
+  notes over 3,000 characters each are refused then ("Ensure this field has no more than 3000
+  characters"), as 0.14.0 was. `make_metadata.py` and `scripts/tests/amo-metadata.test.mjs` hold
+  that limit on every push; the long reviewer text lives in `docs/amo/reviewer-guide.md`.
 - Windows command lines are limited to about 32 KB. Put long scripts in files instead of
   inline heredocs when running tools from a shell.
 - Hugging Face's xet transfer backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`.
@@ -1792,7 +1797,10 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 ## Making changes
 
 1. Keep `server.py` a single dependency-light file (stdlib + numpy + faster-whisper + yt-dlp + PyAV).
-2. Bump `version` in `addon/manifest.json` and `VERSION` in `server/server.py` together.
+2. Bump `version` in `addon/manifest.json` and `VERSION` in `server/server.py` together, inside
+   the change's last commit, with its entry in `docs/amo/release-notes.md`; the release notes and
+   `reviewer-notes.md` must each stay within AMO's 3,000 characters (see "Release"; `npm test`
+   fails otherwise).
 3. Run the checks above, then test manually on a real YouTube video: subtitles appear, hover
    pauses, transcript panel works, Alt+Shift+M produces a toast and (with Anki running) fills the card.
 4. Update README sections that describe changed behaviour; keep this file's invariants current.
@@ -1816,7 +1824,23 @@ everything; `.github/workflows/release.yml`:
 So every version is a listed one: there is no unlisted signing any more, because AMO refuses a
 version number that was uploaded before in either channel. `make_metadata.py` refuses a
 `release-notes.md` that does not mention the manifest's version, and the Tests workflow runs it on
-every push, so bump the version and write its notes in the same change. The privacy policy, icon
+every push, so bump the version and write its notes in the same change.
+
+**AMO's 3,000-character limit is a must-test.** AMO refuses a version whose release notes or
+reviewer notes (the `approval_notes` field) run past 3,000 characters each ("Ensure this field
+has no more than 3000 characters"), and it says so only at the tag, after the GitHub release
+exists: 0.14.0 was refused that way (8,920 and 18,844 characters) and reached the listing as
+0.14.1. So `make_metadata.py` refuses either file over `NOTES_LIMIT` (3,000, the reviewer notes
+counted with `<version>` filled in), and `scripts/tests/amo-metadata.test.mjs` (in `npm test` and
+the Tests workflow) holds the limits on the files as they are, and runs `make_metadata.py` on a
+copy of `docs/amo/` to prove it refuses an over-long text; also summary 250 characters without a
+URL, description 15,000. Keep `release-notes.md` a summary of what changed since the last listed
+version (each GitHub release keeps its own full notes), and `reviewer-notes.md` a summary with a
+quick test and the permissions: the full reviewer guide (every feature's test steps, every
+permission and request, the code that needs a word) is `docs/amo/reviewer-guide.md`, linked from
+the notes at the version's tag (`blob/v<version>/docs/amo/reviewer-guide.md`), and it is what a
+change of a permission, a request or a test step updates first. A release whose AMO step failed
+on the texts is not re-tagged: fix the texts and release the next patch version. The privacy policy, icon
 and screenshots in `docs/amo/` are set in the Developer Hub by hand; `docs/amo/README.md` is the
 checklist. `publish-addon.cmd` and `sign-addon.cmd` (repository owner only) are the manual
 fallbacks for a listed submission and an unlisted build; an unlisted build takes its version
