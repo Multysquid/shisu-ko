@@ -605,9 +605,48 @@ def test_split_for_break_emits_the_whole_buffer_on_a_legal_seam():
 
 
 def test_split_for_break_backs_off_an_illegal_seam_against_the_next_word():
-    buf = words([("なんか靴", 0.0, 1.0), ("舐めますって言", 1.0, 2.0)])
+    buf = words([("なんかくつ", 0.0, 1.0), ("舐めますって言", 1.0, 2.0)])
     head, tail = server.split_for_break(buf, limits(), "ってた")
-    assert (server.word_text(head), server.word_text(tail)) == ("なんか靴", "舐めますって言")
+    assert (server.word_text(head), server.word_text(tail)) == ("なんかくつ", "舐めますって言")
+
+
+def test_joins_compound_between_two_kanji_or_two_katakana():
+    assert server.joins_compound("できる能", "力って") is True
+    assert server.joins_compound("自撮りカメ", "ラこうやって") is True
+    assert server.joins_compound("できる", "能力って") is False
+    assert server.joins_compound("カメラ", "能力") is False
+    assert server.joins_compound("", "力って") is False
+
+
+def test_may_split_refuses_a_compound_that_may_break_allows():
+    assert server.may_break("言われたとおりできる能", "力って必要になる") is True
+    assert server.may_split("言われたとおりできる能", "力って必要になる") is False
+    assert server.may_split("私がこう自撮りカメ", "ラこうやって配信します") is False
+
+
+def test_may_split_allows_a_clause_mark_and_a_kanji_after_hiragana():
+    assert server.may_split("それは学校、", "行ったほうがいい") is True
+    assert server.may_split("言われたとおりできる", "能力って必要になる") is True
+
+
+def test_split_for_break_backs_off_a_seam_inside_a_kanji_compound():
+    # may_break() would emit the buffer against 性がある; 要|性 is a compound, so it backs off.
+    buf = words([("言われたとおりできる", 0.0, 1.0), ("能力って必要", 1.0, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "性がある")
+    assert (server.word_text(head), server.word_text(tail)) == ("言われたとおりできる", "能力って必要")
+
+
+def test_split_for_break_backs_off_a_seam_inside_a_katakana_word():
+    buf = words([("私がこう自撮り", 0.0, 1.0), ("カメラとマイク", 1.0, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "スタンドです")
+    assert (server.word_text(head), server.word_text(tail)) == ("私がこう自撮り", "カメラとマイク")
+
+
+def test_split_for_break_emits_the_buffer_at_a_clause_mark_or_before_a_kanji_word():
+    head, tail = server.split_for_break(words([("それはやっぱり学校、", 0.0, 1.0)]), limits(), "行ったほうがいい")
+    assert (server.word_text(head), tail) == ("それはやっぱり学校、", [])
+    head, tail = server.split_for_break(words([("言われたとおりできる", 0.0, 1.0)]), limits(), "能力って必要")
+    assert (server.word_text(head), tail) == ("言われたとおりできる", [])
 
 
 def test_split_for_break_gives_up_when_no_position_is_legal():
@@ -817,6 +856,13 @@ def test_group_words_does_not_split_a_pause_inside_a_word():
     assert [server.word_text(g) for g in groups] == ["なんか靴舐めますって言ってた"]
 
 
+def test_group_words_splits_a_confirmed_pause_between_two_kanji():
+    # A detected silence is evidence of a boundary; the compound rule is only for blind cuts.
+    ws = words([("今日はいい天気", 0.0, 1.0), ("電車で行きます", 4.0, 5.0)])
+    groups = server.group_words(ws, [[0.0, 1.1], [3.95, 5.1]], limits())
+    assert [server.word_text(g) for g in groups] == ["今日はいい天気", "電車で行きます"]
+
+
 def test_group_words_still_splits_a_pause_at_a_legal_boundary():
     ws = words([("こんにちは", 0.0, 1.0), ("電車で行きます", 2.0, 3.0)])
     groups = server.group_words(ws, [[0.0, 1.1], [1.95, 3.1]], limits())
@@ -838,3 +884,22 @@ def test_build_window_cues_repairs_the_lead_word_before_the_vad_gate():
     assert [c["text"] for c in cues] == ["はじめまして"]
     assert "vad" not in drops
     assert next_id == 1
+
+
+def test_build_cues_never_cuts_inside_a_kanji_or_katakana_compound():
+    # 22:13 of 5csq1MlSspA: one 13 s segment with no pause, split only by the hard limits. The cut
+    # used to land inside 能|力 and 学|校 (and, on this synthetic timing, 絶|対 and 必|要).
+    text = ("結局、社会に出たときに、たぶん、人と関わることって絶対必要になるし、言われたことを言われたとおり"
+            "できる能力って必要になるから、それを養うのって学校じゃないかなって思うんで、行ったほうがいいとは思う。")
+    start, end = 1325.14, 1338.18
+    step = (end - start) / len(text)
+    ws = [W(ch, start + i * step, start + (i + 1) * step, 0.9) for i, ch in enumerate(text)]
+    lim = limits()
+    cues = server.build_cues(ws, [[1320.07, 1339.48]], lim)
+    texts = [c["text"] for c in cues]
+    assert "".join(texts) == text
+    for head, tail in zip(texts, texts[1:]):
+        a, b = head[-1], tail[0]
+        assert not (server.is_kanji(a) and server.is_kanji(b)), (head, tail)
+        assert not (server.is_katakana(a) and server.is_katakana(b)), (head, tail)
+    assert all(len(t) <= lim.max_chars for t in texts)

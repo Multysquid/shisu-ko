@@ -116,14 +116,15 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
   file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
-  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 4, bumped by
-  0.12.0 for the cue geometry (sentence marks, the row boundary at one, the anomaly gate); every
+  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 5, bumped for
+  the kanji/katakana seam rule; 4 was 0.12.0's cue geometry (sentence marks, the row boundary at
+  one, the anomaly gate); every
   record of an older format is dropped whole by the check in `load_cache()`, the title kept, and
   the video transcribed again from the start. That check is the only way a geometry change reaches
   a video someone has already watched, so it runs before anything is read out of the record and
   there is no migration behind it. A record carries `"lyrics"`, the rule its covered ranges were
-  made under (`--lyrics` as the server ran, see "How the server schedules work"), and under format
-  4 it always does. `--lyrics off` marks a sung stretch covered with nothing in it, so a record
+  made under (`--lyrics` as the server ran, see "How the server schedules work"), and from format
+  4 on it always does. `--lyrics off` marks a sung stretch covered with nothing in it, so a record
   written with the switch off, read by a server running `--lyrics auto`, gets its blank stretches
   back (`unheard_stretches()`: the parts of `covered` that no speech interval and no cue touches,
   under two floors: 1.5 s, `plan_window()`'s own floor, at either end of a covered range, where a
@@ -248,8 +249,10 @@ line with a small kana, っ, ー, 々 or a closing mark; neither side may be sho
 deliberately outside the okurigana rule — katakana words are self-delimiting, so the hiragana after
 カメラ does open a word. A speaker's own 。！？ or 、 outranks every guess. `split_for_break()`
 applies the same rules when a buffer runs past the hard limits, including to the seam against the
-word that follows it. `may_break()` is asked about a prospective line, not one Whisper word:
-Whisper's words are sub-tokens, often one character, so `group_words()` gathers just enough of what
+word that follows it, plus one more (`may_split()`, `joins_compound()`): no cut between two kanji or
+two katakana (能|力, 学|校, カメ|ラ). Only there, since a length limit is no evidence of a boundary,
+while a pause the detector confirmed is, even between two kanji (天気 … 電車). `may_break()` is
+asked about a prospective line, not one Whisper word: Whisper's words are sub-tokens, often one character, so `group_words()` gathers just enough of what
 follows (`tail_text()`) to reach `MIN_PIECE_CHARS` before asking.
 
 `breaks_word()` is the narrow half of `may_break()`, and the two must stay apart. `may_break()` also
@@ -290,7 +293,7 @@ Every cue still carries `seg`, the id of the Whisper segment it came from, and a
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
 not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
 mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment, and a stale
-id would mis-group it. Cue caches are format 4; older caches are ignored, which is the only way a
+id would mis-group it. Cue caches are format 5; older caches are ignored, which is the only way a
 geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
 compare two cue builders on identical Whisper output; keep them working (`retranscribe.py` wraps
