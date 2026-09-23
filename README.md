@@ -132,9 +132,9 @@ before 0.9.0 that has not been restarted since it updated itself; `run.cmd` pick
 up by itself) or that was started with `--no-update` cannot update itself; the banner then says
 the server was not started by `run.cmd` / `run.sh`, whichever of those the cause is (the server
 only reports that it cannot), and asks for a restart by hand, which
-updates as before. The extension itself is never installed by the add-on: once the listing on
-addons.mozilla.org is live Firefox updates it from there, and until then the release page has
-the signed `.xpi`, which the banner links to when only the extension is behind. Being offline
+updates as before. The extension itself is never installed by the add-on: Firefox updates it from
+the listing on addons.mozilla.org, and the banner links to the release page when only the
+extension is behind. Being offline
 costs one failed check, shown under **Check for updates**; a failed check never notifies.
 
 **Nix / NixOS:** `nix run github:Multysquid/shisu-ko` (or `nix run .` in a checkout) starts the
@@ -155,16 +155,14 @@ Temporary install (until Firefox restarts):
 3. Firefox asks for access to youtube.com the first time you open the popup; click **Allow on
    YouTube** (or right-click the toolbar icon > Always Allow on www.youtube.com).
 
-Permanent install: download the signed `shisu_ko-<version>.xpi` from the
-[latest release](https://github.com/Multysquid/shisu-ko/releases/latest) and open it in Firefox.
-Regular Firefox only keeps signed add-ons; the release workflow signs each tagged version
-through addons.mozilla.org (unlisted channel, nobody else sees it), and `sign-addon.cmd` does
-the same for a local build with a free
-[addons.mozilla.org API key](https://addons.mozilla.org/developers/addon/api/key/). Firefox
-Developer Edition, Nightly and ESR can instead load the unsigned zip with
+Permanent install: [Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/),
+from where Firefox keeps it up to date. Every release is published there by the release
+workflow; the GitHub release carries the same signed `shisu_ko-<version>.xpi` once
+addons.mozilla.org has approved it (usually minutes, a manual review can take days), which
+installs the same add-on and is updated from the listing too. Regular Firefox only keeps signed
+add-ons; Firefox Developer Edition, Nightly and ESR can instead load the unsigned zip with
 `xpinstall.signatures.required` set to `false` in `about:config`. The popup says when a newer
-release is out (see [Updates](#1-start-the-server)); the `.xpi` is installed by hand until the
-listing on addons.mozilla.org is live. Since 0.9.0 the extension needs one more permission,
+release is out (see [Updates](#1-start-the-server)). Since 0.9.0 the extension needs one more permission,
 "Display notifications to you": opening the new `.xpi` over an older version lists it in the
 install prompt, and an automatic update (from the listing, once it is live) is held back by
 Firefox until you approve it, from the notice on the application menu (≡) or under Add-ons
@@ -709,8 +707,8 @@ server/
 docker/               Windows wrappers for docker compose and the WSL engine installer
 docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing)
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example, flake.nix
-sign-addon.cmd        signs the extension through addons.mozilla.org for self-distribution
-publish-addon.cmd     submits a version to the public listing on addons.mozilla.org
+sign-addon.cmd        signs a local build through addons.mozilla.org (unlisted; manual fallback)
+publish-addon.cmd     submits a version to the public listing by hand (the release workflow does it)
 AGENTS.md             architecture notes, invariants and gotchas for contributors and coding agents
 ```
 

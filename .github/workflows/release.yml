@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      AMO_KEY: ${{ secrets.WEB_EXT_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,19 +32,42 @@ jobs:
       - name: Check tag version
         if: github.ref_type == 'tag'
         run: test "v$(node -p "require('./addon/manifest.json').version")" = "${GITHUB_REF_NAME}"
-      # Regular Firefox only keeps signed add-ons. The built Firefox package is signed through
-      # addons.mozilla.org (unlisted channel) with the AMO API key kept in the repository secrets;
-      # without the secrets the release still ships the unsigned zips.
-      - name: Sign the Firefox package
-        if: env.WEB_EXT_API_KEY != ''
-        env:
-          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
-          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
-        run: npx --yes web-ext sign --source-dir dist/firefox --artifacts-dir dist --channel unlisted --no-input
+      - name: Build the listing texts
+        run: python docs/amo/make_metadata.py
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            dist/*.zip
-            dist/*.xpi
+          files: dist/*.zip
+      # Every tag becomes a version of the public listing on addons.mozilla.org, with the texts in
+      # docs/amo. AMO signs it; once it is approved (usually within minutes, a manual review can
+      # take days) the signed .xpi goes onto the GitHub release too: the same file AMO serves, for
+      # people who install from GitHub. What is still under review here is attached later by
+      # amo-xpi.yml. Without the API key in the repository secrets the release ships the zips only.
+      - name: Submit the version to addons.mozilla.org
+        if: env.AMO_KEY == 'true'
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          state="$(node scripts/amo-xpi.mjs status "$version")"
+          if [ "$state" = missing ]; then
+            npx --yes web-ext@10 sign --source-dir dist/firefox --artifacts-dir dist               --channel listed --amo-metadata docs/amo/amo-metadata.json --approval-timeout 0 --no-input
+          else
+            echo "::notice::AMO already has $version ($state); it is not uploaded again"
+          fi
+      - name: Attach the signed .xpi once AMO has approved it
+        if: env.AMO_KEY == 'true'
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code=0
+          node scripts/amo-xpi.mjs fetch "${GITHUB_REF_NAME#v}" --out dist/signed --wait 900 || code=$?
+          case "$code" in
+            0) gh release upload "$GITHUB_REF_NAME" dist/signed/*.xpi --clobber ;;
+            3) echo "::notice::AMO is still reviewing ${GITHUB_REF_NAME}; amo-xpi.yml attaches the .xpi once it is approved" ;;
+            *) exit "$code" ;;
+          esac
