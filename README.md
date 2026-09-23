@@ -287,7 +287,9 @@ in its usual conjugations and in its noun form: a card for 食べる colours 食
 食べたことがある and 食べ in 食べに行く, 書く colours 書かない and 書いて, 美しい colours
 美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり, and a word
 written in kana is found in its forms too (かける colours かけて, しまう colours しまった,
-おいしい colours おいしかった). The word alone takes the colour: a particle after it has no card
+おいしい colours おいしかった). A card whose dictionary entry marks the word as usually written in
+kana (Jitendex's "kana" tag, JMdict's `uk`) colours its reading as well: a card for 更に colours
+さらに. The word alone takes the colour: a particle after it has no card
 of its own and stays plain (領域まで reads 領域 in colour and まで in black). The honorific お or
 ご before a word takes its colour, being part of the word (お風呂), and so does the quotative って
 or と between a coloured word and one found after it (話しかけていただくっていう with いう in the

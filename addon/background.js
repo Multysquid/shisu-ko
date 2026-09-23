@@ -1533,7 +1533,10 @@ const CARD_STATUS_TTL_MS = 30000; // an index this fresh is answered from memory
 const CARD_STATUS_TIMEOUT_MS = 20000; // per AnkiConnect request: a large deck takes its time
 const NOTES_INFO_CHUNK = 200; // notes per notesInfo call
 const DECK_SEEN_KEY = "ankiDeckSeen"; // storage.local: {deck, at, noteId}
-const DECK_NOTES_KEY = "deckNotes"; // storage.session: {deck, wordField, pitchField, at, checkedAt, entries, notes: [[id, word, pitch, mod]]}
+const DECK_NOTES_KEY = "deckNotes"; // storage.session: {format, deck, wordField, pitchField, at, checkedAt, entries, notes: [[id, word, pitch, mod, reading]]}
+// A record of another format is dropped whole: its notes lack what this one reads (the kana
+// reading), and a restored note is never read again unless edited.
+const DECK_NOTES_FORMAT = 2;
 const DAY_MS = 86400000;
 const ANKI_OFFLINE_TEXT = "Anki is not running or AnkiConnect is not installed";
 const ANKI_DENIED_TEXT = "AnkiConnect denied access. Click Yes in Anki's permission dialog.";
@@ -1664,18 +1667,18 @@ async function resolveDeck(settings) {
 // all again.
 function notesRecord(index) {
   const notes = [];
-  for (const [id, note] of index.notes) notes.push([id, note.word, note.pitch, note.mod]);
-  return { deck: index.deck, wordField: index.wordField, pitchField: index.pitchField, at: index.at, checkedAt: index.checkedAt, entries: index.entries, notes };
+  for (const [id, note] of index.notes) notes.push([id, note.word, note.pitch, note.mod, note.reading]);
+  return { format: DECK_NOTES_FORMAT, deck: index.deck, wordField: index.wordField, pitchField: index.pitchField, at: index.at, checkedAt: index.checkedAt, entries: index.entries, notes };
 }
 
 async function restoreNotes(deck, settings) {
   const record = await sessionGet(DECK_NOTES_KEY);
-  if (!record || typeof record !== "object" || !Array.isArray(record.notes)) return null;
+  if (!record || typeof record !== "object" || record.format !== DECK_NOTES_FORMAT || !Array.isArray(record.notes)) return null;
   if (!indexFor(record, deck, settings)) return null;
   const notes = new Map();
   for (const row of record.notes) {
     const id = Array.isArray(row) ? Number(row[0]) : NaN;
-    if (Number.isFinite(id)) notes.set(id, { word: String(row[1] || ""), pitch: row[2] || null, mod: Number(row[3]) || 0 });
+    if (Number.isFinite(id)) notes.set(id, { word: String(row[1] || ""), reading: String(row[4] || ""), pitch: row[2] || null, mod: Number(row[3]) || 0 });
   }
   // A stamp of 0 is what a tab holding nothing sends: entries under it would never reach one.
   const at = typeof record.at === "number" && record.at > 0 ? record.at : 0;
@@ -1789,7 +1792,12 @@ async function fetchDeckIndex(url, deck, settings, signal) {
       // A word longer than the content script's index keeps is a sentence in the word field:
       // stored as no word, so it is neither kept nor sent to every tab only to be dropped there.
       const word = SHISUKO_WORDS.plainWord(noteSummary(info, settings).word);
-      notes.set(id, { word: word.length > SHISUKO_WORDS.MAX_WORD_LEN ? "" : word, pitch: SHISUKO_WORDS.pitchOf(info.fields, settings), mod: Number(info.mod) || 0 });
+      notes.set(id, {
+        word: word.length > SHISUKO_WORDS.MAX_WORD_LEN ? "" : word,
+        reading: SHISUKO_WORDS.kanaReadingOf(info.fields, settings),
+        pitch: SHISUKO_WORDS.pitchOf(info.fields, settings),
+        mod: Number(info.mod) || 0,
+      });
       read++;
     });
   }
@@ -1804,7 +1812,10 @@ async function fetchDeckIndex(url, deck, settings, signal) {
     const note = notes.get(id);
     if (!note || !note.word) continue;
     const status = SHISUKO_WORDS.statusOf(sets, id);
-    if (status) entries.push([note.word, status, note.pitch]);
+    if (!status) continue;
+    entries.push([note.word, status, note.pitch]);
+    // A word usually written in kana is subtitled in kana: 更に is heard as さらに.
+    if (note.reading) entries.push([note.reading, status, note.pitch]);
   }
   // The same entries keep their stamp, so a tab holding them hears "unchanged" rather than
   // getting them all again. The notes changed when one was read or dropped (a chunk that

@@ -17,6 +17,8 @@ const {
   readingOf,
   parsePitch,
   pitchOf,
+  usuallyKana,
+  kanaReadingOf,
   statusOf,
   mergeStatus,
   buildIndex,
@@ -436,6 +438,90 @@ test("pitchOf is null without a pitch field or a readable value", () => {
   assert.equal(pitchOf({}, {}), null);
   assert.equal(pitchOf(null, null), null);
   assert.equal(pitchOf({ Pitch: "[0]" }, {}), null);
+});
+
+// ------------------------------------------------------------------ usuallyKana / kanaReadingOf
+
+// Jitendex's glossary for 更に, cut down: the tag is a span whose title says it.
+const JITENDEX_SARANI =
+  '<div><ol><li><span title="adverb (fukushi)">adverb</span><span title="word usually written using kana alone">kana</span>' +
+  "<ul><li>furthermore; again; after all; more and more</li></ul></li></ol></div>";
+
+test("usuallyKana reads Jitendex's title and JMdict's note, in any case", () => {
+  assert.equal(usuallyKana(fields([["Word", "更に"], ["SecondaryDef", JITENDEX_SARANI]])), true);
+  assert.equal(usuallyKana(fields([["Word", "更に"], ["Glossary", "Word Usually Written Using Kana Alone"]])), true);
+  // The tag deep in a glossary longer than any field limit elsewhere still counts.
+  assert.equal(usuallyKana(fields([["Word", "更に"], ["Glossary", "x".repeat(50000) + JITENDEX_SARANI]])), true);
+  assert.equal(usuallyKana(fields([["Word", "勝手"], ["Glossary", "<i>(adj-na, n)</i> selfishness"]])), false);
+  assert.equal(usuallyKana({}), false);
+  assert.equal(usuallyKana(null), false);
+});
+
+test("usuallyKana reads a uk item of Yomitan's plain tag list, and nothing else in parentheses", () => {
+  assert.equal(usuallyKana(fields([["Glossary", "(adv, uk, JMdict (English)) furthermore"]])), true);
+  assert.equal(usuallyKana(fields([["Glossary", "<i>(uk, JMdict)</i> furthermore"]])), true);
+  assert.equal(usuallyKana(fields([["Glossary", "(adv,uk)"]])), true);
+  assert.equal(usuallyKana(fields([["Glossary", "(<span>uk</span>, adv)"]])), true);
+  // Prose: the United Kingdom is not the tag, in any case or spelling.
+  assert.equal(usuallyKana(fields([["Glossary", "(UK) lorry"]])), false);
+  assert.equal(usuallyKana(fields([["Glossary", "(Uk, adv)"]])), false);
+  assert.equal(usuallyKana(fields([["Glossary", "United Kingdom (uk-based)"]])), false);
+  assert.equal(usuallyKana(fields([["Glossary", "a firm (in the uk) of note"]])), false);
+  assert.equal(usuallyKana(fields([["Glossary", "uk, adv"]])), false);
+});
+
+test("usuallyKana stays quick on a field of nothing but brackets", () => {
+  const started = Date.now();
+  for (const ch of ["(", "<", "(<", "(a,"]) {
+    assert.equal(usuallyKana(fields([["Word", "更に"], ["Glossary", ch.repeat(Math.ceil(100000 / ch.length))]])), false);
+  }
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
+});
+
+test("kanaReadingOf gives the reading of a word usually written in kana", () => {
+  const sarani = [["Word", "更に"], ["Reading", "さらに"], ["Furigana", "<ruby>更<rt>さら</rt></ruby>に"], ["SecondaryDef", JITENDEX_SARANI]];
+  assert.equal(kanaReadingOf(fields(sarani), {}), "さらに");
+  // Without the tag, a reading indexed would be found inside other words (勝手 in 向かって).
+  assert.equal(kanaReadingOf(fields(sarani.slice(0, 3)), {}), "");
+  // A word without kanji is indexed as it is.
+  assert.equal(kanaReadingOf(fields([["Word", "さらに"], ["Reading", "さらに"], ["SecondaryDef", JITENDEX_SARANI]]), {}), "");
+  assert.equal(kanaReadingOf(fields([["Word", "カメラ"], ["Reading", "かめら"], ["SecondaryDef", JITENDEX_SARANI]]), {}), "");
+  // No reading field at all.
+  assert.equal(kanaReadingOf(fields([["Word", "更に"], ["SecondaryDef", JITENDEX_SARANI]]), {}), "");
+});
+
+test("kanaReadingOf reads a ruby field when there is no reading field, and skips the sentence's", () => {
+  const note = fields([
+    ["Word", "更に"],
+    ["Sentence", "さらに言うと"],
+    ["SentenceFurigana", "さらに 言[い]うと"],
+    ["Furigana", "<ruby>更<rt>さら</rt></ruby>に"],
+    ["Glossary", "(adv, uk, JMdict (English)) furthermore"],
+  ]);
+  assert.equal(kanaReadingOf(note, {}), "さらに");
+});
+
+test("kanaReadingOf never reads the word field or a pitch field as the reading", () => {
+  // The word field the settings name is itself called Reading, and a pitch field's name says
+  // reading too; both come before the real reading.
+  const note = fields([
+    ["Front", "x"],
+    ["Reading", "更に"],
+    ["PitchReading", "かって"],
+    ["WordFurigana", " 更[さら]に"],
+    ["Glossary", JITENDEX_SARANI],
+  ]);
+  assert.equal(kanaReadingOf(note, { ankiWordField: "Reading" }), "さらに");
+});
+
+test("kanaReadingOf drops a reading longer than a word", () => {
+  const long = "あ".repeat(words.MAX_WORD_LEN + 1);
+  assert.equal(kanaReadingOf(fields([["Word", "更に"], ["Reading", long], ["SecondaryDef", JITENDEX_SARANI]]), {}), "");
+});
+
+test("a reading entry colours the word as the subtitle writes it", () => {
+  const deck = [["更に", "learned", null], ["さらに", "learned", null]];
+  assert.equal(mark("けど、僕の学校、さらに言うと、", deck), "けど、僕の学校、 | さらに(learned,null) | 言うと、");
 });
 
 // ------------------------------------------------------------------ statusOf / mergeStatus

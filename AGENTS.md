@@ -116,14 +116,15 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
   file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
-  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 4, bumped by
-  0.12.0 for the cue geometry (sentence marks, the row boundary at one, the anomaly gate); every
+  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 5, bumped for
+  the kanji/katakana seam rule; 4 was 0.12.0's cue geometry (sentence marks, the row boundary at
+  one, the anomaly gate); every
   record of an older format is dropped whole by the check in `load_cache()`, the title kept, and
   the video transcribed again from the start. That check is the only way a geometry change reaches
   a video someone has already watched, so it runs before anything is read out of the record and
   there is no migration behind it. A record carries `"lyrics"`, the rule its covered ranges were
-  made under (`--lyrics` as the server ran, see "How the server schedules work"), and under format
-  4 it always does. `--lyrics off` marks a sung stretch covered with nothing in it, so a record
+  made under (`--lyrics` as the server ran, see "How the server schedules work"), and from format
+  4 on it always does. `--lyrics off` marks a sung stretch covered with nothing in it, so a record
   written with the switch off, read by a server running `--lyrics auto`, gets its blank stretches
   back (`unheard_stretches()`: the parts of `covered` that no speech interval and no cue touches,
   under two floors: 1.5 s, `plan_window()`'s own floor, at either end of a covered range, where a
@@ -248,8 +249,10 @@ line with a small kana, っ, ー, 々 or a closing mark; neither side may be sho
 deliberately outside the okurigana rule — katakana words are self-delimiting, so the hiragana after
 カメラ does open a word. A speaker's own 。！？ or 、 outranks every guess. `split_for_break()`
 applies the same rules when a buffer runs past the hard limits, including to the seam against the
-word that follows it. `may_break()` is asked about a prospective line, not one Whisper word:
-Whisper's words are sub-tokens, often one character, so `group_words()` gathers just enough of what
+word that follows it, plus one more (`may_split()`, `joins_compound()`): no cut between two kanji or
+two katakana (能|力, 学|校, カメ|ラ). Only there, since a length limit is no evidence of a boundary,
+while a pause the detector confirmed is, even between two kanji (天気 … 電車). `may_break()` is
+asked about a prospective line, not one Whisper word: Whisper's words are sub-tokens, often one character, so `group_words()` gathers just enough of what
 follows (`tail_text()`) to reach `MIN_PIECE_CHARS` before asking.
 
 `breaks_word()` is the narrow half of `may_break()`, and the two must stay apart. `may_break()` also
@@ -290,7 +293,7 @@ Every cue still carries `seg`, the id of the Whisper segment it came from, and a
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
 not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
 mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment, and a stale
-id would mis-group it. Cue caches are format 4; older caches are ignored, which is the only way a
+id would mis-group it. Cue caches are format 5; older caches are ignored, which is the only way a
 geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
 compare two cue builders on identical Whisper output; keep them working (`retranscribe.py` wraps
@@ -715,7 +718,8 @@ so a collection is never searched by guesswork), `ankiPitchField` the note field
 pitch (empty: found by name). `addon/words.js` (`SHISUKO_WORDS`, a plain frozen object like
 `SHISUKO_MATCH`, loaded between `match.js` and the two scripts in both `background.scripts` and
 `content_scripts[0].js`, and by `service-worker.js`) is shared: the background turns one deck's
-notes into `[word, status, pitch]` entries, the content script builds an index from them and
+notes into `[word, status, pitch]` entries (a word usually written in kana twice, under its
+reading as well), the content script builds an index from them and
 marks the words of every line. Everything in words.js is pure, without DOM.
 
 ### words.js
@@ -751,6 +755,16 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   `/sentence|文/i` (`SentenceFurigana` holds the sentence's kana, whose mora count would make every
   odaka word nakadaka), through `readingOf()`; the word is `ankiWordField`, else order 0, through
   `plainWord()`. Null without a candidate or a readable value.
+- `usuallyKana(fields)`: true when a field's value holds `usually written using kana alone`
+  (Jitendex's tag title, JMdict's note; case-insensitive, the whole value scanned, since a
+  glossary runs past `MAX_FIELD_HTML_LEN`) or a parenthesised list with an item that is exactly
+  `uk` (`TAG_LIST`, up to 200 characters to the next parenthesis of either kind, so
+  `(adv, uk, JMdict (English))` counts and `(UK)`, `(uk-based)` do not). Linear on a field of
+  `(` or `<`. `kanaReadingOf(fields, settings)`: the reading `pitchOf()` would take
+  (`readingFrom()`, the one helper both use), the word field and the pitch fields skipped; `""`
+  unless `usuallyKana()`, the word holds a kanji, and the reading differs from it and fits
+  `MAX_WORD_LEN`. Measured: every note's reading indexed made half the new hits false (勝手 in
+  向かって, 内容 in 出さないように); the tag filter kept 35 hits, all right.
 - `statusOf(sets, noteId)` over the sets of the five searches below: not in `unsuspended` ->
   `suspended` when in `suspended`, else null (not in the deck); in `new` -> `new`; in `learning`
   -> `learning`; in `review` -> `learned`; else `learning` (an Anki before 2.1.44, or a set a
@@ -879,7 +893,9 @@ marks the words of every line. Everything in words.js is pure, without DOM.
 - Tests: `addon/tests/words.test.js` covers every function above: the field readers and their
   bounds (a passage, a field of `<` never closed), `moraCount`, `parsePitch` in each form and its
   mora sources, `pitchOf` (the named field, the fallback, the sentence reading skipped, a graph
-  field before a position field), `statusOf` and `mergeStatus`, `buildIndex` (trimming, the
+  field before a position field), `usuallyKana` (the title, the tag list, prose `UK` refused, a
+  field of brackets), `kanaReadingOf` (更に -> さらに, no tag, a kana word, a ruby field, the
+  sentence, word and pitch fields skipped), さらに coloured by its reading entry, `statusOf` and `mergeStatus`, `buildIndex` (trimming, the
   particles, the stems, the kana-only stems of two kana at least), `wordStarts` with Node's ICU,
   and the matcher rule by rule with explicit `starts` sets mirroring ICU and once more with the
   real `wordStarts`: the examples above, the tails, `AFTER`, `OPEN_TAILS`, `NEXT`, `NOT_BEFORE`,
@@ -915,14 +931,15 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   BY (a review that moves a due reorders its answer), and the same deck must give the same
   entries or every tab would take them in again. `notesInfo` (chunks of `NOTES_INFO_CHUNK`, 200,
   `CARD_STATUS_TIMEOUT_MS` 20 s per request) runs only for ids not in the note cache (`notes:
-  Map<id, {word, pitch, mod}>`, kept across refreshes and mines, ids gone from the deck dropped)
+  Map<id, {word, reading, pitch, mod}>`, kept across refreshes and mines, ids gone from the deck dropped)
   and for known notes edited since `checkedAt`: a sixth search `${scope} edited:<days>` (days =
   `max(2, ceil(elapsed / day) + 1)`; an Anki without it finds nothing) lists candidates and
   `notesModTime` re-reads only those whose `mod` moved (without the action, every candidate).
   Word = `SHISUKO_WORDS.plainWord(noteSummary(info, settings).word)` (`ankiWordField`, else
   order 0; over `MAX_WORD_LEN` stored as `""`), pitch = `SHISUKO_WORDS.pitchOf(info.fields,
-  settings)`. Entries: one `[word, status, pitch]` per note with a word and a non-null
-  `statusOf(sets, id)`, by ascending id. A `notesInfo` chunk that fails keeps what `known` said
+  settings)`, reading = `SHISUKO_WORDS.kanaReadingOf(info.fields, settings)`. Entries: one
+  `[word, status, pitch]` per note with a word and a non-null `statusOf(sets, id)`, followed by
+  `[reading, status, pitch]` when the reading is not empty, by ascending id. A `notesInfo` chunk that fails keeps what `known` said
   for its ids (a re-read note keeps its colour and old pitch) and is asked again on the next
   refresh; a `TypeError` or `AbortError` fails the ask as a whole. `dropped()` (the `signal`) is
   checked before every request and once more after the loop, so a fetch dropped during its last
@@ -944,10 +961,12 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   is not among them) forgets the index, moves `cardIndexGeneration` on, aborts the flight and
   clears the session record. `expireCardIndex()` sets `fetchedAt = 0` and marks a flight
   `expired` (its index lands expired), the notes staying. The notes also live in
-  `storage.session` under `DECK_NOTES_KEY` (`deckNotes` = `{deck, wordField, pitchField, at,
-  checkedAt, entries, notes: [[id, word, pitch, mod]]}`, `notesRecord()`), so a return to YouTube
-  after the event page ended does not read the whole deck again: `restoreNotes(deck, settings)`
-  ignores a record for another deck or other fields and hands back `at` and `entries` only with a
+  `storage.session` under `DECK_NOTES_KEY` (`deckNotes` = `{format, deck, wordField, pitchField,
+  at, checkedAt, entries, notes: [[id, word, pitch, mod, reading]]}`, `notesRecord()`), so a
+  return to YouTube after the event page ended does not read the whole deck again:
+  `restoreNotes(deck, settings)` ignores a record whose `format` is not `DECK_NOTES_FORMAT` (2:
+  a record without readings would keep them out until each note is edited), a record for another
+  deck or other fields, and hands back `at` and `entries` only with a
   positive `at` (0 is what a tab holding nothing sends), so the stamp survives a restart when the
   entries came out the same; the page that restored it writes it once more.
 - The deck: `rememberDeck(url, noteId)`, from `addToAnki()` after every card it filled, not
@@ -975,7 +994,9 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   `query`, `notesInfo` per chunk, `findCards` / `getDecks`, `deckNames`, `edited:` and
   `notesModTime`): `deckSearch`, `resolveDeck`, every `cardStatus` verdict, the five queries and
   each status including the buried-learning fallback, the pitch from a field named `PitchAccent`
-  with `[2]` beside a `Reading` field, a merged duplicate, the fields the viewer named, the TTL
+  with `[2]` beside a `Reading` field, a kana-usual note giving its reading entry with its status
+and pitch and another note not, the reading kept across a restart, a record of the old format
+read again, a merged duplicate, the fields the viewer named, the TTL
   and "unchanged", the stamp kept when the deck came out the same, the edited note re-read, the
   stale answer, the settings that drop the index and the ones that do not, the mine remembering
   its deck and expiring the index, a mine whose deck cannot be told, the dropped fetch (another
@@ -984,7 +1005,7 @@ marks the words of every line. Everything in words.js is pure, without DOM.
   field, the shared permission dialog and its failure, `ankiDecks`, the message switch, and a
   note whose fields are a hundred kilobytes of `<` (the ask finishes under a second).
   `_loadBackground.js` loads `words.js` between `match.js` and `background.js` and exposes
-  `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY` and `DECK_NOTES_KEY`.
+  `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY` and `DECK_NOTES_FORMAT`.
 
 ### The content side (`addon/content.js`, "word colours" section)
 
@@ -1411,7 +1432,7 @@ node --test addon/tests/*.test.js
 (`sys.modules` registration before `exec_module`). `addon/tests/_loadBackground.js` runs
 `background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
-`REQUEST_TIMEOUT_MS`, `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY`) need an extra
+`REQUEST_TIMEOUT_MS`, `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY`, `DECK_NOTES_FORMAT`) need an extra
 script run in the same context to expose them, since they live in the global lexical environment
 rather than as globalThis properties; it loads `settings.js`, `match.js` and `words.js` first,
 like the manifest. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting

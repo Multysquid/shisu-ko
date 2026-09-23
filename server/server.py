@@ -67,7 +67,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
 # GPU context, no model left) and
@@ -85,7 +85,7 @@ MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-
 MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
                    "or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
-CACHE_FORMAT = 4  # bumped when cue geometry or fields change; older caches are ignored and transcribed again
+CACHE_FORMAT = 5  # bumped when cue geometry or fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
 LANGUAGE_MIN_SPEECH = 4.0        # a window with less speech than this gets no language vote:
@@ -782,6 +782,10 @@ def is_hiragana(ch: str) -> bool:
     return "ぁ" <= ch <= "ゟ"
 
 
+def is_katakana(ch: str) -> bool:
+    return "ァ" <= ch <= "ヺ"
+
+
 def breaks_word(head_text: str, tail_text: str) -> bool:
     """True when a cut between these two texts lands inside a word, on evidence and not on taste.
 
@@ -793,7 +797,8 @@ def breaks_word(head_text: str, tail_text: str) -> bool:
 
     Kept apart from may_break() because only this one may overrule a length budget. Refusing a cut
     the splitter was about to make costs nothing, so may_break() can also say no on taste; a merge
-    that overrules its own limits on taste builds a 41-character line.
+    that overrules its own limits on taste builds a 41-character line. That is why a cut between two
+    kanji or two katakana is only refused by may_split(): it is likely a compound, not proof (今日|学校).
     """
     head, tail = (head_text or "").strip(), (tail_text or "").strip()
     if not head or not tail:
@@ -832,6 +837,20 @@ def may_break(head_text: str, tail_text: str) -> bool:
     return tail[0] not in PARTICLE_START
 
 
+def joins_compound(head_text: str, tail_text: str) -> bool:
+    """True when the cut falls between two kanji or two katakana: likely inside a compound (能|力)."""
+    head, tail = (head_text or "").strip(), (tail_text or "").strip()
+    if not head or not tail:
+        return False
+    return (is_kanji(head[-1]) and is_kanji(tail[0])) or (is_katakana(head[-1]) and is_katakana(tail[0]))
+
+
+def may_split(head_text: str, tail_text: str) -> bool:
+    """may_break() for a cut the length limits force. A pause the detector confirmed is evidence of
+    a boundary even between two kanji (天気 … 電車); a length limit is none, so it avoids compounds."""
+    return may_break(head_text, tail_text) and not joins_compound(head_text, tail_text)
+
+
 def split_at_clause(buf, limits: CueLimits) -> tuple:
     """Back a hard break off to the last clause boundary inside the final 40% of the buffer (P1.2)."""
     total = len(word_text(buf))
@@ -849,12 +868,12 @@ def split_for_break(buf, limits: CueLimits, next_word: str) -> tuple:
     against the word that follows it, so that seam is checked too."""
     head, tail = split_at_clause(buf, limits)
     if tail:
-        if may_break(word_text(head), word_text(tail)):
+        if may_split(word_text(head), word_text(tail)):
             return head, tail
-    elif may_break(word_text(buf), next_word):
+    elif may_split(word_text(buf), next_word):
         return buf, []
     for j in range(len(buf) - 1, 0, -1):
-        if may_break(word_text(buf[:j]), word_text(buf[j:])):
+        if may_split(word_text(buf[:j]), word_text(buf[j:])):
             return buf[:j], buf[j:]
     return buf, []
 
