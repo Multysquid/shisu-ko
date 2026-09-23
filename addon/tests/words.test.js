@@ -74,9 +74,9 @@ function mark(text, entries, starts) {
 
 // ------------------------------------------------------------------ constants
 
-test("the object is frozen and lists the four statuses and four patterns", () => {
+test("the object is frozen and lists the statuses, \"proper\" among them, and four patterns", () => {
   assert.ok(Object.isFrozen(words));
-  assert.deepEqual(STATUSES, ["new", "learning", "learned", "suspended"]);
+  assert.deepEqual(STATUSES, ["new", "learning", "learned", "suspended", "proper"]);
   assert.deepEqual(PITCHES, ["heiban", "atamadaka", "nakadaka", "odaka"]);
 });
 
@@ -312,8 +312,10 @@ test("parsePitch reads the drop mark of a plain-text field", () => {
   assert.equal(parsePitch(`は${DROP}し`), "atamadaka");
   assert.equal(parsePitch(`たま${DROP}ご`), "nakadaka");
   assert.equal(parsePitch(`きょ${DROP}うと`), "atamadaka");
-  // Kana alone, with no mark, is heiban in that format.
-  assert.equal(parsePitch("はし"), "heiban");
+  // Kana alone, with no mark, says nothing: the viewer's oldest cards hold the bare reading in the
+  // pitch field whatever the pattern (302 of them), and heiban was wrong for most.
+  assert.equal(parsePitch("はし"), null);
+  assert.equal(parsePitch("こころ"), null);
   // Kana inside markup this does not read is not: Yomitan's own drawing never has ꜜ, so a
   // kana-only text can be any pattern behind unknown markup.
   assert.equal(parsePitch("<span>コーヒー</span>"), null);
@@ -416,8 +418,11 @@ test("pitchOf counts the word's moras when there is no reading", () => {
 });
 
 test("pitchOf moves on to the next pitch field when the first one has no readable value", () => {
-  // {pitch-accent-graphs} is an SVG without text; the position sits in the field after it.
-  const graph = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 150 100"><path d="M25 75 L75 25"></path><circle cx="25" cy="75" r="15"></circle></svg>';
+  // Jidoujisho's graph (Yomitan's createPronunciationGraphJJ()) draws its moras as dots of radius
+  // 5, which this does not read; the position sits in the field after it.
+  const graph =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="42px" height="45px" viewBox="0 0 70 75"><path d="m 16,30 35,-25" style="fill:none;stroke:currentColor;stroke-width:1.5;"></path>' +
+    '<circle r="5" cx="16" cy="30" style="opacity:1;fill:currentColor;"></circle><circle r="5" cx="51" cy="5" style="opacity:1;fill:currentColor;"></circle></svg>';
   const note = fields([
     ["Word", "橋"],
     ["Reading", "はし"],
@@ -438,6 +443,76 @@ test("pitchOf is null without a pitch field or a readable value", () => {
   assert.equal(pitchOf({}, {}), null);
   assert.equal(pitchOf(null, null), null);
   assert.equal(pitchOf({ Pitch: "[0]" }, {}), null);
+});
+
+// Yomitan's {pitch-accent-graphs} as its Anki template renderer writes it:
+// createPronunciationGraph() plus applyClassStyles(), which inlines pronunciation-style.json and
+// removes every class. Two <path>s for the line and its dashed tail, then one <circle> of radius 15
+// per mora (cy 25 high, 75 low), the mora the pitch drops after hollow with a radius-5 dot inside
+// it, and the triangle <path> of the particle after the word, translated to its place.
+function yomitanGraph(moras, n) {
+  const high = (i) => (n === 0 ? i > 0 : n === 1 ? i < 1 : i > 0 && i < n);
+  const LINE = "fill:none;stroke-width:5;stroke:currentColor;";
+  const DOT = "stroke-width:5;fill:currentColor;stroke:currentColor;";
+  const points = [];
+  let dots = "";
+  for (let i = 0; i < moras; i++) {
+    const [x, y] = [i * 50 + 25, high(i) ? 25 : 75];
+    if (high(i) && !high(i + 1)) dots += `<circle cx="${x}" cy="${y}" r="15" style="${LINE}"></circle><circle cx="${x}" cy="${y}" r="5" style="fill:currentColor;"></circle>`;
+    else dots += `<circle cx="${x}" cy="${y}" r="15" style="${DOT}"></circle>`;
+    points.push(`${x} ${y}`);
+  }
+  const [tx, ty] = [moras * 50 + 25, high(moras) ? 25 : 75];
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" focusable="false" viewBox="0 0 ${50 * (moras + 1)} 100" style="display:inline-block;vertical-align:middle;height:1.5em;">` +
+    `<path d="M${points.join(" L")}" style="${LINE}"></path><path d="M${points[moras - 1]} L${tx} ${ty}" style="${LINE}stroke-dasharray:5 5;"></path>` +
+    `${dots}<path d="M0 13 L15 -13 L-15 -13 Z" transform="translate(${tx},${ty})" style="${LINE}"></path></svg>`
+  );
+}
+
+test("parsePitch reads the SVG graph Yomitan's {pitch-accent-graphs} draws", () => {
+  // The five shapes of the viewer's deck: 家 (いえ) low, high hollow; 動画 (どうが) low, high,
+  // high; 観 (かん) high hollow, low; お母さん low, high hollow, low, low, low; 一週間 low, high,
+  // high hollow, low, low, low.
+  const ie = yomitanGraph(2, 2);
+  assert.ok(ie.includes('<circle cx="25" cy="75" r="15" style="stroke-width:5;fill:currentColor;stroke:currentColor;"></circle>'));
+  assert.ok(ie.includes('<circle cx="75" cy="25" r="15" style="fill:none;stroke-width:5;stroke:currentColor;"></circle><circle cx="75" cy="25" r="5"'));
+  assert.ok(ie.includes('transform="translate(125,75)"'));
+  assert.equal(parsePitch(ie), "odaka");
+  assert.equal(parsePitch(yomitanGraph(3, 0)), "heiban");
+  assert.equal(parsePitch(yomitanGraph(2, 1)), "atamadaka");
+  assert.equal(parsePitch(yomitanGraph(5, 2)), "nakadaka");
+  assert.equal(parsePitch(yomitanGraph(6, 3)), "nakadaka");
+  // The circles are the moras: the dot inside the hollow one is not, and no reading or word is
+  // asked to tell odaka from nakadaka.
+  assert.equal(parsePitch(yomitanGraph(3, 3), "はし", "橋"), "odaka");
+  assert.equal(parsePitch(yomitanGraph(3, 2), "はし", "橋"), "nakadaka");
+  // Several patterns: the first counts, as with the positions.
+  assert.equal(parsePitch(`<ol><li>${yomitanGraph(2, 2)}</li><li>${yomitanGraph(2, 0)}</li></ol>`), "odaka");
+  assert.equal(parsePitch(`<ol><li>${yomitanGraph(2, 0)}</li><li>${yomitanGraph(2, 2)}</li></ol>`), "heiban");
+  // Dots too small to be moras (Jidoujisho's graph) or none at all draw nothing this reads.
+  assert.equal(parsePitch('<svg viewBox="0 0 50 100"><path d="M25 75"></path></svg>'), null);
+  assert.equal(parsePitch('<svg><circle r="5" cx="16" cy="30" style="opacity:1;fill:currentColor;"></circle></svg>'), null);
+});
+
+test("pitchOf reads a graph field before the position field after it", () => {
+  const note = fields([["Word", "家"], ["Reading", "いえ"], ["PitchAccent", yomitanGraph(2, 2)], ["PitchPosition", "[0]"]]);
+  assert.equal(pitchOf(note, {}), "odaka");
+  assert.equal(pitchOf(note, { ankiPitchField: "PitchPosition" }), "heiban");
+});
+
+test("pitchOf falls back to a reading field that draws the pitch, never to a plain reading", () => {
+  // Yomitan's {pitch-accents} is often the reading field itself.
+  assert.equal(pitchOf(fields([["Word", "橋"], ["Reading", YOMITAN_HASHI_2]]), {}), "odaka");
+  assert.equal(pitchOf(fields([["Word", "家"], ["Reading", yomitanGraph(2, 2)]]), {}), "odaka");
+  // A pitch field that reads nothing (the bare reading, heiban no more) gives way to it; one that
+  // reads wins.
+  assert.equal(pitchOf(fields([["Word", "橋"], ["Reading", YOMITAN_HASHI_2], ["Pitch", "はし"]]), {}), "odaka");
+  assert.equal(pitchOf(fields([["Word", "橋"], ["Reading", YOMITAN_HASHI_2], ["Pitch", "[0]"]]), {}), "heiban");
+  // A plain reading draws nothing, and a sentence's reading is never asked.
+  assert.equal(pitchOf(fields([["Word", "橋"], ["Reading", "はし"]]), {}), null);
+  assert.equal(pitchOf(fields([["Word", "橋"], ["Furigana", " 橋[はし]"]]), {}), null);
+  assert.equal(pitchOf(fields([["Word", "橋"], ["SentenceReading", YOMITAN_HASHI_2]]), {}), null);
 });
 
 // ------------------------------------------------------------------ usuallyKana / kanaReadingOf
@@ -566,6 +641,15 @@ test("mergeStatus takes the least progress and keeps suspended only when both ar
   assert.equal(mergeStatus("bogus", "learned"), "learned");
 });
 
+test("mergeStatus lets any card beat \"proper\", which no card has", () => {
+  assert.equal(mergeStatus("proper", "new"), "new");
+  assert.equal(mergeStatus("learned", "proper"), "learned");
+  assert.equal(mergeStatus("proper", "suspended"), "suspended");
+  assert.equal(mergeStatus("proper", null), "proper");
+  assert.equal(mergeStatus(null, "proper"), "proper");
+  assert.equal(mergeStatus("proper", "proper"), "proper");
+});
+
 // ------------------------------------------------------------------ buildIndex
 
 test("buildIndex trims words, drops empty and overlong ones and merges duplicates", () => {
@@ -663,6 +747,24 @@ test("buildIndex keeps two words that share a stem", () => {
   assert.deepEqual(index.stems.get("帰").map((item) => item.kind), ["ru", "す"]);
 });
 
+test("buildIndex takes the known words as learned over their cards, the card's pitch kept", () => {
+  const index = buildIndex([["猫", "new", "atamadaka"], ["犬", "suspended", null], ["鳥", null, "heiban"]], ["猫", " 犬 ", "鳥", "馬", "", "は", "a".repeat(41)]);
+  assert.deepEqual(index.exact.get("猫"), { word: "猫", status: "learned", pitch: "atamadaka", bounded: false });
+  assert.deepEqual(index.exact.get("犬"), { word: "犬", status: "learned", pitch: null, bounded: false });
+  assert.deepEqual(index.exact.get("鳥"), { word: "鳥", status: "learned", pitch: "heiban", bounded: false });
+  // A known word without a card is an entry of its own; a particle, an empty or overlong one is
+  // none.
+  assert.deepEqual(index.exact.get("馬"), { word: "馬", status: "learned", pitch: null, bounded: false });
+  assert.equal(index.size, 4);
+  // Stems for a known word, and a kana one bounded like any.
+  const known = buildIndex([], ["走る", "はしる"]);
+  assert.deepEqual(known.stems.get("走").map((item) => `${item.entry.word}:${item.kind}`), ["走る:ru"]);
+  assert.equal(known.exact.get("はしる").bounded, true);
+  // No list, or no array, changes nothing.
+  assert.equal(buildIndex([["猫", "new", null]], "猫").exact.get("猫").status, "new");
+  assert.equal(buildIndex([["猫", "new", null]]).exact.get("猫").status, "new");
+});
+
 // ------------------------------------------------------------------ wordStarts
 
 test("wordStarts follows the segmenter's word boundaries", () => {
@@ -685,9 +787,10 @@ test("markWords marks the deck words of a line and joins the rest", () => {
 });
 
 test("markWords returns one run for text without matches and none for no text", () => {
-  assert.equal(mark("abc", []), "abc");
-  assert.deepEqual(markWords("abc", buildIndex([])), [{ text: "abc", status: null, pitch: null }]);
-  assert.deepEqual(markWords("abc", null), [{ text: "abc", status: null, pitch: null }]);
+  // Latin text is a name now ("abc" is one, below), so the text without matches is kana.
+  assert.equal(mark("すごいね", []), "すごいね");
+  assert.deepEqual(markWords("すごいね", buildIndex([])), [{ text: "すごいね", status: null, pitch: null }]);
+  assert.deepEqual(markWords("すごいね", null), [{ text: "すごいね", status: null, pitch: null }]);
   assert.deepEqual(markWords("", buildIndex([["a", "new", null]])), []);
   assert.deepEqual(markWords(null, buildIndex([["a", "new", null]])), []);
   assert.equal(mark("猫が好き", [["犬", "new", null]]), "猫が好き");
@@ -925,7 +1028,8 @@ test("markWords lets ん follow the forms it shortens and not ちゃ", () => {
 
 test("markWords does not end a span inside a compound", () => {
   assert.equal(mark("関係ないよ", [["関する", "learned", null]]), "関係ないよ");
-  assert.equal(mark("関東地方", [["関する", "learned", null]]), "関東地方");
+  // 関東 is a place name, blue by rule; 関 is still not 関する's.
+  assert.equal(mark("関東地方", [["関する", "learned", null]]), "関東(proper,null) | 地方");
   assert.equal(mark("対応します", [["対する", "learned", null]]), "対応します");
   assert.equal(mark("結婚式", [["結婚する", "learned", null]]), "結婚式");
   assert.equal(mark("飲み物", [["飲む", "learned", null]]), "飲み物");
@@ -955,7 +1059,7 @@ test("markWords never colours a particle by a card of its own, whatever the deck
   // word before it, and nothing else (のは after 私, never a pitch).
   const deck = [["の", "learned", null], ["は", "new", null], ["のは", "learned", "heiban"], ["私", "learned", null]];
   assert.equal(mark("私のは赤い", deck), "私(learned,null) | のは赤い");
-  assert.equal(mark("日本の首都", [["の", "learned", null]]), "日本の首都");
+  assert.equal(mark("日本の首都", [["の", "learned", null]]), "日本(proper,null) | の首都");
   assert.equal(mark("これは本です", [["は", "new", null]]), "これは本です");
   assert.equal(mark("行くから", [["から", "learned", null], ["行く", "new", null]]), "行く(new,null) | から");
   assert.equal(buildIndex([["は", "new", null], ["のに", "new", null], ["でも", "new", null]]).size, 0);
@@ -964,7 +1068,7 @@ test("markWords never colours a particle by a card of its own, whatever the deck
   // The の fusions and かも, which ICU cuts as words of their own, are particles too: かも takes
   // 行く's colour, and the し of しれない, which ICU cuts into し|れ|ない, is no particle here.
   assert.equal(mark("行くかもしれない", [["かも", "new", null], ["行く", "learned", null]]), "行く(learned,null) | かもしれない");
-  assert.equal(mark("東京への旅", [["への", "new", null]]), "東京への旅");
+  assert.equal(mark("東京への旅", [["への", "new", null]]), "東京(proper,null) | への旅");
   assert.equal(mark("彼との約束", [["との", "new", null]]), "彼との約束");
   assert.equal(mark("家での生活", [["での", "new", null]]), "家での生活");
   assert.equal(buildIndex([["かも", "new", null], ["への", "new", null], ["との", "new", null], ["での", "new", null]]).size, 0);
@@ -1199,14 +1303,20 @@ test("markWords lets an exact word win a tie and the longer span otherwise", () 
 });
 
 test("markWords starts a match only at a word boundary", () => {
-  assert.equal(mark("東京都", [["京都", "learned", null]], new Set([0, 2])), "東京都");
+  assert.equal(mark("大学生", [["学生", "learned", null]], new Set([0])), "大学生");
+  assert.equal(mark("大学生", [["大学生", "learned", null]], new Set([0])), "大学生(learned,null)");
+  assert.equal(mark("大学生", [["学生", "learned", null]], new Set([0, 1])), "大 | 学生(learned,null)");
+  assert.equal(mark("大学生", [["生", "learned", null]], new Set([0, 2])), "大学 | 生(learned,null)");
+  // 東京都 is a place name: blue from its start whatever the deck holds inside it, and the deck's
+  // own 東京都 wins the tie.
+  assert.equal(mark("東京都", [["京都", "learned", null]], new Set([0, 2])), "東京都(proper,null)");
   assert.equal(mark("東京都", [["東京都", "learned", null]], new Set([0, 2])), "東京都(learned,null)");
-  assert.equal(mark("東京都", [["京都", "learned", null]], new Set([0, 1])), "東 | 京都(learned,null)");
-  assert.equal(mark("東京都", [["都", "learned", null]], new Set([0, 2])), "東京 | 都(learned,null)");
+  assert.equal(mark("東京都", [["京都", "learned", null]], new Set([0, 1])), "東京都(proper,null)");
+  assert.equal(mark("東京都", [["都", "learned", null]], new Set([0, 2])), "東京都(proper,null)");
 });
 
 test("markWords accepts the boundaries as any iterable", () => {
-  assert.equal(mark("東京都", [["京都", "learned", null]], [0, 1]), "東 | 京都(learned,null)");
+  assert.equal(mark("大学生", [["学生", "learned", null]], [0, 1]), "大 | 学生(learned,null)");
 });
 
 test("markWords never overlaps and continues after a match", () => {
@@ -1309,17 +1419,18 @@ test("markWords leaves the particles after a word plain", () => {
 
 test("markWords colours the deck word alone in the lines the viewer read it wrong in", () => {
   // The two lines that showed the bug: 領域まで and 領域の read as one red piece, though まで and
-  // の have no card. Exactly one run carries a status in each, and it is 領域.
+  // の have no card. Exactly one run carries a card's status in each, and it is 領域; the note
+  // names E4 and A4 are Latin text, blue by rule.
   const deck = [["領域", "new", null]];
   const lines = ["この時点でこっちの地声領域のE4に変えれる人なぁー", "で、余裕がある人はそのままA4の地声領域まで持っていってください。"];
   for (const line of lines) {
     const runs = markWords(line, buildIndex(deck));
-    const coloured = runs.filter((run) => run.status);
+    const coloured = runs.filter((run) => run.status && run.status !== "proper");
     assert.deepEqual(coloured, [{ text: "領域", status: "new", pitch: null }]);
     assert.equal(runs.map((run) => run.text).join(""), line);
   }
-  assert.equal(mark(lines[0], deck), "この時点でこっちの地声 | 領域(new,null) | のE4に変えれる人なぁー");
-  assert.equal(mark(lines[1], deck), "で、余裕がある人はそのままA4の地声 | 領域(new,null) | まで持っていってください。");
+  assert.equal(mark(lines[0], deck), "この時点でこっちの地声 | 領域(new,null) | の | E4(proper,null) | に変えれる人なぁー");
+  assert.equal(mark(lines[1], deck), "で、余裕がある人はそのまま | A4(proper,null) | の地声 | 領域(new,null) | まで持っていってください。");
 });
 
 test("markWords finds いう after という and っていう, not inside そういう", () => {
@@ -1512,6 +1623,399 @@ test("markWords stays quick on a long line against a large deck", () => {
   const runs = markWords(line, index);
   assert.equal(runs.filter((run) => run.text === "日本語" && run.status === "new").length, 400);
   assert.equal(runs.filter((run) => run.status).length, 400);
+  assert.equal(runs.map((run) => run.text).join(""), line);
+  assert.ok(Date.now() - started < 1000, "marking a long line must not take a second");
+});
+
+// ------------------------------------------------------------------ markWords: what needs no card
+
+// markWords with the options (`particles`, `katakana`) and the known words.
+function markWith(text, entries, opts, known, starts) {
+  return shape(markWords(text, buildIndex(entries, known), starts, opts));
+}
+
+const PARTICLES_ON = { particles: true };
+const BOTH_ON = { particles: true, katakana: true };
+
+// The viewer's two lines (with the boundaries ICU gives them, Node 24) and a deck of the words they
+// hold: 東京, 来る, よろしく, お願い, 今日, 前, こと, いう.
+const MORNING = "おはようございます jr 東京駅に来てますよろしくお願いします";
+const MORNING_STARTS = new Set([0, 4, 5, 6, 7, 9, 10, 12, 13, 15, 16, 17, 18, 19, 21, 25, 28, 29]);
+const STATION = "さあ今日は東京駅丸の内駅舎の前からスタートということでですね";
+const STATION_STARTS = new Set([0, 2, 4, 5, 7, 8, 11, 13, 14, 15, 17, 21, 24, 26, 27, 29]);
+const VIEWER_DECK = ["東京", "来る", "よろしく", "お願い", "今日", "前", "こと", "いう"].map((word) => [word, "learned", null]);
+// The viewer's own deck (13,730 notes) cut to the 14 entries that match anywhere in the two lines:
+// the rest cannot change them, and they render the same with the whole deck. 丸 and 駅 are learned
+// cards of their own, and 東京駅 and 丸の内, the longer names, still win.
+const VIEWER_REAL_DECK = [
+  ["今", "learned", "heiban"], ["来る", "learned", "heiban"], ["前", "learned", "heiban"], ["さあ", "learned", "heiban"], ["丸", "learned", null],
+  ["今日", "learned", "atamadaka"], ["日", "learned", "heiban"], ["お願い", "learned", "heiban"], ["内", "learned", "heiban"], ["駅", "learned", "atamadaka"],
+  ["こと", "learned", "atamadaka"], ["東京", "learned", "heiban"], ["東", "learned", null], ["駅舎", "learned", null],
+];
+
+test("the viewer's first line: jr and 東京駅 blue, the particle, the forms and お願いします learned", () => {
+  // 東京 is in the deck, but 東京駅 (a place and its suffix) is the longer span from the same start
+  // and takes it; ございます stays plain as a whole, since ます is the inflection of a verb the
+  // deck lacks.
+  const want =
+    "おはようございます  | jr(proper,null) |   | 東京駅(proper,null) | に(learned,null) | 来てます(learned,null) | よろしく(learned,null) | お願いします(learned,null)";
+  assert.equal(markWith(MORNING, VIEWER_DECK, PARTICLES_ON, [], MORNING_STARTS), want);
+  assert.equal(markWith(MORNING, VIEWER_DECK, PARTICLES_ON), want);
+  assert.equal(markWith(MORNING, VIEWER_DECK, BOTH_ON), want);
+  assert.equal(markWith(MORNING, VIEWER_DECK.slice(1), PARTICLES_ON), want);
+});
+
+test("the viewer's second line: every particle learned, 東京駅 and 丸の内 blue, スタート with the option", () => {
+  const off =
+    "さあ | 今日(learned,null) | は(learned,null) | 東京駅(proper,null) | 丸の内(proper,null) | 駅舎 | の(learned,null) | 前(learned,null) | " +
+    "から(learned,null) | スタート | と(learned,null) | いう(learned,null) | こと(learned,null) | で(learned,null) | です(learned,null) | ね(learned,null)";
+  assert.equal(markWith(STATION, VIEWER_DECK, PARTICLES_ON, [], STATION_STARTS), off);
+  assert.equal(markWith(STATION, VIEWER_DECK, PARTICLES_ON), off);
+  assert.equal(markWith(STATION, VIEWER_DECK.filter(([word]) => word !== "東京"), PARTICLES_ON), off);
+  assert.equal(markWith(STATION, VIEWER_DECK, BOTH_ON), off.replace("スタート |", "スタート(learned,null) |"));
+  // 駅舎 as the deck says.
+  assert.equal(markWith(STATION, [...VIEWER_DECK, ["駅舎", "new", null]], PARTICLES_ON), off.replace("駅舎 |", "駅舎(new,null) |"));
+  // Without the option the particles stay plain, as 0.12.0 had them.
+  assert.equal(
+    markWith(STATION, VIEWER_DECK),
+    "さあ | 今日(learned,null) | は | 東京駅(proper,null) | 丸の内(proper,null) | 駅舎の | 前(learned,null) | からスタートと | いう(learned,null) | こと(learned,null) | でですね",
+  );
+});
+
+test("the viewer's lines with their own deck: 東京駅 and 丸の内 blue, and no の left white", () => {
+  const station =
+    "さあ(learned,heiban) | 今日(learned,atamadaka) | は(learned,null) | 東京駅(proper,null) | 丸の内(proper,null) | 駅舎(learned,null) | の(learned,null) | " +
+    "前(learned,heiban) | から(learned,null) | スタート | という(learned,null) | こと(learned,atamadaka) | で(learned,null) | です(learned,null) | ね(learned,null)";
+  assert.equal(markWith(STATION, VIEWER_REAL_DECK, PARTICLES_ON), station);
+  assert.equal(markWith(STATION, VIEWER_REAL_DECK, BOTH_ON), station.replace("スタート |", "スタート(learned,null) |"));
+  const runs = markWords(STATION, buildIndex(VIEWER_REAL_DECK), undefined, PARTICLES_ON);
+  assert.ok(runs.filter((run) => run.text.includes("の")).every((run) => run.status));
+  assert.equal(
+    markWith(MORNING, VIEWER_REAL_DECK, PARTICLES_ON),
+    "おはようございます  | jr(proper,null) |   | 東京駅(proper,null) | に(learned,null) | 来てます(learned,heiban) | よろしく | お願いします(learned,heiban)",
+  );
+});
+
+test("markWords counts the particles as known with the option, wherever they stand", () => {
+  // After a plain word, at the start of the line, after a deck word whatever its card says: a
+  // particle is learned and never takes the colour of the word before it.
+  assert.equal(markWith("猫が好き", [], PARTICLES_ON), "猫 | が(learned,null) | 好き");
+  assert.equal(markWith("でも行く", [], PARTICLES_ON), "でも(learned,null) | 行く");
+  assert.equal(markWith("猫が", [["猫", "new", null]], PARTICLES_ON), "猫(new,null) | が(learned,null)");
+  assert.equal(markWith("領域まで", [["領域", "new", null]], PARTICLES_ON), "領域(new,null) | まで(learned,null)");
+  assert.equal(markWith("猫が", [["猫", null, "heiban"]], PARTICLES_ON), "猫(null,heiban) | が(learned,null)");
+  assert.equal(markWith("食べてから", [["食べる", "new", null]], PARTICLES_ON), "食べて(new,null) | から(learned,null)");
+  // The longest entry at each start, one run each.
+  assert.equal(markWith("本にはね", [["本", "new", "heiban"]], PARTICLES_ON), "本(new,heiban) | には(learned,null) | ね(learned,null)");
+  assert.equal(markWith("学生ですね", [["学生", "new", null]], PARTICLES_ON), "学生(new,null) | です(learned,null) | ね(learned,null)");
+  assert.equal(markWith("いいんじゃないかな", [], PARTICLES_ON), "いい | んじゃ(learned,null) | ない(learned,null) | かな(learned,null)");
+  // Never over a deck word, a name or a katakana word, and never inside one.
+  assert.equal(markWith("彼女のはなし", [["はなし", "new", null]], PARTICLES_ON), "彼女 | の(learned,null) | はなし(new,null)");
+  assert.equal(markWith("jrが", [], PARTICLES_ON), "jr(proper,null) | が(learned,null)");
+  assert.equal(markWith("コーヒーが", [], BOTH_ON), "コーヒー(learned,null) | が(learned,null)");
+  assert.equal(markWith("行くかもしれない", [["行く", "new", null], ["かもしれない", "learning", null]], PARTICLES_ON), "行く(new,null) | かもしれない(learning,null)");
+  // A particle ends at a word boundary: に is not in にほん.
+  assert.equal(markWith("猫にほん", [["猫", "new", null]], PARTICLES_ON, [], new Set([0, 1])), "猫(new,null) | にほん");
+  // Without the option they are plain text.
+  assert.equal(markWith("猫が好き", [], undefined), "猫が好き");
+  assert.equal(markWith("本にはね", [["本", "new", "heiban"]], { katakana: true }), "本(new,heiban) | にはね");
+});
+
+test("markWords counts the quotative with いう as a particle with the option", () => {
+  const say = [["猫", "new", null], ["いう", "learning", null]];
+  // A card for いう: the quotative before it is a particle, learned, not the colour of 猫.
+  assert.equal(markWith("猫という", say, PARTICLES_ON), "猫(new,null) | と(learned,null) | いう(learning,null)");
+  assert.equal(markWith("猫という", say), "猫(new,null) | と(new,null) | いう(learning,null)");
+  // No card for いう: the segment ICU keeps whole is one particle combination.
+  assert.equal(markWith("猫という", [["猫", "new", null]], PARTICLES_ON), "猫(new,null) | という(learned,null)");
+  assert.equal(markWith("猫っていうのは", [["猫", "new", null]], PARTICLES_ON), "猫(new,null) | っていう(learned,null) | のは(learned,null)");
+  assert.equal(markWith("ていうか", [], PARTICLES_ON), "ていう(learned,null) | か(learned,null)");
+  assert.equal(markWith("猫という", [["猫", "new", null]]), "猫(new,null) | という");
+  // A card for という itself wins, and does not reach into っていう; a card for いう never shows in
+  // ていう, which no quotative fronts it with.
+  assert.equal(markWith("猫という", [["猫", "new", null], ["という", "learning", null]], PARTICLES_ON), "猫(new,null) | という(learning,null)");
+  assert.equal(markWith("ことっていうか", [["という", "learning", null]], PARTICLES_ON), "こと | っていう(learned,null) | か(learned,null)");
+  assert.equal(markWith("ことていうか", [["いう", "learning", null]], PARTICLES_ON), "こと | ていう(learned,null) | か(learned,null)");
+  // Without the option a quotative after a name stays plain: blue is no card's colour.
+  assert.equal(markWith("jrという", [["いう", "learned", null]]), "jr(proper,null) | と | いう(learned,null)");
+});
+
+test("markWords refuses the particle shapes of a kana verb ICU cut up, as measured on the viewer's lines", () => {
+  // The shapes that came up again and again among 2,198 particles on 668 real lines: the first kana
+  // of やる, なる, よい, する, もらう, かかる, つながる, and the inflection of a verb the deck
+  // lacks. The real segmenter cuts each line as the comment says.
+  const cases = [
+    ["ちょっと前からやってきました", "ちょっと前 | から(learned,null) | やってきました"], // や|って|き|ました
+    ["新幹線でやりましたけども", "新幹線 | で(learned,null) | やりましたけども"], // や|り|ました
+    ["地獄コースになってるんで", "地獄コース | に(learned,null) | なってるんで"], // な|って|る
+    ["ぜひよかったら", "ぜひよかったら"], // よ|か|っ|たら
+    ["ご来場お待ちしております", "ご来場お待ちしております"], // し|て|おり|ます
+    ["反動してますね", "反動してます | ね(learned,null)"], // し|て|ます
+    ["マス見てもらってね", "マス見 | て(learned,null) | もらって | ね(learned,null)"], // も|ら|って
+    ["焼肉がかかってますからね", "焼肉 | が(learned,null) | かかってます | から(learned,null) | ね(learned,null)"], // か|かって
+    ["運を使っちゃってる", "運 | を(learned,null) | 使っちゃってる"], // 使|っ|ちゃ|って|る
+    ["おはようございます", "おはようございます"], // ご|ざ|い|ます
+    ["いっぱいあったりとか", "いっぱいあったり | とか(learned,null)"], // あっ|たり|とか
+  ];
+  for (const [line, want] of cases) assert.equal(markWith(line, [], PARTICLES_ON), want, line);
+  // 出た and もらった behind 猫, which ICU cuts 猫|が|で|た and 猫|に|も|ら|っ|た.
+  const cat = [["猫", "new", null]];
+  assert.equal(markWith("猫がでた", cat, PARTICLES_ON), "猫(new,null) | が(learned,null) | でた");
+  assert.equal(markWith("猫がでた", cat, PARTICLES_ON, [], new Set([0, 1, 2, 3])), "猫(new,null) | が(learned,null) | でた");
+  assert.equal(markWith("猫がでたよ", cat, PARTICLES_ON), "猫(new,null) | が(learned,null) | でたよ");
+  assert.equal(markWith("猫にもらった", cat, PARTICLES_ON), "猫(new,null) | に(learned,null) | もらった");
+  assert.equal(markWith("猫にもらった", cat, PARTICLES_ON, [], new Set([0, 1, 2, 3, 4, 5])), "猫(new,null) | に(learned,null) | もらった");
+  // What it leaves: な before が (つ|な|が|っ|た), a shape too rare to list.
+  assert.equal(markWith("名刺と つながったことで", [], PARTICLES_ON), "名刺 | と(learned,null) |  つ | な(learned,null) | がったこと | で(learned,null)");
+  // What it costs: the Kansai copula や before った and って is やる's kana too.
+  assert.equal(markWith("日本初やった", [], PARTICLES_ON), "日本(proper,null) | 初やった");
+  assert.equal(markWith("休んだばっかやって", [["休む", "learned", null]], PARTICLES_ON), "休んだ(learned,null) | ばっかやって");
+});
+
+test("markWords keeps the true particles the tempting guards would refuse", () => {
+  // A particle before a kana word ICU cut into single kana (を|お|ご|ら, に|い|ます, で|ご|ざ|い):
+  // "a particle before a single kana that is no particle" refused 25 such particles.
+  assert.equal(markWith("高級焼肉をおごら", [], PARTICLES_ON), "高級焼肉 | を(learned,null) | おごら");
+  assert.equal(markWith("会場にいますもんね", [], PARTICLES_ON), "会場 | に(learned,null) | います | もん(learned,null) | ね(learned,null)");
+  assert.equal(markWith("優勝でございます", [], PARTICLES_ON), "優勝 | で(learned,null) | ございます");
+  assert.equal(markWith("東京でたくさん", [], PARTICLES_ON), "東京(proper,null) | で(learned,null) | たくさん");
+  // って after a particle or た, the nominaliser の and the copula だ before っ.
+  assert.equal(markWith("首都高とかって", [], PARTICLES_ON), "首都高 | とか(learned,null) | って(learned,null)");
+  assert.equal(markWith("逃したからって", [], PARTICLES_ON), "逃した | から(learned,null) | って(learned,null)");
+  assert.equal(markWith("見るのって楽しい", [], PARTICLES_ON), "見る | の(learned,null) | って(learned,null) | 楽しい");
+  assert.equal(markWith("こんな感じだったんです", [], PARTICLES_ON), "こんな感じ | だ(learned,null) | ったん | です(learned,null)");
+  // An inflection's shape after a particle or a kanji is the particle.
+  assert.equal(markWith("お金がない", [], PARTICLES_ON), "お金 | が(learned,null) | ない(learned,null)");
+});
+
+test("markWords refuses the kana a kanji verb the deck lacks is cut into", () => {
+  // ICU cuts 飲|ん|だ, 書|か|ない, 買|わ|なか|っ|た, 呼|ば|れ|た: the 音便 and the okurigana are the
+  // verb's, whatever their shape.
+  for (const verb of ["飲んだ", "呼んだ", "死んだ", "進んだ", "飲んだら", "書かない", "行かない", "話さない", "言わない", "遊ばない", "死なない", "買わなかった", "呼ばれた", "移される", "行かせて"]) {
+    assert.equal(markWith(verb, [], PARTICLES_ON), verb, verb);
+  }
+  assert.equal(markWith("さっき休んだばっか", [], PARTICLES_ON), "さっき休んだばっか");
+  // The particles beside them stay: が before ない, か after 何, ん after kana.
+  assert.equal(markWith("本がない", [], PARTICLES_ON), "本 | が(learned,null) | ない(learned,null)");
+  assert.equal(markWith("何かない", [], PARTICLES_ON), "何 | か(learned,null) | ない(learned,null)");
+  assert.equal(markWith("食べるんだ", [], PARTICLES_ON), "食べる | ん(learned,null) | だ(learned,null)");
+});
+
+test("markWords refuses the kana of slang and interjections ICU cut up, as measured on the viewer's lines", () => {
+  const cases = [
+    ["実質1万しか増えへんやんえ、なにこれ", "実質1万 | しか(learned,null) | 増えへんやんえ、なにこれ"], // な|に|これ
+    ["おっしゃ!", "おっしゃ!"], // おっ|し|ゃ
+    ["やばぁ!", "やばぁ!"], // や|ば|ぁ
+    ["マスだせぇ", "マスだせぇ"], // だ|せ|ぇ
+    ["申し訳なさそうに", "申し訳なさそう | に(learned,null)"], // な|さそう
+    ["情けなさ", "情けなさ"], // な|さ
+    ["でっけえやつね", "でっけえやつ | ね(learned,null)"], // で|っけ|え
+    ["へえ", "へえ"], // へ|え
+    ["かもしれない", "かも(learned,null) | しれない"], // かも|し|れ|ない
+    ["それをしろ", "それ | を(learned,null) | しろ"], // し|ろ
+  ];
+  for (const [line, want] of cases) assert.equal(markWith(line, [], PARTICLES_ON), want, line);
+  const maybe = [["かもしれない", "learned", null], ["そう", "learned", null]];
+  assert.equal(markWith("かもしれません", maybe, PARTICLES_ON), "かも(learned,null) | しれません");
+  assert.equal(markWith("そうかもしれへん", maybe, PARTICLES_ON), "そう(learned,null) | かも(learned,null) | しれへん");
+  // The true particles beside the same kana: な before におい or さかな, a particle drawn out.
+  assert.equal(markWith("変なにおい", [], PARTICLES_ON), "変 | な(learned,null) | におい");
+  assert.equal(markWith("好きなさかな", [], PARTICLES_ON), "好き | な(learned,null) | さかな");
+  assert.equal(markWith("そうだよぉ", [], PARTICLES_ON), "そうだ | よ(learned,null) | ぉ");
+  assert.equal(markWith("そうかあ", [], PARTICLES_ON), "そう | か(learned,null) | あ");
+});
+
+test("markWords takes the particle ICU fused with the い of いる, and the one before a quotative", () => {
+  // ICU cuts 人|がい|た and 猫|とい|た: no particle ends at a boundary there.
+  assert.equal(markWith("人がいた", [], PARTICLES_ON), "人 | が(learned,null) | いた");
+  assert.equal(markWith("人がいない", [], PARTICLES_ON), "人 | が(learned,null) | いない");
+  assert.equal(markWith("猫がいれば", [], PARTICLES_ON), "猫 | が(learned,null) | いれば");
+  assert.equal(markWith("猫といた", [], PARTICLES_ON), "猫 | と(learned,null) | いた");
+  assert.equal(markWith("人がいる", [], PARTICLES_ON), "人 | が(learned,null) | いる");
+  // Not at the end of the text, not は (靴|を|はい|た is 履いた), not the と of ておいて.
+  assert.equal(markWith("猫がい", [], PARTICLES_ON), "猫がい");
+  assert.equal(markWith("靴をはいた", [], PARTICLES_ON), "靴 | を(learned,null) | はいた");
+  assert.equal(markWith("置いといて", [], PARTICLES_ON), "置いといて");
+  // ね and よ before a quotative って of its own (楽しい|ね|って); な|って is なる's as often.
+  assert.equal(markWith("楽しいねって", [], PARTICLES_ON), "楽しい | ね(learned,null) | って(learned,null)");
+  assert.equal(markWith("すごいなって", [], PARTICLES_ON), "すごいなって");
+  // って after a word the deck holds is the quotative, after ちゃ the verb's.
+  assert.equal(markWith("さくらって", [["さくら", "learned", null]], PARTICLES_ON), "さくら(learned,null) | って(learned,null)");
+  assert.equal(markWith("運を使っちゃってる", [["使う", "learned", null]], PARTICLES_ON), "運 | を(learned,null) | 使っちゃ(learned,null) | ってる");
+});
+
+test("markWords runs a noun on over する's forms", () => {
+  assert.equal(markWith("勉強している", [["勉強", "new", "heiban"]]), "勉強している(new,heiban)");
+  assert.equal(markWith("お願いします", [["お願い", "learning", null]]), "お願いします(learning,null)");
+  assert.equal(markWith("勉強させられた", [["勉強", "new", null]]), "勉強させられた(new,null)");
+  assert.equal(markWith("スタートしました", [], undefined, ["スタート"]), "スタートしました(learned,null)");
+  // The bare noun stays a match, and a lone し is no form (the conjunctive particle as often).
+  assert.equal(markWith("勉強です", [["勉強", "new", null]]), "勉強(new,null) | です");
+  assert.equal(markWith("勉強し、", [["勉強", "new", null]]), "勉強(new,null) | し、");
+  assert.equal(markWith("勉強しか", [["勉強", "new", null]], PARTICLES_ON), "勉強(new,null) | しか(learned,null)");
+  // Not after a name, nor for a kana word, nor for a word that ends in する (its own forms).
+  assert.equal(markWith("東京駅する", [["東京", "learned", null]]), "東京駅(proper,null) | する");
+  assert.equal(markWith("びっくりした", [["びっくり", "new", null]]), "びっくり(new,null) | した");
+  assert.equal(markWith("勉強している", [["勉強する", "learned", null]]), "勉強している(learned,null)");
+});
+
+test("markWords gives a card for the verb its own forms over a noun's する", () => {
+  // The viewer's deck holds 話 and 話す, 回 and 回す, 足 and 足す: the form of the verb is as long
+  // as the noun with する, and the verb's card has it.
+  const talk = [["話", "new", "heiban"], ["話す", "learned", "nakadaka"]];
+  assert.equal(markWith("話して", talk), "話して(learned,nakadaka)");
+  assert.equal(markWith("話します", talk), "話します(learned,nakadaka)");
+  assert.equal(markWith("マス回しますね", [["回", "learned", "atamadaka"], ["回す", "learned", "heiban"]]), "マス | 回します(learned,heiban) | ね");
+  assert.equal(markWith("思い出して", [["思い出", "new", "heiban"], ["思い出す", "learned", "nakadaka"]]), "思い出して(learned,nakadaka)");
+  // Without a card for the verb the noun runs on as before.
+  assert.equal(markWith("思い出して", [["思い出", "new", "heiban"]]), "思い出して(new,heiban)");
+});
+
+test("markWords runs no time word, adverb, pronoun, counter or single kanji on over する", () => {
+  // Real lines with the viewer's cards for 何, 顔, 数 and 台.
+  assert.equal(markWith("何してるんですか", [["何", "suspended", "heiban"]]), "何(suspended,heiban) | してるんですか");
+  assert.equal(markWith("腹立つ顔するやつ", [["顔", "learned", "heiban"]]), "腹立つ | 顔(learned,heiban) | するやつ");
+  assert.equal(markWith("数するなんすか", [["数", "learned", "atamadaka"]]), "数(learned,atamadaka) | するなんすか");
+  assert.equal(markWith("4台しちゃった", [["台", "learned", null]]), "4 | 台(learned,null) | しちゃった");
+  for (const word of ["何か", "何も", "少し", "全然", "絶対", "一番", "結構", "多分", "毎日", "今日", "後で", "一回"]) {
+    for (const verb of ["したい", "しない", "します", "してる"]) {
+      assert.equal(markWith(word + verb, [[word, "learned", null]]), `${word}(learned,null) | ${verb}`, word + verb);
+    }
+  }
+  // The する nouns still do, a noun ending in し among them.
+  assert.equal(markWith("説明します", [["説明", "new", null]]), "説明します(new,null)");
+  assert.equal(markWith("引っ越ししました", [["引っ越し", "new", null]]), "引っ越ししました(new,null)");
+  assert.equal(markWith("お願いします", [["お願い", "new", null]], PARTICLES_ON), "お願いします(new,null)");
+});
+
+test("markWords never ends a noun's する run inside ちゃった", () => {
+  // ICU cuts 勉強|し|ちゃ|っ|た: the tables cannot follow ちゃった, and a run ending at ちゃ kept a
+  // card for ちゃう from the rest of it.
+  const tired = [["ちゃう", "learned", "heiban"]];
+  assert.equal(markWith("勉強しちゃった", [["勉強", "new", null], ...tired]), "勉強(new,null) | し | ちゃった(learned,heiban)");
+  assert.equal(markWith("渋滞しちゃってる", [["渋滞", "learned", null], ...tired]), "渋滞(learned,null) | し | ちゃってる(learned,heiban)");
+  assert.equal(markWith("勉強しちゃった", [["勉強", "new", null]]), "勉強(new,null) | しちゃった");
+  // ちゃう itself is a form the tables follow.
+  assert.equal(markWith("勉強しちゃう", [["勉強", "new", null], ...tired]), "勉強しちゃう(new,null)");
+});
+
+test("markWords colours Latin text as a name", () => {
+  assert.equal(markWith("jr", []), "jr(proper,null)");
+  assert.equal(markWith("abc", []), "abc(proper,null)");
+  assert.equal(markWith("JRで", [], PARTICLES_ON), "JR(proper,null) | で(learned,null)");
+  assert.equal(markWith("YouTubeを見る", [["見る", "learned", null]]), "YouTube(proper,null) | を | 見る(learned,null)");
+  assert.equal(markWith("iPhoneとTV", []), "iPhone(proper,null) | と | TV(proper,null)");
+  assert.equal(markWith("rock'n'roll", []), "rock'n'roll(proper,null)");
+  assert.equal(markWith("ＪＲ東日本", []), "ＪＲ(proper,null) | 東日本");
+  assert.equal(markWith("E4に", []), "E4(proper,null) | に");
+  // Digits alone are a number, and a letter inside a segment starts nothing.
+  assert.equal(markWith("123と456", []), "123と456");
+  assert.equal(markWith("3D", []), "3D");
+  // A card for the word wins the tie; a longer one wins outright.
+  assert.equal(markWith("OKです", [["OK", "new", null]]), "OK(new,null) | です");
+  assert.equal(markWith("Tシャツ", [["Tシャツ", "new", null]]), "Tシャツ(new,null)");
+});
+
+test("markWords keeps full-width Latin whole, a letter with its katakana, and laughter plain", () => {
+  // ICU cuts Ｗｉ|－|Ｆｉ and Ｑ|＆|Ａ: the full-width run takes the marks the half-width one does.
+  assert.equal(markWith("Ｗｉ－Ｆｉ", []), "Ｗｉ－Ｆｉ(proper,null)");
+  assert.equal(markWith("Ｑ＆Ａです", []), "Ｑ＆Ａ(proper,null) | です");
+  assert.equal(markWith("Wi-Fi", []), "Wi-Fi(proper,null)");
+  // T|シャツ and J|リーグ are one word each.
+  assert.equal(markWith("Tシャツを着る", []), "Tシャツ(proper,null) | を着る");
+  assert.equal(markWith("Ｔシャツ", [], { katakana: true }), "Ｔシャツ(proper,null)");
+  assert.equal(markWith("Jリーグ", [], undefined, [], new Set([0, 1])), "Jリーグ(proper,null)");
+  // Laughter is no name.
+  for (const laugh of ["www", "ｗｗｗ", "wwwww", "草www"]) assert.equal(markWith(laugh, []), laugh);
+});
+
+test("markWords colours a place name, and a place with its suffix, as a name", () => {
+  for (const place of ["東京都", "北海道", "丸の内", "アメリカ", "大阪城", "渋谷区"]) assert.equal(markWith(place, []), `${place}(proper,null)`);
+  // A suffix segment after a place (品川|駅) or ending the segment the place began (東京駅 whole).
+  assert.equal(markWith("品川駅", []), "品川駅(proper,null)");
+  assert.equal(markWith("東京駅", [], undefined, [], new Set([0])), "東京駅(proper,null)");
+  assert.equal(markWith("東京駅", [], undefined, [], new Set([0, 2])), "東京駅(proper,null)");
+  // A kanji segment of two or more with a suffix segment after it; ICU cuts 東|急|線, which takes
+  // none.
+  assert.equal(markWith("東急線", [], undefined, [], new Set([0, 2])), "東急線(proper,null)");
+  assert.equal(markWith("東急線", []), "東急線");
+  // What is no suffix: 駅舎 and 駅前 are words, and a suffix after a particle is plain.
+  assert.equal(markWith("丸の内駅舎", []), "丸の内(proper,null) | 駅舎");
+  assert.equal(markWith("東京駅前", []), "東京(proper,null) | 駅前");
+  assert.equal(markWith("東京の駅", [], PARTICLES_ON), "東京(proper,null) | の(learned,null) | 駅");
+  // A place ends a word: 日本 is not in 日本語 or 日本人.
+  assert.equal(markWith("日本語", []), "日本語");
+  assert.equal(markWith("日本人", []), "日本人");
+  assert.equal(markWith("日本の", []), "日本(proper,null) | の");
+});
+
+test("markWords gives the longer span to a name or a card, and the tie to the card", () => {
+  // The viewer's deck holds 東京, 駅 and 丸: 東京駅 and 丸の内 are longer from the same start.
+  assert.equal(markWith("東京駅に行く", [["東京", "learned", null], ["駅", "learned", null]]), "東京駅(proper,null) | に行く");
+  assert.equal(markWith("丸の内", [["丸", "learned", null]]), "丸の内(proper,null)");
+  // 東京 alone is a tie, and the card has it; a longer card has its word.
+  assert.equal(markWith("東京に行く", [["東京", "learned", null]]), "東京(learned,null) | に行く");
+  assert.equal(markWith("東京駅", [["東京駅", "new", null]]), "東京駅(new,null)");
+  assert.equal(markWith("日本語", [["日本語", "new", null]]), "日本語(new,null)");
+  // A known word likewise: the same length wins, a shorter one does not.
+  assert.equal(markWith("東京駅", [], undefined, ["東京駅"]), "東京駅(learned,null)");
+  assert.equal(markWith("東京駅", [["東京", "new", null]], undefined, ["東京"]), "東京駅(proper,null)");
+});
+
+test("markWords joins a suffix only to a segment no card begins at", () => {
+  // The viewer's own cards: a word and the noun after it (結構|山, 昨日|海, 地元|駅, 天然|温泉, as
+  // ICU cuts them) are two words, each in its card's colour.
+  const real = [
+    ["結構", "learned", "heiban"], ["山", "learned", "nakadaka"], ["昨日", "learned", "heiban"], ["海", "learned", null], ["地元", "learned", "heiban"],
+    ["駅", "learned", "atamadaka"], ["天然", "learned", null], ["温泉", "suspended", "heiban"], ["東京", "learned", "heiban"], ["丸", "learned", null],
+    ["駅舎", "learned", null],
+  ];
+  assert.equal(markWith("これ結構山かったよね", real), "これ | 結構(learned,heiban) | 山(learned,nakadaka) | かったよね");
+  assert.equal(markWith("昨日海に行った", real), "昨日(learned,heiban) | 海(learned,null) | に行った");
+  assert.equal(markWith("地元駅で降りる", real), "地元(learned,heiban) | 駅(learned,atamadaka) | で降りる");
+  assert.equal(markWith("天然温泉", real), "天然(learned,null) | 温泉(suspended,heiban)");
+  // No card for 主要: the pair is a name, as before; and a place with its suffix still wins.
+  assert.equal(markWith("主要駅", real), "主要駅(proper,null)");
+  assert.equal(markWith("東京駅丸の内駅舎", real, PARTICLES_ON), "東京駅(proper,null) | 丸の内(proper,null) | 駅舎(learned,null)");
+});
+
+test("markWords leaves the chili of a dish a word, not Chile", () => {
+  assert.equal(markWith("エビチリ", []), "エビチリ");
+  assert.equal(markWith("チリソース", [], { katakana: true }), "チリソース(learned,null)");
+  assert.equal(markWith("チリソース", []), "チリソース");
+});
+
+test("markWords counts the katakana words as known with the option", () => {
+  assert.equal(markWith("スタート", [], { katakana: true }), "スタート(learned,null)");
+  assert.equal(markWith("スタート", []), "スタート");
+  assert.equal(markWith("ジョン・スミス", [], { katakana: true }), "ジョン・スミス(learned,null)");
+  assert.equal(markWith("ラーメン屋", [], { katakana: true }), "ラーメン(learned,null) | 屋");
+  // A single katakana character is no word.
+  assert.equal(markWith("アが", [], BOTH_ON), "ア | が(learned,null)");
+  // A card keeps its status, a place stays blue, and a deck word inside the run takes its own.
+  assert.equal(markWith("コーヒー", [["コーヒー", "new", "heiban"]], { katakana: true }), "コーヒー(new,heiban)");
+  assert.equal(markWith("アメリカ", [], { katakana: true }), "アメリカ(proper,null)");
+  assert.equal(markWith("コーヒーカップ", [["カップ", "new", null]], { katakana: true }, [], new Set([0, 4])), "コーヒー(learned,null) | カップ(new,null)");
+});
+
+test("markWords colours a known word as learned, over its card and in its forms", () => {
+  assert.equal(markWith("猫", [["猫", "new", "atamadaka"]], undefined, ["猫"]), "猫(learned,atamadaka)");
+  assert.equal(markWith("走った", [], undefined, ["走る"]), "走った(learned,null)");
+  assert.equal(markWith("はしった", [], undefined, ["はしる"]), "はしった(learned,null)");
+  // A kana reading's entry (a card usually written in kana) is overridden like any entry.
+  assert.equal(markWith("さらに言う", [["更に", "new", null], ["さらに", "new", null]], undefined, ["さらに"]), "さらに(learned,null) | 言う");
+});
+
+test("markWords stays quick with every option on", () => {
+  const entries = [];
+  for (let i = 0; i < 3000; i++) entries.push([`語${i}る`, "learned", "heiban"]);
+  entries.push(["日本語", "new", null]);
+  const index = buildIndex(entries, ["字幕"]);
+  const line = "これは日本語の字幕ですよね、jrで東京駅からスタートということで。".repeat(150);
+  const started = Date.now();
+  const runs = markWords(line, index, undefined, BOTH_ON);
+  assert.equal(runs.filter((run) => run.text === "日本語" && run.status === "new").length, 150);
+  assert.equal(runs.filter((run) => run.text === "東京駅" && run.status === "proper").length, 150);
   assert.equal(runs.map((run) => run.text).join(""), line);
   assert.ok(Date.now() - started < 1000, "marking a long line must not take a second");
 });
