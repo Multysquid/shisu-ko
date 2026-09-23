@@ -21,7 +21,7 @@ const EXPORTS =
   "  return { state, shouldSync, coveredRange, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
   " premineAllowed, premineNow, captureHoverFrame, autoAnkiMining, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed," +
   " currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown, onMineClick, onTranscriptClick, onSubtitleEnter," +
-  " onSubtitleLeave, onPlayerMouseMove, modelForSync, fontStack, sync, onVideoChanged, setSubtitle, updateStatus, statusText, isShortsUrl," +
+  " onSubtitleLeave, onPlayerMouseMove, onPlayerMouseLeave, modelForSync, fontStack, sync, onVideoChanged, setSubtitle, updateStatus, statusText, isShortsUrl," +
   " startTimeFromUrl, findPlayer, discover, pollForNewCard, autoMine, onTranscriptLineEnter, onTranscriptLineLeave," +
   " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, transcriptLine, mineCue," +
   " knownList, rebuildWordIndex, segmentAt, entryWordFor, knownTarget, markKnown };\n";

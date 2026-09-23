@@ -82,7 +82,7 @@
         <input type="checkbox" id="cardStatus">
         <span>Colour words by their Anki card</span>
       </label>
-      <p class="hint legend"><span class="sw learned"></span>learned <span class="sw learning"></span>learning <span class="sw suspended"></span>suspended <span class="sw new"></span>new <span class="sw proper"></span>names and Latin text · particles green, other words keep the text colour</p>
+      <p class="hint legend"><span class="sw learned"></span>learned <span class="sw learning"></span>learning <span class="sw suspended"></span>suspended <span class="sw new"></span>new <span class="sw proper"></span>names and Latin text · other words keep the text colour</p>
       <label class="row field">
         <span class="lead">Deck</span>
         <select id="cardStatusDeck">
@@ -90,6 +90,11 @@
         </select>
       </label>
       <p class="hint" id="deck-hint"></p>
+      <!-- Particles green wherever they stand (on by default); off, a line colours its words alone. -->
+      <label class="row check">
+        <input type="checkbox" id="particlesKnown">
+        <span>Particles count as known</span>
+      </label>
       <label class="row check">
         <input type="checkbox" id="katakanaKnown">
         <span>Katakana words count as known</span>

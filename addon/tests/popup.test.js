@@ -924,6 +924,60 @@ test("the known words and the katakana switch load into the form, and save trimm
   assert.ok(cssDeclarations(".sw.proper,\n.sw.heiban").includes("background: #4da3ff"));
 });
 
+// The options page lives for hours, and the focus stays in the list it was last clicked into
+// while the viewer is on YouTube marking words with Alt+Shift+K. The focus alone is no typing:
+// those marks land in the list, and the viewer's next edit saves them with it instead of
+// putting the list from before them back.
+test("a focused known-words list nobody is typing in takes the marks made on the video, and its next edit keeps them", async () => {
+  const state = { health: offline, settings: { knownWords: "食べる" } };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const list = popup.el("knownWords");
+  popup.document.activeElement = list; // clicked into, then off to the video
+  elsewhere({ knownWords: "食べる\n猫" });
+  elsewhere({ knownWords: "食べる\n猫\n犬" });
+  assert.equal(list.value, "食べる\n猫\n犬");
+  // Back in the tab, one word typed at the end, and the field left: the whole list is saved.
+  list.value = "食べる\n猫\n犬\n鳥";
+  // Typing now: a mark landing meanwhile waits, the typing stays.
+  elsewhere({ knownWords: "食べる\n猫\n犬\n馬" });
+  assert.equal(list.value, "食べる\n猫\n犬\n鳥");
+  list.dispatch("change");
+  await wait(200);
+  assert.deepEqual(saves(), [{ knownWords: "食べる\n猫\n犬\n鳥" }]);
+  assert.equal(state.settings.knownWords, "食べる\n猫\n犬\n鳥");
+  // What was sent is the list as the field holds it: still focused, the next mark lands again.
+  elsewhere({ knownWords: "食べる\n猫\n犬\n鳥\n魚" });
+  assert.equal(list.value, "食べる\n猫\n犬\n鳥\n魚");
+  // A model name the field was given is no typing either (the same rule for every text field).
+  const model = popup.el("model");
+  popup.document.activeElement = model;
+  elsewhere({ model: "small" });
+  assert.equal(model.value, "small");
+  popup.document.activeElement = null;
+});
+
+// The particle switch: on for a viewer who never touched it, a checkbox like any other, above the
+// katakana one. The legend no longer promises green particles; the switch says it.
+test("the particle switch loads checked by default, sits above the katakana one, and saves when unticked", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const box = popup.el("particlesKnown");
+  assert.equal(box.type, "checkbox");
+  assert.equal(box.checked, true);
+  assert.equal(popup.el("katakanaKnown").checked, false);
+  box.checked = false;
+  box.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ particlesKnown: false }]);
+  assert.equal(state.settings.particlesKnown, false);
+  // Ticked again in the other copy of the form: it lands here.
+  elsewhere({ particlesKnown: true });
+  assert.equal(box.checked, true);
+  assert.match(HTML, /<input type="checkbox" id="particlesKnown">\s*<span>Particles count as known<\/span>/);
+  assert.ok(HTML.indexOf('id="particlesKnown"') < HTML.indexOf('id="katakanaKnown"'));
+  assert.doesNotMatch(HTML, /particles green/);
+});
+
 // The mousedown on the button blurs the text field, whose change event starts the 150 ms save;
 // the click lands well inside them.
 test("Reset style takes an edit still on its way with it, and runs the check it asked for", async () => {

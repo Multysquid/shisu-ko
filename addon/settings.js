@@ -62,6 +62,10 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // The viewer's own known words, one per line: drawn as learned whatever their card says, and
   // words that are in no deck. Alt+Shift+K adds the word under the pointer, or takes it out again.
   knownWords: "",
+  // Particles count as known: a particle (は, に, から, です …) that no card, known word or name
+  // rule takes is drawn as learned, green wherever it stands. Off, a line colours its words alone,
+  // as 0.12.0 did.
+  particlesKnown: true,
   // Katakana words count as known: a katakana run that no card, known word or name rule takes is
   // drawn as learned.
   katakanaKnown: false,

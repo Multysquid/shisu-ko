@@ -67,6 +67,9 @@
   const WORD_INDEX_PROBE_MAX = 64;
   // One kanji, for the word under the pointer (segmentAt): ICU cuts a verb after its kanji.
   const KANJI_RE = /^\p{Script=Han}$/u;
+  // The honorific prefixes ICU cuts off the word they front (お|風呂, ご|家族), as words.js has
+  // them: pointed at, the word is meant, not the prefix (knownTarget).
+  const HONORIFICS = new Set(["お", "ご"]);
   // A card is most likely to appear while a subtitle is hovered.
   const HOVER_POLL_INTERVAL_MS = 300;
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
@@ -167,6 +170,9 @@
     hoverSeenAt: 0,
     resumeTimer: null,
     lastPointer: { x: 0, y: 0 },
+    // Whether the pointer is over the player now, that is whether lastPointer still says where it
+    // is: Alt+Shift+K reads the word there (knownTarget).
+    pointerInPlayer: false,
     syncInFlight: false,
     // The playhead on the video's own clock as of the last request outside an ad, or where the
     // video will start before the first: what is sent while an ad runs on its clock (see sync).
@@ -414,18 +420,23 @@
     // asked for at once (never while off, and never from a tab without a video).
     const wordsChanged = WORD_SETTINGS.some((key) => next[key] !== state.settings[key]);
     if (wordsChanged) dropWordIndex();
-    // The viewer's own list and the katakana switch change what the index says about a line, not
-    // the deck: the index is built again from the entries in hand (the background is not asked)
+    // The viewer's own list and the katakana and particle switches change what the matcher makes
+    // of a line, not the deck: a new list goes into an index built again from the entries in hand
+    // (the background is not asked), a switch is an option of the matcher and needs no new index,
     // and the lines are drawn again in place, the looks found under the settings of before being
     // out of date (lookOf compares them).
     const knownChanged = next.knownWords !== state.settings.knownWords;
     const katakanaChanged = !!next.katakanaKnown !== !!state.settings.katakanaKnown;
+    const particlesChanged = !!next.particlesKnown !== !!state.settings.particlesKnown;
     // The master switch decides a line's look as well (wordColoursOn). Off, nothing more is done:
     // the lines keep their colours under the hidden root (setSubtitle(null) clears the screen,
     // and rewriting every coloured line of a transcript nobody sees, in every tab showing one,
-    // would be work for nothing). On again, the refresh finds the lines drawn under the index it
-    // still holds and touches none of them; only what changed while off (the deck, a colour:
-    // wordsChanged dropped the index and made the lines plain) gets a new draw.
+    // would be work for nothing). That holds for the known list and the two switches as well:
+    // their refresh waits for the switch, whose refresh compares against the index last drawn and
+    // the switches each look was found under, and so draws again just the lines they changed.
+    // On again, the refresh finds the lines drawn under the index it still holds and touches none
+    // of them; only what changed while off (the deck, a colour: wordsChanged dropped the index and
+    // made the lines plain; the list, a switch) gets a new draw.
     const enabledChanged = next.enabled !== state.settings.enabled;
     state.settings = next;
     // No setting rebuilds the transcript (see applySettings): a style setting (a slider being
@@ -435,7 +446,8 @@
     if (knownChanged && !wordsChanged) rebuildWordIndex();
     applySettings();
     if (modelChanged) sync();
-    if (wordsChanged || knownChanged || katakanaChanged || (enabledChanged && next.enabled)) refreshWordMarks();
+    const matcherChanged = knownChanged || katakanaChanged || particlesChanged;
+    if (wordsChanged || (matcherChanged && next.enabled) || (enabledChanged && next.enabled)) refreshWordMarks();
     if (wordsChanged && wordColoursOn()) pollWordIndex();
   });
 
@@ -679,6 +691,7 @@
       state.resizeObserver = new ResizeObserver(() => updateFontSize());
       state.resizeObserver.observe(player);
       player.addEventListener("mousemove", onPlayerMouseMove);
+      player.addEventListener("mouseleave", onPlayerMouseLeave);
       updateFontSize();
     }
     if (video) {
@@ -718,7 +731,10 @@
       state.video.removeEventListener("pause", onPause);
     }
     state.videoListeners = null;
-    if (state.player) state.player.removeEventListener("mousemove", onPlayerMouseMove);
+    if (state.player) {
+      state.player.removeEventListener("mousemove", onPlayerMouseMove);
+      state.player.removeEventListener("mouseleave", onPlayerMouseLeave);
+    }
     if (state.resizeObserver) {
       state.resizeObserver.disconnect();
       state.resizeObserver = null;
@@ -1450,13 +1466,14 @@
 
   // How a cue's text is to be drawn now: `runs`, a string for plain text and an object for a word
   // whose card has something to show under the settings of now (null while the whole text is
-  // plain), and `key`, its drawKey(). Found once per cue, index, pair of colours and katakana
-  // switch and kept in cueLooks (the text's word boundaries with it, whatever the index), so that
-  // the panel rebuilt for a style change, or a line the refresh finds untouched, asks the matcher
-  // nothing. The look names the index it was found under by its serial, never by holding it: the
-  // index of a 10k-word deck weighs a megabyte and a hidden transcript's cues are never visited
-  // again. The viewer's known words are in the index (buildIndex takes them), so the serial
-  // dates a look for them too; the katakana switch reaches the matcher as an option of its own.
+  // plain), and `key`, its drawKey(). Found once per cue, index, pair of colours and pair of
+  // switches (katakana, particles) and kept in cueLooks (the text's word boundaries with it,
+  // whatever the index), so that the panel rebuilt for a style change, or a line the refresh
+  // finds untouched, asks the matcher nothing. The look names the index it was found under by its
+  // serial, never by holding it: the index of a 10k-word deck weighs a megabyte and a hidden
+  // transcript's cues are never visited again. The viewer's known words are in the index
+  // (buildIndex takes them), so the serial dates a look for them too; the katakana and particle
+  // switches reach the matcher as options of their own.
   function lookOf(cue) {
     const s = state.settings;
     const index = state.wordIndex;
@@ -1464,13 +1481,14 @@
     const cardStatus = !!s.cardStatus;
     const pitchAccent = !!s.pitchAccent;
     const katakana = !!s.katakanaKnown;
+    const particles = !!s.particlesKnown;
     const serial = state.wordIndexSerial;
     const known = state.cueLooks.get(cue);
-    if (known && known.serial === serial && known.cardStatus === cardStatus && known.pitchAccent === pitchAccent && known.katakana === katakana) return known;
+    if (known && known.serial === serial && known.cardStatus === cardStatus && known.pitchAccent === pitchAccent && sameSwitches(known, s)) return known;
     const starts = known ? known.starts : SHISUKO_WORDS.wordStarts(cue.text);
     const runs = [];
     let plain = "";
-    for (const run of SHISUKO_WORDS.markWords(cue.text, index, starts, { katakana })) {
+    for (const run of SHISUKO_WORDS.markWords(cue.text, index, starts, { katakana, particles })) {
       const status = cardStatus && run.status ? run.status : null;
       const pitch = pitchAccent && run.pitch ? run.pitch : null;
       // A card with nothing to show here is text like any other, joined with its neighbours.
@@ -1483,9 +1501,15 @@
       runs.push({ text: run.text, status, pitch });
     }
     if (plain) runs.push(plain);
-    const look = { serial, cardStatus, pitchAccent, katakana, starts, runs, key: drawKey(cue.text, runs) };
+    const look = { serial, cardStatus, pitchAccent, katakana, particles, starts, runs, key: drawKey(cue.text, runs) };
     state.cueLooks.set(cue, look);
     return look;
+  }
+
+  // Whether a look was found with the matcher's switches as the settings have them now: katakana
+  // words and particles counted as known, or not.
+  function sameSwitches(look, s) {
+    return look.katakana === !!s.katakanaKnown && look.particles === !!s.particlesKnown;
   }
 
   // One string per look of a line: the text and where each mark sits in it. Two draws with the
@@ -1573,14 +1597,14 @@
   }
 
   // Whether a transcript line looks under the index of now as it already does: what it shows are
-  // the runs found under the index of serial `prevSerial` with the colours and katakana switch of
-  // now, and none of `probes` is in its text, so the index of now finds the same runs. Those are
-  // then on record for it too.
+  // the runs found under the index of serial `prevSerial` with the colours and switches of now,
+  // and none of `probes` is in its text, so the index of now finds the same runs. Those are then
+  // on record for it too.
   function sameLook(el, cue, prevSerial, probes) {
     const look = state.cueLooks.get(cue);
     const s = state.settings;
     if (!look || look.serial !== prevSerial || look.cardStatus !== !!s.cardStatus || look.pitchAccent !== !!s.pitchAccent) return false;
-    if (look.katakana !== !!s.katakanaKnown) return false;
+    if (!sameSwitches(look, s)) return false;
     if (state.drawnKeys.get(el) !== look.key) return false;
     for (const probe of probes) if (cue.text.includes(probe)) return false;
     look.serial = state.wordIndexSerial;
@@ -1647,6 +1671,14 @@
         refreshWordMarks();
       } else {
         logWordIndexError(res.error || res.reason);
+        // No deck to colour by (nothing mined and none chosen, Anki closed since the page
+        // loaded): the viewer's known words, the particles and the katakana words need none, so
+        // they are drawn from an index of the list alone until a deck answer replaces it (the
+        // stamp and the key stay unset, so the first one does).
+        if (!state.wordIndex) {
+          rebuildWordIndex();
+          refreshWordMarks();
+        }
       }
       return;
     }
@@ -1688,11 +1720,11 @@
 
   // The index again from the deck's last entries, for a known list that changed: the deck is
   // the same, so the background is not asked, and the new serial dates every look; the refresh
-  // then matches only the lines holding a word the two indexes disagree on. Nothing without a
-  // deck answer to build from: the poll builds the first index with the list of that moment.
+  // then matches only the lines holding a word the two indexes disagree on. Without a deck
+  // answer in hand the index holds the list alone (see pollWordIndex), which the first answer
+  // with entries replaces.
   function rebuildWordIndex() {
-    if (!state.wordEntries) return;
-    state.wordIndex = SHISUKO_WORDS.buildIndex(state.wordEntries, knownList(state.settings));
+    state.wordIndex = SHISUKO_WORDS.buildIndex(state.wordEntries || [], knownList(state.settings));
     state.wordIndexSerial++;
   }
 
@@ -1764,8 +1796,9 @@
 
   // The piece of `text` a viewer pointing at position `pos` means, by the word boundaries in
   // `starts`: the segment holding the position and, for a single kanji, the hiragana segments
-  // after it (ICU cuts 食べて into 食|べ|て). Not a dictionary form, but near enough for a list
-  // the popup lets the viewer edit; entryWordFor() looks for the deck's own word first.
+  // after it up to the first particle (ICU cuts 食べて into 食|べ|て, and 私はこれが into
+  // 私|は|これ|が, where the kanji is a word of its own). Not a dictionary form, but near enough
+  // for a list the popup lets the viewer edit; entryWordFor() looks for the deck's own word first.
   function segmentAt(text, starts, pos) {
     if (!text) return null;
     const at = Math.max(0, Math.min(pos, text.length - 1));
@@ -1775,13 +1808,29 @@
     const start = bounds[k];
     let end = bounds[k + 1];
     if (end - start === 1 && KANJI_RE.test(text[start])) {
+      const particles = particleStarts(text, starts);
       for (let j = k + 1; j + 1 < bounds.length; j++) {
         const piece = text.slice(bounds[j], bounds[j + 1]);
-        if (!piece || ![...piece].every((ch) => SHISUKO_WORDS.isHiragana(ch))) break;
+        if (!piece || particles.has(bounds[j]) || ![...piece].every((ch) => SHISUKO_WORDS.isHiragana(ch))) break;
         end = bounds[j + 1];
       }
     }
     return { start, end, text: text.slice(start, end) };
+  }
+
+  // Where the matcher finds a particle in `text`, counting the particles as known with no deck:
+  // the okurigana ICU cut off a kanji (食|べ|て, 走|っ|た) ends there, while a noun's particle
+  // (私|は, 猫|が, 本|を, 前|から) is no okurigana at all. The matcher's own guard keeps the
+  // inflection after the okurigana (the て of 食べて) and the pieces of a verb ICU cut up in a
+  // particle's shape out of it, so this asks it rather than the list of particles.
+  function particleStarts(text, starts) {
+    const found = new Set();
+    let at = 0;
+    for (const run of SHISUKO_WORDS.markWords(text, SHISUKO_WORDS.buildIndex([], []), starts, { particles: true })) {
+      if (run.status) found.add(at);
+      at += run.text.length;
+    }
+    return found;
   }
 
   // The deck's or the list's own word for `piece`, a word span's text or an ICU segment: the
@@ -1819,27 +1868,98 @@
   }
 
   // The word Alt+Shift+K is about: the text selected inside the subtitle box or the transcript,
-  // when there is one; else the run under the pointer where it was last seen over the player: a
-  // word span's whole text, or the ICU segment of plain text there, either replaced by the
-  // deck's own word when the index knows the form (entryWordFor). Null for nothing usable.
+  // when there is one (Yomitan selects the text it scanned while its popup is up); else the run
+  // under the pointer where it was last seen over the player: a word span's whole text, or the
+  // ICU segment of plain text there, and for an honorific prefix the word it fronts. Either is
+  // replaced by the deck's own word when the index knows the form (entryWordFor). Null for
+  // nothing usable, and for a pointer that has left the player (onPlayerMouseLeave): the line
+  // that was under it has moved on since, or the transcript has scrolled, and what is at that
+  // place now is no word the viewer pointed at. A hover pause keeps it: the video waits for the
+  // pointer, gone to a dictionary popup, and the line stays where it was.
   function knownTarget() {
     const selected = selectedText();
-    if (selected) return selected;
-    const caret = caretAt(state.lastPointer.x, state.lastPointer.y);
+    if (selected) return entryWordFor(selected) || selected;
+    if (!state.pointerInPlayer && !state.hoverPaused) return null;
+    const { x, y } = state.lastPointer;
+    const caret = caretAt(x, y);
     if (!caret) return null;
     const drawn = drawnAround(caret.node);
     if (!drawn || !drawn.cue) return null;
     const text = drawn.cue.text;
-    let piece = drawn.span ? drawn.span.textContent : null;
-    if (!drawn.span) {
-      const pos = offsetIn(drawn.el, caret.node, caret.offset);
-      if (pos === null) return null;
+    const gap = offsetIn(drawn.el, caret.node, caret.offset);
+    if (gap === null) return null;
+    const on = characterUnder(drawn.el, gap, x, y);
+    const span = on ? on.span : drawn.span;
+    let piece = null;
+    if (span) {
+      const word = HONORIFICS.has(span.textContent) ? wordAfter(drawn.el, span) : null;
+      piece = (word || span).textContent;
+    } else {
       const look = state.cueLooks.get(drawn.cue);
-      const segment = segmentAt(text, look ? look.starts : SHISUKO_WORDS.wordStarts(text), pos);
+      const starts = look ? look.starts : SHISUKO_WORDS.wordStarts(text);
+      let segment = segmentAt(text, starts, on ? on.index : gap);
+      if (segment && HONORIFICS.has(segment.text) && segment.end < text.length) segment = segmentAt(text, starts, segment.end);
       piece = segment ? segment.text : null;
     }
     const word = knownWordFrom(piece);
     return word ? entryWordFor(word) || word : null;
+  }
+
+  // The character the pointer at (x, y) is on, for a caret at `gap` in what renderText() drew in
+  // `el`: its index and the word span holding it (null for plain text). The caret APIs answer the
+  // gap between two characters nearest the point, which over the right half of a character is
+  // the gap after it, so the character before the gap is the one when its box holds the point,
+  // else the one after (Yomitan checks the character's box for the same reason). Null when
+  // neither box holds it (the pointer between two rows, past the text's end) or there are no
+  // boxes to ask: the gap is then read as the character after it.
+  function characterUnder(el, gap, x, y) {
+    if (typeof document.createRange !== "function") return null;
+    try {
+      for (const index of [gap - 1, gap]) {
+        const at = drawnCharacter(el, index);
+        if (!at) continue;
+        const range = document.createRange();
+        range.setStart(at.node, at.offset);
+        range.setEnd(at.node, at.offset + 1);
+        const box = range.getBoundingClientRect();
+        if (box && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return { index, span: at.span };
+      }
+    } catch (err) {
+      // A node gone from the page since the caret was read: no box, and the gap as it came.
+    }
+    return null;
+  }
+
+  // The text node holding the character at `index` of what renderText() drew in `el`, the
+  // character's offset in it, and the word span around it (null for plain text). Null outside
+  // the text.
+  function drawnCharacter(el, index) {
+    if (index < 0) return null;
+    const children = el.childNodes;
+    let at = 0;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const length = child.textContent.length;
+      if (index < at + length) {
+        if (child.nodeType === 3) return { node: child, offset: index - at, span: null };
+        const inner = child.childNodes[0];
+        return inner && inner.nodeType === 3 ? { node: inner, offset: index - at, span: child } : null;
+      }
+      at += length;
+    }
+    return null;
+  }
+
+  // The word span right after `span` in `el`, for an honorific prefix drawn in a span of its own
+  // before the word it fronts ([お][風呂]); null when plain text or nothing follows.
+  function wordAfter(el, span) {
+    const children = el.childNodes;
+    for (let i = 0; i + 1 < children.length; i++) {
+      if (children[i] !== span) continue;
+      const next = children[i + 1];
+      return next.nodeType === 1 && hasClass(next, "shisuko-word") ? next : null;
+    }
+    return null;
   }
 
   function selectedText() {
@@ -1864,6 +1984,13 @@
     }
     const list = knownList(state.settings);
     const at = list.indexOf(word);
+    // A particle never goes into the index (buildIndex drops it, as it drops a card for one): on
+    // the list it would colour nothing, and the toast would claim what no line shows. One that is
+    // on the list already (typed in the popup) still comes off it.
+    if (at < 0 && !SHISUKO_WORDS.buildIndex([], [word]).size) {
+      showToast(`${word} is a particle: the "Particles count as known" switch decides its colour`, "warn");
+      return;
+    }
     if (at >= 0) list.splice(at, 1);
     else list.push(word);
     saveSettings({ knownWords: list.join("\n") }).then((res) => {
@@ -2392,12 +2519,19 @@
     // Mutated, not replaced: this runs on every mouse move across the player.
     state.lastPointer.x = ev.clientX;
     state.lastPointer.y = ev.clientY;
+    state.pointerInPlayer = true;
     state.hoverSeenAt = Date.now();
     if (!state.hoverPaused || !state.awaitingPlayerMove) return;
     if (state.subBox && state.subBox.contains(ev.target)) return;
     if (!isYouTubeElement(ev.target)) return;
     state.awaitingPlayerMove = false;
     scheduleResume();
+  }
+
+  // The pointer has left the player (the transcript panel is part of it): its last position
+  // stays for the resume (scheduleResume), but no longer says what the viewer points at.
+  function onPlayerMouseLeave() {
+    state.pointerInPlayer = false;
   }
 
   function scheduleResume() {

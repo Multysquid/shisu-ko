@@ -24,6 +24,18 @@ test("the schema is frozen and has the expected core keys", () => {
   assert.equal(schema.serverUrl, "http://127.0.0.1:8790");
 });
 
+// The word colours need Anki and a deck, so both start off; of the switches that refine them,
+// particles count as known unless the viewer says otherwise, katakana words do not, and the
+// viewer's own list starts empty.
+test("the word colours start off, particles count as known, katakana and the known list start empty", () => {
+  const schema = loadSchema();
+  assert.equal(schema.cardStatus, false);
+  assert.equal(schema.pitchAccent, false);
+  assert.equal(schema.particlesKnown, true);
+  assert.equal(schema.katakanaKnown, false);
+  assert.equal(schema.knownWords, "");
+});
+
 test("popup.html has an input for every setting", () => {
   const schema = loadSchema();
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
