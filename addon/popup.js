@@ -76,6 +76,13 @@ const dirty = new Set();
 // reports no change then). The store notifies before the background's write resolves and the
 // reply goes out, so the reply never overtakes the echo the field is waiting for.
 const inFlight = new Map();
+// What each text field held when it was last put in from the store (init, onStorageChanged) or
+// sent (flushSave), read as readField() reads it. A text field with the focus keeps a change made
+// elsewhere out only while its value differs from this, that is while the viewer is typing in it:
+// the focus alone says nothing (it stays on the known-words list of the options page while the
+// viewer is on YouTube marking words), and a list that skipped those marks would save itself
+// over them at its next edit.
+const typedBaseline = new Map();
 // The debounced save only remembers the last event, so a server-address or model edit leaves a
 // note here that the save flushes: "server" starts the status over, "model" refreshes the hint.
 let serverCheckPending = null;
@@ -147,7 +154,23 @@ function readField(el) {
   if (el.type === "range" || el.type === "number") return Number(el.value);
   // A colour well always reports a normalised "#rrggbb"; trimming it would be harmless but a lie.
   if (el.type === "color") return el.value;
+  // The known words: one per line, each trimmed, blank lines out (the content script reads the
+  // setting the same way, so what is stored is what it uses).
+  if (el.type === "textarea") return knownWordsText(el.value);
   return el.value.trim();
+}
+
+function knownWordsText(value) {
+  return String(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+// A field the viewer types in: its edit is done at its change event, not at every keystroke.
+function typedField(el) {
+  return el.type === "text" || el.type === "textarea";
 }
 
 // Each range shows its value and paints the travelled part of its own track (the --fill custom
@@ -461,7 +484,10 @@ function flushSave() {
   // feature, on since an earlier save, is not in it.
   const on = wordColoursOn();
   const decks = pending === "deck" || (pending === "feature" && on);
-  for (const key of Object.keys(patch)) inFlight.set(key, patch);
+  for (const key of Object.keys(patch)) {
+    inFlight.set(key, patch);
+    if (typedBaseline.has(key)) typedBaseline.set(key, patch[key]);
+  }
   const saved = browser.runtime.sendMessage({ type: "saveSettings", settings: patch }).catch(() => {});
   saved.then(() => {
     // A later flush may have sent the field again: that one is still waited for.
@@ -487,7 +513,7 @@ function onStorageChanged(changes, area) {
   const landed = new Set(); // the fields another writer changed
   for (const key of FIELDS) {
     const el = document.getElementById(key);
-    if (!el || dirty.has(key) || (el.type === "text" && el === document.activeElement) || !Object.hasOwn(next, key)) continue;
+    if (!el || dirty.has(key) || typing(el, key) || !Object.hasOwn(next, key)) continue;
     const sent = inFlight.get(key);
     if (sent) {
       if (next[key] !== sent[key]) continue;
@@ -498,6 +524,7 @@ function onStorageChanged(changes, area) {
     // select given a value it has no option for shows none: the option first, the value after.
     if (key === "cardStatusDeck") renderDeckOptions(decksListed, decksSeen, next[key]);
     else setField(el, next[key]);
+    if (typedBaseline.has(key)) typedBaseline.set(key, readField(el));
     landed.add(key);
   }
   updateOutputs();
@@ -510,6 +537,12 @@ function onStorageChanged(changes, area) {
   const turnedOn = (key) => landed.has(key) && document.getElementById(key).checked;
   if (landed.has("cardStatusDeck") || turnedOn("cardStatus") || turnedOn("pitchAccent") || (on && landed.has("ankiUrl"))) refreshDecks();
   else if (!on && (landed.has("cardStatus") || landed.has("pitchAccent"))) setHint(document.getElementById("deck-hint"), "", "");
+}
+
+// Whether the viewer is typing in `el`: a text field with the focus whose value is no longer the
+// one last put in or sent (see typedBaseline).
+function typing(el, key) {
+  return typedField(el) && el === document.activeElement && readField(el) !== typedBaseline.get(key);
 }
 
 // The status line answers the popup's first question: can it transcribe right now? The badge word
@@ -945,16 +978,19 @@ async function init() {
   renderDeckOptions([], undefined, settings.cardStatusDeck);
   for (const key of FIELDS) {
     const el = document.getElementById(key);
-    if (el) setField(el, settings[key]);
+    if (!el) continue;
+    setField(el, settings[key]);
+    if (typedField(el)) typedBaseline.set(key, readField(el));
   }
   updateOutputs();
   document.getElementById("reset-style").addEventListener("click", resetStyle);
   for (const key of FIELDS) {
     const el = document.getElementById(key);
     if (!el) continue;
-    // Text fields act once the edit is done (a URL, a model that would start a download); the
-    // font family is the exception, it previews and applies as it is typed, like a slider.
-    const live = el.type !== "text" || key === "subFontFamily";
+    // Text fields act once the edit is done (a URL, a model that would start a download, the
+    // known words, whose every save recolours every tab's lines); the font family is the
+    // exception, it previews and applies as it is typed, like a slider.
+    const live = !typedField(el) || key === "subFontFamily";
     const eventName = live && el.tagName !== "SELECT" ? "input" : "change";
     el.addEventListener(eventName, onChange);
   }

@@ -24,6 +24,18 @@ test("the schema is frozen and has the expected core keys", () => {
   assert.equal(schema.serverUrl, "http://127.0.0.1:8790");
 });
 
+// The word colours need Anki and a deck, so both start off; of the switches that refine them,
+// particles count as known unless the viewer says otherwise, katakana words do not, and the
+// viewer's own list starts empty.
+test("the word colours start off, particles count as known, katakana and the known list start empty", () => {
+  const schema = loadSchema();
+  assert.equal(schema.cardStatus, false);
+  assert.equal(schema.pitchAccent, false);
+  assert.equal(schema.particlesKnown, true);
+  assert.equal(schema.katakanaKnown, false);
+  assert.equal(schema.knownWords, "");
+});
+
 test("popup.html has an input for every setting", () => {
   const schema = loadSchema();
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
@@ -48,6 +60,16 @@ test("every content script match is a host permission, and YouTube is listed", (
 test("the content script runs as soon as the DOM is there, not after load", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   for (const entry of manifest.content_scripts) assert.equal(entry.run_at, "document_end");
+});
+
+// The keyboard commands: the background forwards each by name to the watched tab, and the
+// content script's listener answers to these names and no other.
+test("the manifest names the four commands, and the content script handles each", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
+  const keys = Object.fromEntries(Object.entries(manifest.commands).map(([name, cmd]) => [name, cmd.suggested_key.default]));
+  assert.deepEqual(keys, { "toggle-subtitles": "Alt+Shift+S", "toggle-transcript": "Alt+Shift+L", "mine-current": "Alt+Shift+M", "mark-known": "Alt+Shift+K" });
+  const content = fs.readFileSync(path.join(ADDON, "content.js"), "utf8");
+  for (const name of Object.keys(keys)) assert.ok(content.includes(`msg.name === "${name}"`), `content.js does not handle ${name}`);
 });
 
 test("settings.js is loaded before the scripts that use it", () => {
