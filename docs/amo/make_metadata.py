@@ -21,6 +21,7 @@ SUPPORT_URL = "https://github.com/Multysquid/shisu-ko/issues"
 CATEGORIES = ["language-support", "photos-music-videos"]  # at most two, slugs from /api/v5/addons/categories/
 TAGS = ["youtube", "streaming"]  # AMO's fixed tag vocabulary; unknown tags are rejected
 LICENSE = "MIT"  # SPDX-style slug of a built-in AMO license; must match LICENSE in the repo
+NOTES_LIMIT = 3000  # release notes and approval notes, each (AMO's version serializer)
 
 
 def read(name: str) -> str:
@@ -51,6 +52,13 @@ def main() -> None:
         fail(f"release-notes.md does not mention {version}, the version in addon/manifest.json")
     if len(description) > 15000:
         fail("description.md is longer than AMO's 15000 characters")
+    # AMO refuses a version whose notes run past 3000 characters ("Ensure this field has no more
+    # than 3000 characters"), and only when the release workflow submits the tag, so it is checked
+    # here, on every push. The full reviewer guide is reviewer-guide.md, linked from the notes.
+    if len(release_notes) > NOTES_LIMIT:
+        fail(f"release-notes.md is {len(release_notes)} characters, AMO allows {NOTES_LIMIT}")
+    if len(approval_notes) > NOTES_LIMIT:
+        fail(f"reviewer-notes.md is {len(approval_notes)} characters with the version filled in, AMO allows {NOTES_LIMIT}; the rest belongs in reviewer-guide.md")
 
     metadata = {
         "name": {"en-US": name},

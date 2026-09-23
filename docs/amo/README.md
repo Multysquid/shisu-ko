@@ -9,8 +9,9 @@ Since 0.14.0 the release workflow publishes every tag there, see *Every release*
 |---|---|
 | `summary.txt` | Listing summary (max 250 characters, no URLs) |
 | `description.md` | Listing description (AMO renders this Markdown subset: bold, lists, links, code) |
-| `release-notes.md` | Version notes shown on the listing; edit per release |
-| `reviewer-notes.md` | Notes to the reviewer: architecture, test steps, permission rationale. Not public |
+| `release-notes.md` | Version notes shown on the listing; edit per release. **At most 3,000 characters** (AMO refuses more) |
+| `reviewer-notes.md` | Notes to the reviewer, submitted with each version: a summary, a quick test, the permissions, and a link to the full guide at the tag. **At most 3,000 characters** with `<version>` filled in. Not public |
+| `reviewer-guide.md` | The full reviewer guide: every feature's test steps, every permission and request. Linked from the notes; no length limit |
 | `privacy-policy.md` | Privacy policy; Developer Hub only |
 | `icon-128.png`, `icon-256.png` | Listing icon (rendered from `addon/icons/icon.svg`); Developer Hub only |
 | `screenshots/` | Listing screenshots with the captions below; Developer Hub only |
@@ -43,8 +44,11 @@ Screenshot captions, in order:
 3. Build: `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"`
    gives `dist/shisu-ko-<version>.zip`. The zip is the source: there is no build step, so answer
    **No** when AMO asks whether source code needs to be submitted.
-4. Update `release-notes.md` (it has to mention the new version: `make_metadata.py` refuses it
-   otherwise, and the Tests workflow runs that check on every push), and `reviewer-notes.md` if permissions or the test steps changed.
+4. Update `release-notes.md` (it has to mention the new version, and both it and
+   `reviewer-notes.md` must stay within AMO's 3,000 characters: `make_metadata.py` refuses them
+   otherwise, and `npm test` and the Tests workflow check it on every push, since AMO itself only
+   says so once the tag is pushed), and `reviewer-guide.md` (then the summary in
+   `reviewer-notes.md`) if permissions or the test steps changed.
    A changed `privacy-policy.md` is pasted into the Developer Hub by hand (the listing's **Edit**
    pages): only the first submission takes it from the file, `publish-addon.cmd` never uploads
    it. 0.9.0 changes it (the release check against GitHub), and so does the word colours
