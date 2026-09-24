@@ -181,5 +181,6 @@ The unlisted `.xpi` files of 0.7.1 and 0.8.0 to 0.13.0 are the same kind of buil
 none (AMO refused its listing texts). 0.14.1's only possible file is its listed one: once AMO
 approves 0.14.1, `amo-xpi.yml` run by hand with `tag` `v0.14.1` attaches it (the schedule looks at
 the newest release only), and a listed submission of a newer release before that approval
-disables 0.14.1, which then keeps the zips alone. 0.14.2, held for a human review, carries the
-unsigned `.xpi` until AMO signs it.
+disables 0.14.1, which then keeps the zips alone. 0.14.2 has a tag and no release: its unlisted
+upload waits for a human review on AMO, and its release was withdrawn. 0.14.3 is the first
+release of the workflow that always attaches an `.xpi`.
