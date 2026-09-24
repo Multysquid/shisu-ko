@@ -155,16 +155,19 @@ Temporary install (until Firefox restarts):
 3. Firefox asks for access to youtube.com the first time you open the popup; click **Allow on
    YouTube** (or right-click the toolbar icon > Always Allow on www.youtube.com).
 
-Permanent install: [Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/),
-from where Firefox keeps it up to date. Every release is published there by the release
-workflow; the GitHub release carries the same signed `shisu_ko-<version>.xpi` once
-addons.mozilla.org has approved it (usually minutes, a manual review can take days), which
-installs the same add-on and is updated from the listing too. Regular Firefox only keeps signed
+Permanent install: every [GitHub release](https://github.com/Multysquid/shisu-ko/releases/latest)
+carries `shisu_ko-<version>.xpi`, signed by addons.mozilla.org for self-distribution, usually
+within minutes of the release; open it in Firefox to install. Or install
+[Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/), which gets
+selected releases after AMO's review (that can take days), so it may be a release or two behind
+GitHub. Both are the same add-on, and Firefox updates either from the listing: a GitHub install
+moves on to the first listed version newer than its own (a release published there is listed as
+its number plus `.1`, the same code). Regular Firefox only keeps signed
 add-ons; Firefox Developer Edition, Nightly and ESR can instead load the unsigned zip with
 `xpinstall.signatures.required` set to `false` in `about:config`. The popup says when a newer
 release is out (see [Updates](#1-start-the-server)). Since 0.9.0 the extension needs one more permission,
 "Display notifications to you": opening the new `.xpi` over an older version lists it in the
-install prompt, and an automatic update (from the listing, once it is live) is held back by
+install prompt, and an automatic update (from the listing, for a release published there) is held back by
 Firefox until you approve it, from the notice on the application menu (≡) or under Add-ons
 and themes.
 
@@ -708,7 +711,7 @@ docker/               Windows wrappers for docker compose and the WSL engine ins
 docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing)
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example, flake.nix
 sign-addon.cmd        signs a local build through addons.mozilla.org (unlisted; manual fallback)
-publish-addon.cmd     submits a version to the public listing by hand (the release workflow does it)
+publish-addon.cmd     submits a release to the public listing by hand (fallback for amo-listing.yml)
 AGENTS.md             architecture notes, invariants and gotchas for contributors and coding agents
 ```
 

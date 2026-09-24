@@ -22,10 +22,14 @@ Nothing is sent to us or to any third party. The extension only ever contacts yo
 content script), the local server, the local AnkiConnect and, for its update check, GitHub's
 public API (one anonymous GET, see PERMISSIONS). It contains no remote code, no
 minified or generated code, no third-party libraries and no build step: the uploaded zip is the
-source, identical to the addon/ folder of https://github.com/Multysquid/shisu-ko (tag v<version>).
+source, identical to the addon/ folder of https://github.com/Multysquid/shisu-ko (tag v<version>)
+but for the version line below.
 
-The uploaded zip is dist/firefox from the release workflow (scripts/build.mjs): the addon/ folder
-without its tests. The same signed file is attached to the GitHub release.
+The uploaded zip is dist/firefox, built from the tag by .github/workflows/amo-listing.yml
+(scripts/build.mjs): the addon/ folder without its tests, with one line changed, the manifest's
+version, which reads <version>.1 (scripts/amo-xpi.mjs listing). Every release is signed for
+self-distribution under its own number and attached to its GitHub release, and AMO takes a
+version number once, in either channel, so the listed build of the same code carries the ".1".
 
 HOW TO TEST (about 10 minutes, no GPU or account needed)
 
