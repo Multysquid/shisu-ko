@@ -490,7 +490,12 @@ function releaseFromApi(json) {
   const tag = json.tag_name.trim();
   const https = (value) => (typeof value === "string" && /^https:\/\//i.test(value) ? value : null);
   const assets = Array.isArray(json.assets) ? json.assets : [];
-  const xpi = assets.find((asset) => asset && typeof asset.name === "string" && asset.name.toLowerCase().endsWith(".xpi"));
+  // The signed .xpi: a release AMO has not signed yet carries the unsigned build as
+  // shisu-ko-<version>-firefox-unsigned.xpi, which regular Firefox refuses to install.
+  const xpi = assets.find((asset) => {
+    const name = asset && typeof asset.name === "string" ? asset.name.toLowerCase() : "";
+    return name.endsWith(".xpi") && !name.endsWith("-unsigned.xpi");
+  });
   return { version: tag.replace(/^v/i, ""), tag, url: https(json.html_url), xpi: xpi ? https(xpi.browser_download_url) : null };
 }
 

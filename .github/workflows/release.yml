@@ -42,11 +42,11 @@ jobs:
       # Regular Firefox only keeps signed add-ons. The built Firefox package is signed through
       # addons.mozilla.org (unlisted channel: self-distribution, no listing) with the AMO API key
       # kept in the repository secrets, before the release is made: web-ext uploads it, waits up to
-      # a quarter of an hour for AMO to sign it and downloads the signed .xpi into dist/, and the
-      # release carries it with the zips. A version AMO has not signed by then fails the job; AMO
-      # takes a number once, so a re-run, once AMO has signed it, takes the signed file of the
-      # first upload from AMO instead, and only when it holds this tag's build. Without the
-      # secrets the release ships the unsigned zips.
+      # a quarter of an hour for AMO to sign it and downloads the signed .xpi into dist/. AMO holds
+      # some versions for a human review, which can take days; such a release goes out with the
+      # unsigned .xpi (below), and amo-xpi.yml puts the signed one in its place once AMO has signed
+      # it. AMO takes a number once, so a re-run takes the signed file of the first upload from AMO
+      # instead, and only when it holds this tag's build.
       - name: Sign the Firefox package
         if: env.AMO_KEY == 'true'
         env:
@@ -54,13 +54,31 @@ jobs:
           WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          state="$(node scripts/amo-xpi.mjs status "$version")"
-          if [ "$state" = missing ]; then
-            npx --yes web-ext@10.7.0 sign --source-dir dist/firefox --artifacts-dir dist --channel unlisted --no-input
-          else
-            echo "::notice::AMO already has $version ($state) from an earlier run; its signed file is taken from AMO"
-            node scripts/amo-xpi.mjs fetch "$version" --out dist --wait 900
-            node scripts/amo-xpi.mjs same-build dist/*.xpi dist/firefox
+          wait=900
+          if [ "$(node scripts/amo-xpi.mjs status "$version")" = missing ]; then
+            if npx --yes web-ext@10.7.0 sign --source-dir dist/firefox --artifacts-dir dist --channel unlisted --no-input; then
+              exit 0
+            fi
+            if [ "$(node scripts/amo-xpi.mjs status "$version")" = missing ]; then
+              echo "::error::AMO did not take the upload of $version"
+              exit 1
+            fi
+            wait=0 # the signing above has waited its quarter of an hour already
+          fi
+          code=0
+          node scripts/amo-xpi.mjs fetch "$version" --out dist --wait "$wait" || code=$?
+          case "$code" in
+            0) node scripts/amo-xpi.mjs same-build dist/*.xpi dist/firefox ;;
+            3|4) echo "::warning::AMO has not signed $version (held for a human review?): the release carries the unsigned .xpi, and amo-xpi.yml attaches the signed one once AMO has signed it" ;;
+            *) exit "$code" ;;
+          esac
+      # Every release carries an .xpi: the signed one above, or else the unsigned build under a name
+      # that says so (it installs in Firefox Developer Edition, Nightly and ESR with signatures off,
+      # or for the session from about:debugging), also without the AMO key in the secrets.
+      - name: Add the unsigned .xpi when there is no signed one
+        run: |
+          if ! compgen -G "dist/*.xpi" > /dev/null; then
+            cp "dist/shisu-ko-${GITHUB_REF_NAME#v}-firefox.zip" "dist/shisu-ko-${GITHUB_REF_NAME#v}-firefox-unsigned.xpi"
           fi
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

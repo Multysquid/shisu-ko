@@ -1,10 +1,11 @@
 name: Attach the signed Firefox package
 
 # The release workflow signs each tag through addons.mozilla.org before it makes the release, so
-# a release normally comes with its .xpi. This attaches one to a release that exists without it,
-# once AMO has signed the version and the file is shown to hold the release's own Firefox build:
-# 0.14.1's listed file (if AMO approves it) and 0.14.2's, whose release came out before AMO signed
-# it. The schedule asks AMO only while the newest release has no .xpi yet; an older one is
+# a release normally comes with its signed .xpi; a version AMO holds for a human review goes out
+# with the unsigned one. This attaches the signed .xpi to a release that has none, once AMO has
+# signed the version and the file is shown to hold the release's own Firefox build, and then
+# removes the unsigned stand-in (0.14.1's only file is its listed one, if AMO approves it). The
+# schedule asks AMO only while the newest release has no signed .xpi yet; an older one is
 # attached by a run by hand with its tag. A version AMO has no file for is a warning; one AMO has
 # rejected fails the run: answer the reviewer and release the next patch version.
 on:
@@ -49,8 +50,9 @@ jobs:
             exit 1
           fi
           assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
-          if grep -q '\.xpi$' <<<"$assets"; then
-            echo "$tag already has its .xpi"
+          unsigned="shisu-ko-${tag#v}-firefox-unsigned.xpi"
+          if grep -v -x -F "$unsigned" <<<"$assets" | grep -q '\.xpi$'; then
+            echo "$tag already has its signed .xpi"
             exit 0
           fi
           code=0
@@ -63,6 +65,10 @@ jobs:
                 exit 1
               fi
               gh release upload "$tag" dist/signed/*.xpi --clobber
+              # The signed file takes the unsigned one's place.
+              if grep -q -x -F "$unsigned" <<<"$assets"; then
+                gh release delete-asset "$tag" "$unsigned" --yes
+              fi
               ;;
             3) echo "AMO has not signed $tag yet" ;;
             4)

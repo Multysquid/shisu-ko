@@ -66,7 +66,7 @@ test("a tag makes the release and its self-distributed .xpi, and nothing for the
   assert.match(release, /tags: \["v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+"\]/);
   const lines = shellLines(release);
   // web-ext signs the package and waits for AMO's signature itself, as it did up to 0.13.0.
-  assert.equal(count(lines, /^npx --yes web-ext@\S+ sign --source-dir dist\/firefox --artifacts-dir dist --channel unlisted --no-input$/), 1);
+  assert.equal(count(lines, /^if npx --yes web-ext@\S+ sign --source-dir dist\/firefox --artifacts-dir dist --channel unlisted --no-input; then$/), 1);
   assert.equal(count(lines, /--approval-timeout/), 0);
   assert.equal(count(lines, /--channel listed/), 0);
   // Listing texts sent with a self-distributed upload would rewrite the public listing, and the
@@ -75,20 +75,32 @@ test("a tag makes the release and its self-distributed .xpi, and nothing for the
   // Nor through the build tests: they run without the listing texts' own test.
   assert.equal(count(lines, /^npm (run )?test(:build)?$/), 0);
   assert.equal(count(lines, /^node --test \$\(ls scripts\/tests\/\*\.test\.mjs \| grep -v '\/amo-metadata\\\.test\\\.mjs\$'\)$/), 1);
-  // A re-run finds the number taken (AMO takes it once): it takes AMO's signed file of the first
-  // upload instead, and only when that file holds this tag's build.
-  const state = at(lines, /^state="\$\(node scripts\/amo-xpi\.mjs status "\$version"\)"$/);
-  const missing = at(lines, /^if \[ "\$state" = missing \]; then$/);
+  // A number AMO has not got is uploaded and signed by web-ext; an upload AMO never took fails the
+  // job. A number AMO has (a re-run, or a signature that did not come within web-ext's wait) takes
+  // AMO's signed file only when it holds this tag's build; none yet (a human review) is a warning,
+  // and the release goes out with the unsigned .xpi.
+  const missing = at(lines, /^if \[ "\$\(node scripts\/amo-xpi\.mjs status "\$version"\)" = missing \]; then$/);
   const sign = at(lines, /web-ext@\S+ sign /);
-  const fetch = at(lines, /^node scripts\/amo-xpi\.mjs fetch "\$version" --out dist --wait 900$/);
-  const same = at(lines, /^node scripts\/amo-xpi\.mjs same-build dist\/\*\.xpi dist\/firefox$/);
-  const order = { state, missing, sign, fetch, same };
+  const signed = at(lines, /^exit 0$/);
+  const notTaken = lines.findIndex((line, i) => i > sign && /^if \[ "\$\(node scripts\/amo-xpi\.mjs status "\$version"\)" = missing \]; then$/.test(line));
+  const fetch = at(lines, /^node scripts\/amo-xpi\.mjs fetch "\$version" --out dist --wait "\$wait" \|\| code=\$\?$/);
+  const same = at(lines, /^0\) node scripts\/amo-xpi\.mjs same-build dist\/\*\.xpi dist\/firefox ;;$/);
+  const unsignedWarning = at(lines, /^3\|4\) echo "::warning::/);
+  const order = { missing, sign, signed, notTaken, fetch, same, unsignedWarning };
   for (const [name, index] of Object.entries(order)) assert.ok(index >= 0, `release.yml has no ${name} line`);
-  assert.ok(state < missing && missing < sign && sign < fetch && fetch < same, "status, then sign or fetch and check");
-  // The release is made after the signing, and carries the .xpi beside the zips.
+  const indices = Object.values(order);
+  assert.deepEqual(indices, [...indices].sort((a, b) => a - b), "sign, or take AMO's file, in that order");
+  assert.match(lines[notTaken + 1], /^echo "::error::/);
+  assert.equal(lines[notTaken + 2], "exit 1");
+  // Every release carries an .xpi: the signed one, or else the unsigned build under a name that
+  // says so, with or without the AMO key (the step has no condition).
+  const unsignedStep = release.indexOf("- name: Add the unsigned .xpi when there is no signed one");
   const signStep = release.indexOf("- name: Sign the Firefox package");
   const releaseStep = release.indexOf("- name: Create GitHub release");
-  assert.ok(signStep >= 0 && releaseStep > signStep, "signed before the release is made");
+  assert.ok(signStep >= 0 && unsignedStep > signStep && releaseStep > unsignedStep, "signed, then the unsigned stand-in, then the release");
+  assert.match(release.slice(unsignedStep, releaseStep), /^- name: Add the unsigned \.xpi when there is no signed one\n {8}run: \|\n/);
+  assert.equal(count(lines, /^if ! compgen -G "dist\/\*\.xpi" > \/dev\/null; then$/), 1);
+  assert.equal(count(lines, /^cp "dist\/shisu-ko-\$\{GITHUB_REF_NAME#v\}-firefox\.zip" "dist\/shisu-ko-\$\{GITHUB_REF_NAME#v\}-firefox-unsigned\.xpi"$/), 1);
   assert.match(release.slice(releaseStep), /files: \|\n {12}dist\/\*\.zip\n {12}dist\/\*\.xpi\n/);
   assert.equal(count(lines, /gh release upload/), 0);
 });
@@ -132,6 +144,12 @@ test("the attach workflow only downloads what AMO signed", () => {
   const same = at(lines, /^if ! node scripts\/amo-xpi\.mjs same-build dist\/signed\/\*\.xpi "dist\/release\/shisu-ko-\$\{tag#v\}-firefox\.zip"; then$/);
   const upload = at(lines, /^gh release upload "\$tag" dist\/signed\/\*\.xpi --clobber$/);
   assert.ok(download >= 0 && same > download && upload > same && lines[same + 2] === "exit 1");
+  // The unsigned stand-in is no signed .xpi: it is looked past, and removed once the signed one
+  // is on the release.
+  assert.equal(count(lines, /^unsigned="shisu-ko-\$\{tag#v\}-firefox-unsigned\.xpi"$/), 1);
+  assert.equal(count(lines, /^if grep -v -x -F "\$unsigned" <<<"\$assets" \| grep -q '\\\.xpi\$'; then$/), 1);
+  const removeUnsigned = at(lines, /^gh release delete-asset "\$tag" "\$unsigned" --yes$/);
+  assert.ok(removeUnsigned > upload, "the unsigned stand-in goes once the signed file is on");
   // No file on AMO yet is a warning (the release job may still be uploading, or said so already);
   // a rejection fails the run, since the release job has usually ended green before it came.
   const four = at(lines, /^4\)$/);
