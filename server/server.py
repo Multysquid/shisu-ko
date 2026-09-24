@@ -85,7 +85,7 @@ MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-
 MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
                    "or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
-CACHE_FORMAT = 5  # bumped when cue geometry or fields change; older caches are ignored and transcribed again
+CACHE_FORMAT = 6  # bumped when cue geometry or fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
 LANGUAGE_MIN_SPEECH = 4.0        # a window with less speech than this gets no language vote:
@@ -1189,6 +1189,20 @@ def lyrics_spans(segs, offset: float, limits: Optional[CueLimits] = None) -> lis
     return merge_intervals(spans)
 
 
+def gate_segment(seg, offset: float, speech, lyrics: bool = False) -> tuple:
+    """(the segment's words on the video's clock, the gate that rejects it or None).
+
+    The one place a segment is judged, for build_window_cues() and for the prompt-skip check.
+    """
+    # Before the gates, not after: an unrepaired first word makes the segment's span cover a
+    # silence it never contained, and the VAD gate then deletes real speech (20 utterances in
+    # 17 minutes of the sample, キズナアイでーす and はじめまして! among them) while the anomaly
+    # gate scores its six-second "word" straight past the threshold.
+    words = repair_lead_words(absolute_words(seg, offset), speech)
+    reason = lyrics_reason(seg, words) if lyrics else hallucination_reason(seg, words, speech)
+    return words, reason
+
+
 def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: int, drops=None,
                       window_end: Optional[float] = None, lyrics: bool = False) -> tuple:
     """Gate hallucinated segments, build their cues and stamp each with its segment id.
@@ -1206,12 +1220,7 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
     out: list = []
     kept: list = []
     for seg in segs:
-        # Before the gates, not after: an unrepaired first word makes the segment's span cover a
-        # silence it never contained, and the VAD gate then deletes real speech (20 utterances in
-        # 17 minutes of the sample, キズナアイでーす and はじめまして! among them) while the anomaly
-        # gate scores its six-second "word" straight past the threshold.
-        words = repair_lead_words(absolute_words(seg, offset), speech)
-        reason = lyrics_reason(seg, words) if lyrics else hallucination_reason(seg, words, speech)
+        words, reason = gate_segment(seg, offset, speech, lyrics)
         if reason:
             if drops is not None:
                 drops[reason] = drops.get(reason, 0) + 1
@@ -1249,6 +1258,102 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
         cue["start"] = round(cue["start"], 2)
         cue["end"] = round(max(cue["end"], cue["start"] + 0.05), 2)
     return normalise_gaps(out, limits), seg_id
+
+
+# The prompt sometimes makes Whisper open a window with a timestamp seconds past its first speech,
+# and whatever it jumped is never decoded: 6 to 23 s lost about once per 12 minutes of speech. An
+# unprompted decode of the same audio starts on time, so a skip is filled from one.
+PROMPT_SKIP_MIN_S = 3.0      # seconds of detected speech no kept segment reaches before a retry
+PROMPT_SKIP_SLACK = 0.5      # how near a kept segment must come to count as having heard a stretch
+PROMPT_SPLICE_OVERLAP = 0.2  # an unprompted segment overlapping a kept one by more is a duplicate
+
+
+def stretched_over_speech(words, speech, min_s: float = PROMPT_SKIP_MIN_S) -> bool:
+    """True when one word spans `min_s` seconds of detected speech: no word is that long, so the
+    decoder jumped. A skip can hide inside a segment the gates keep, and this is how it shows:
+    a prompted first window decoded as one line, 言い返す!, whose 返 runs over
+    thirteen seconds of speech it never decoded. A last word stretched over the silence after an
+    utterance, which Whisper writes often, spans no speech and is not this."""
+    return any(speech_seconds(speech, w.start, w.end) >= min_s for w in words)
+
+
+def kept_spans(segs, offset: float, speech) -> list:
+    """[start, end] on the video's clock of every talk segment that hears what it spans: the gates
+    keep it, as build_window_cues() judges, and no word of it is stretched over speech."""
+    spans = []
+    for seg in segs:
+        words, reason = gate_segment(seg, offset, speech)
+        if reason is None and not stretched_over_speech(words, speech):
+            spans.append([words[0].start, words[-1].end])
+    return spans
+
+
+def skipped_speech(kept, speech, min_s: float = PROMPT_SKIP_MIN_S, slack: float = PROMPT_SKIP_SLACK) -> list:
+    """[[start, end, seconds], ...]: the stretches of `speech` no span of `kept` comes within `slack` of.
+
+    Consecutive unreached pieces with no kept span between them are one stretch, since a skip runs
+    across the pauses of what it skipped; a stretch holding under `min_s` seconds of speech is
+    left alone (a breath, a laugh, a line the gates rightly dropped).
+    """
+    reach = merge_intervals([[a - slack, b + slack] for a, b in kept])
+    groups: list = []
+    for a, b in subtract_intervals(speech, reach):
+        if groups and not any(x < a and y > groups[-1][1] for x, y in reach):
+            groups[-1][1] = b
+            groups[-1][2] += b - a
+        else:
+            groups.append([a, b, b - a])
+    return [g for g in groups if g[2] >= min_s]
+
+
+def splice_segments(segs, retry, offset: float, speech, stretches,
+                    max_overlap: float = PROMPT_SPLICE_OVERLAP) -> tuple:
+    """(`segs` with the segments of `retry` that fill a skipped stretch, in time order; how many were added).
+
+    A segment of the unprompted decode is taken when the gates keep it, no word of it is stretched
+    over speech, its midpoint lies inside one of `stretches` and it overlaps no kept segment of
+    `segs` (kept_spans()) by more than `max_overlap`. A segment of `segs` stretched over speech
+    that an added one overlaps goes: it would put its one-character cue across the real lines.
+    """
+    kept = kept_spans(segs, offset, speech)
+    added = []
+    for seg in retry:
+        words, reason = gate_segment(seg, offset, speech)
+        if reason is not None or stretched_over_speech(words, speech):
+            continue
+        a, b = words[0].start, words[-1].end
+        mid = (a + b) / 2
+        if not any(x <= mid <= y for x, y, _ in stretches):
+            continue
+        if any(min(b, y) - max(a, x) > max_overlap for x, y in kept):
+            continue
+        added.append(seg)
+    if not added:
+        return list(segs), 0
+    filled = [[offset + float(seg.start), offset + float(seg.end)] for seg in added]
+    broken = [seg for seg in segs
+              if stretched_over_speech(gate_segment(seg, offset, speech)[0], speech)
+              and any(min(b, offset + float(seg.end)) > max(a, offset + float(seg.start)) for a, b in filled)]
+    kept_segs = [seg for seg in segs if not any(seg is x for x in broken)]
+    return sorted(kept_segs + added, key=lambda seg: float(seg.start)), len(added)
+
+
+def retry_prompt_skips(model, audio, options: dict, segs, offset: float, speech) -> tuple:
+    """(segments, seconds skipped, segments added) of a talk window decoded with `options`.
+
+    When the prompted decode left PROMPT_SKIP_MIN_S or more of detected speech unreached, the
+    window is decoded once more without the prompt, everything else the same, and the segments
+    that fill the skip are spliced in. Seconds skipped is 0.0 when no retry ran. Transcriber.process()
+    and dump_words.py both call this, so the A/B rig decodes what the server does.
+    """
+    if not options.get("initial_prompt"):
+        return list(segs), 0.0, 0
+    stretches = skipped_speech(kept_spans(segs, offset, speech), speech)
+    if not stretches:
+        return list(segs), 0.0, 0
+    retry, _info = model.transcribe(audio, **dict(options, initial_prompt=None))
+    spliced, added = splice_segments(segs, list(retry), offset, speech, stretches)
+    return spliced, sum(g[2] for g in stretches), added
 
 
 # --------------------------------------------------------------------------- sessions
@@ -2334,6 +2439,9 @@ class Transcriber(threading.Thread):
         try:
             segments, _info = self.app.model.transcribe(audio, **options)
             segs = list(segments)
+            skipped, spliced = 0.0, 0
+            if not lyrics:
+                segs, skipped, spliced = retry_prompt_skips(self.app.model, audio, options, segs, start, speech)
         except Exception as exc:  # noqa: BLE001
             log.error("[%s] transcription of %s-%s failed: %s", s.video_id, fmt_time(start), fmt_time(end), exc)
             if "cuda" in str(exc).lower() or "cudnn" in str(exc).lower() or "cublas" in str(exc).lower():
@@ -2389,11 +2497,13 @@ class Transcriber(threading.Thread):
         elapsed = time.time() - t0
         gated = ", ".join(f"{k}:{v}" for k, v in sorted(drops.items()) if not k.startswith("_"))
         log.info(
-            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s",
+            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s",
             s.video_id, fmt_time(start), fmt_time(new_end), added, elapsed,
             (new_end - start) / max(elapsed, 1e-3), " [lyrics]" if lyrics else "",
             f" [dropped {gated}]" if gated else "",
             f" [{sum(b - a for a, b in unsung):.0f} s heard nothing in, planned again]" if unsung else "",
+            f" [{skipped:.0f} s skipped with the prompt, {spliced} segments from a decode without it]"
+            if skipped else "",
         )
         self.app.save_cache(s)
 

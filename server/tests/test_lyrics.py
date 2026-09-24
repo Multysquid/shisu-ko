@@ -814,7 +814,7 @@ def test_save_cache_writes_the_rule_and_its_own_record_reloads_as_covered(monkey
     data = json.loads((tmp_path / f"{VIDEO}.cues.json").read_text(encoding="utf-8"))
     assert data["lyrics"] == "auto"
     # Every record carries the rule and the current format; an older one is dropped whole.
-    assert data["format"] == server.CACHE_FORMAT == 5
+    assert data["format"] == server.CACHE_FORMAT == 6
 
     reloaded = server.Session(video_id=VIDEO, url="u")
     app.load_cache(reloaded)
