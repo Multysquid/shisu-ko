@@ -105,7 +105,11 @@ The demo recording in the README shows the expected behaviour: https://github.co
    again, and the status line reads "Updating server" until the new version answers (up to
    two minutes, the model is loaded again). A server started without run.sh, or with
    --no-update, answers 409 and the banner says it cannot update itself. With a checkout at
-   the newest release nothing but the result line shows.
+   the newest release and the extension of that release nothing but the result line shows. The
+   listing gets releases by hand and can trail GitHub: when a release newer than <version>
+   exists, the banner reads "A newer extension (<release>) is on the release page (the
+   addons.mozilla.org listing may get it later)" with a button that opens the release page. That
+   is the update check working, not a fault of the build under review.
 
 10. Optional, the word colours (needs Anki with AnkiConnect and a deck with a few Japanese
     words in it): in the popup's "Word colours" section tick "Colour words by their Anki card"

@@ -835,8 +835,15 @@ function renderUpdate() {
       message = `Shisu-ko ${latest} is available — the server runs ${server}, which cannot be updated from here; restart it by hand to update (run.cmd / run.sh update it at start)`;
       showLater = true;
     } else if (decision.extension === "newer") {
-      message = `A newer extension (${latest}) is on the release page; Firefox installs it from addons.mozilla.org once the listing is live`;
-      showRelease = true;
+      // Firefox (START_AVAILABLE is the moz-extension: test) needs the signed .xpi, which the
+      // release gets once AMO has signed it: minutes after the tag, later for a version AMO holds
+      // back. Until the check sees it, the release page has nothing to install, so it is not
+      // offered; Chrome's zip is there from the start.
+      const signed = !START_AVAILABLE || !!(updateInfo.latest && updateInfo.latest.xpi);
+      message = signed
+        ? `A newer extension (${latest}) is on the release page (the addons.mozilla.org listing may get it later)`
+        : `A newer extension (${latest}) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it`;
+      showRelease = signed;
       showLater = true;
     }
   }
@@ -929,7 +936,8 @@ async function checkForUpdatesFromPopup() {
   renderStatus();
 }
 
-// The release page, for the extension's own package until addons.mozilla.org carries it.
+// The release page: every release's signed .xpi (and the Chrome zip); the addons.mozilla.org
+// listing gets only the releases published there, later.
 function openReleasePage() {
   const latest = updateInfo && updateInfo.latest;
   const url = latest && typeof latest.url === "string" && /^https:\/\//.test(latest.url) ? latest.url : RELEASES_URL;

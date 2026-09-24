@@ -429,13 +429,25 @@ test("a server from before the launcher flag gets a banner that names the releas
 });
 
 test("an extension behind the release is sent to the release page", async () => {
-  const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer" });
-  assert.equal(popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page; Firefox installs it from addons.mozilla.org once the listing is live");
+  const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer", latest: { ...LATEST, xpi: "https://github.com/Multysquid/shisu-ko/releases/download/v0.9.0/shisu_ko-0.9.0.xpi" } });
+  assert.equal(popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page (the addons.mozilla.org listing may get it later)");
   assert.equal(popup.el("update-now").hidden, true);
   assert.equal(popup.el("update-release").hidden, false);
   popup.openReleasePage();
   await settle();
   assert.deepEqual(popup.opened, [LATEST.url]);
+});
+
+// The release is there before its signed .xpi: Firefox is not sent to a page it cannot install
+// from, Chrome (whose zip is there from the start) is.
+test("an extension behind a release without its signed .xpi yet is told so, and not sent to the page in Firefox", async () => {
+  const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer" });
+  assert.equal(popup.el("update-text").textContent, "A newer extension (0.9.0) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it");
+  assert.equal(popup.el("update-release").hidden, true);
+  assert.equal(popup.el("update-later").hidden, false);
+  const onChrome = await open({ health: healthOf("0.9.0", true), extension: "newer" }, "chrome-extension://test/");
+  assert.equal(onChrome.popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page (the addons.mozilla.org listing may get it later)");
+  assert.equal(onChrome.popup.el("update-release").hidden, false);
 });
 
 test("no banner while the server is offline, and none for a server that says no version", async () => {
