@@ -95,24 +95,25 @@ questions arrive by email and on the version's page in the Developer Hub, and ar
 
 ## Every release: the release workflow
 
-Pushing the tag runs `.github/workflows/release.yml`: the checks, the GitHub release with the
-zips, and the `.xpi`, nothing more. It uploads `dist/firefox` to AMO's unlisted channel
-(`web-ext sign --channel unlisted --approval-timeout 0`, with no listing texts; the AMO API key
-lives in the repository secrets `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET`). AMO signs an
-unlisted version for self-distribution on its own after the automatic validation, usually within
-minutes (it allows itself up to a day, longer for a version it picks for a manual review): the
-workflow waits up to 15 minutes for it (`scripts/amo-xpi.mjs fetch`) and attaches the signed
-`shisu_ko-<version>.xpi` to the GitHub release, a permanent install for regular Firefox that does
-not wait for any listing review. A version AMO has not signed by then gets its `.xpi` from
-`.github/workflows/amo-xpi.yml`, which runs every three hours and asks AMO only while the newest
-release has no `.xpi`; run it by hand (**Actions** > **Attach the signed Firefox package** >
-**Run workflow**, optionally with a tag) to pick one up at once, or an older release's. Both
-attach a signed file only when it holds the release's own build (`amo-xpi.mjs same-build`: AMO
-keeps the file of a number's first upload). A version AMO has no file for (the upload failed)
-fails the release job and is a warning in `amo-xpi.yml`: re-run the release job (a version AMO
-already has is not uploaded twice). A version AMO rejects, usually after the release job has
-ended, fails `amo-xpi.yml`'s runs: answer the reviewer in the Developer Hub and release the next
-patch version. Nothing of this touches the listing.
+Pushing the tag runs `.github/workflows/release.yml`: the checks, the `.xpi` and the GitHub
+release, nothing more. It signs `dist/firefox` as the releases up to 0.13.0 were signed:
+`web-ext sign --channel unlisted` (no listing texts; the AMO API key lives in the repository
+secrets `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET`) uploads it to AMO's unlisted channel, waits
+up to 15 minutes for AMO to sign it for self-distribution (usually a few minutes; AMO allows
+itself up to a day, longer for a version it picks for a manual review) and downloads the signed
+`shisu_ko-<version>.xpi`, and the GitHub release is then made with the zips and the `.xpi`: a
+permanent install for regular Firefox that does not wait for any listing review.
+
+A version AMO has not signed within the 15 minutes fails the job, before the release is made.
+AMO takes a number once, so re-run the job once AMO has signed the version (its email, or the
+version's page in the Developer Hub): the re-run finds the number taken, takes AMO's signed file
+of the first upload, checks that it holds the tag's build (`amo-xpi.mjs same-build`; a moved tag
+fails here), and makes the release. A version AMO rejects never gets one: answer the reviewer
+in the Developer Hub and release the next patch version. `.github/workflows/amo-xpi.yml`
+(every three hours for the newest release, or by hand: **Actions** > **Attach the signed
+Firefox package** > **Run workflow**, with a tag) attaches a signed file to a release that
+exists without one, checked against the release's own Firefox zip; that is how 0.14.1 and
+0.14.2 get theirs. Nothing of this touches the listing.
 
 `node scripts/amo-xpi.mjs status <version>` (with the API key in the environment) says what AMO
 knows of a version: `missing`, `pending`, `public` (signed; for a listed version also approved),

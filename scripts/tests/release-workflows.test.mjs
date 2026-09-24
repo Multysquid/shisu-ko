@@ -65,7 +65,9 @@ test("a tag makes the release and its self-distributed .xpi, and nothing for the
   assert.deepEqual(triggers(release), ["push"]);
   assert.match(release, /tags: \["v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+"\]/);
   const lines = shellLines(release);
-  assert.equal(count(lines, /web-ext@\S+ sign --source-dir dist\/firefox --artifacts-dir dist --channel unlisted --approval-timeout 0 --no-input$/), 1);
+  // web-ext signs the package and waits for AMO's signature itself, as it did up to 0.13.0.
+  assert.equal(count(lines, /^npx --yes web-ext@\S+ sign --source-dir dist\/firefox --artifacts-dir dist --channel unlisted --no-input$/), 1);
+  assert.equal(count(lines, /--approval-timeout/), 0);
   assert.equal(count(lines, /--channel listed/), 0);
   // Listing texts sent with a self-distributed upload would rewrite the public listing, and the
   // listing texts are no business of a release: a text AMO would refuse must not stop the .xpi.
@@ -73,13 +75,22 @@ test("a tag makes the release and its self-distributed .xpi, and nothing for the
   // Nor through the build tests: they run without the listing texts' own test.
   assert.equal(count(lines, /^npm (run )?test(:build)?$/), 0);
   assert.equal(count(lines, /^node --test \$\(ls scripts\/tests\/\*\.test\.mjs \| grep -v '\/amo-metadata\\\.test\\\.mjs\$'\)$/), 1);
-  // AMO keeps the file of a number's first upload: it is attached only when it is this build.
-  const fetch = at(lines, /^node scripts\/amo-xpi\.mjs fetch "\$\{GITHUB_REF_NAME#v\}" --out dist\/signed --wait 900 \|\| code=\$\?$/);
-  const same = at(lines, /^if ! node scripts\/amo-xpi\.mjs same-build dist\/signed\/\*\.xpi dist\/firefox; then$/);
-  const upload = at(lines, /^gh release upload "\$GITHUB_REF_NAME" dist\/signed\/\*\.xpi --clobber$/);
-  assert.ok(fetch >= 0 && same >= 0 && upload >= 0, "fetch, check and upload are all there");
-  assert.ok(at(lines, /--channel unlisted/) < fetch && fetch < same && same < upload, "uploaded, fetched, checked, then attached");
-  assert.equal(lines[same + 2], "exit 1", "a signed file of other code fails the job");
+  // A re-run finds the number taken (AMO takes it once): it takes AMO's signed file of the first
+  // upload instead, and only when that file holds this tag's build.
+  const state = at(lines, /^state="\$\(node scripts\/amo-xpi\.mjs status "\$version"\)"$/);
+  const missing = at(lines, /^if \[ "\$state" = missing \]; then$/);
+  const sign = at(lines, /web-ext@\S+ sign /);
+  const fetch = at(lines, /^node scripts\/amo-xpi\.mjs fetch "\$version" --out dist --wait 900$/);
+  const same = at(lines, /^node scripts\/amo-xpi\.mjs same-build dist\/\*\.xpi dist\/firefox$/);
+  const order = { state, missing, sign, fetch, same };
+  for (const [name, index] of Object.entries(order)) assert.ok(index >= 0, `release.yml has no ${name} line`);
+  assert.ok(state < missing && missing < sign && sign < fetch && fetch < same, "status, then sign or fetch and check");
+  // The release is made after the signing, and carries the .xpi beside the zips.
+  const signStep = release.indexOf("- name: Sign the Firefox package");
+  const releaseStep = release.indexOf("- name: Create GitHub release");
+  assert.ok(signStep >= 0 && releaseStep > signStep, "signed before the release is made");
+  assert.match(release.slice(releaseStep), /files: \|\n {12}dist\/\*\.zip\n {12}dist\/\*\.xpi\n/);
+  assert.equal(count(lines, /gh release upload/), 0);
 });
 
 test("the listing is its own workflow, run by hand for the newest release, as <version>.1", () => {
