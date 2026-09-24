@@ -1275,6 +1275,10 @@
       }
     }
     if (!view.showStatus && !isError && !always) text = null;
+    // The badge switched off (Alt+Shift+H, or the popup's switch) shows nothing at all, errors and
+    // the standby and pause lines included: the viewer asked for the red "server offline" to go
+    // too. The popup's header still says how the server is.
+    if (view.statusBadge === false) text = null;
     return { text, isError };
   }
 
@@ -1288,6 +1292,7 @@
     const { text, isError } = statusText({
       enabled: s.enabled,
       showStatus: s.showStatus,
+      statusBadge: s.statusBadge,
       model: modelForSync(s),
       videoId: state.videoId,
       status: state.serverStatus,
@@ -2569,8 +2574,20 @@
     else if (msg.name === "toggle-transcript") saveSettings({ showTranscript: !state.settings.showTranscript });
     else if (msg.name === "mine-current") mineCurrent();
     else if (msg.name === "mark-known") markKnown();
+    else if (msg.name === "toggle-status") toggleStatusBadge();
     return undefined;
   });
+
+  // Alt+Shift+H: the status badge in the player's top left off, and on again. A setting, so that
+  // the popup shows it and every tab follows through the storage listener; the toast says which
+  // way it went, since the badge itself is what goes away.
+  function toggleStatusBadge() {
+    const show = state.settings.statusBadge === false;
+    saveSettings({ statusBadge: show }).then((res) => {
+      if (res && res.ok === false) showToast("Not saved: " + (res.error || "unknown error"), "error", 6000);
+    });
+    showToast(show ? "Status badge shown" : "Status badge hidden: the same shortcut or the popup shows it again", "info");
+  }
 
   // ------------------------------------------------------------ start
 

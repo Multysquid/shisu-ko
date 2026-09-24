@@ -262,6 +262,18 @@ test("a server the launcher finds answering, and this popup does not, points at 
 
 // native_host.py registers the launcher with Firefox only; on Chrome the button would answer
 // "launcher not registered" with a hint (run setup.cmd) that registers nothing Chrome reads.
+// Chrome takes four suggested shortcuts and the build drops the fifth, Alt+Shift+H.
+test("the Alt+Shift+H hint shows in Firefox and not on Chrome, whose build has no key for it", async () => {
+  for (const [url, hidden] of [["moz-extension://test/", false], ["chrome-extension://test/", true]]) {
+    const bg = updateBackground({});
+    const popup = loadPopup(bg.answer, url);
+    await popup.init();
+    await settle();
+    assert.equal(popup.el("statusBadgeKey").hidden, hidden, url);
+    assert.equal(popup.el("statusBadge").checked, true, "the switch itself is there in both");
+  }
+});
+
 test("on Chrome the button stays hidden while the server is offline", async () => {
   const popup = loadPopup((msg) => (msg.type === "startServerStatus" ? { starting: false } : offline), "chrome-extension://test/");
   await popup.resumeStart();

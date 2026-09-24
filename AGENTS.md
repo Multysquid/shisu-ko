@@ -87,10 +87,11 @@ publish-addon.cmd  submits a release to the public AMO listing by hand, the fall
   must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption hiding, no
   arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so Alt+Shift+M would
   still find one), no known word marked (Alt+Shift+K, `markKnown()`, would find one in them too and
-  write the setting), no `cardStatus` asks for the word colours' deck index (`wordColoursOn()` in
-  `content.js` includes `enabled`, and the poll runs from `syncTick()`), so no request reaches Anki
-  from a YouTube tab. Only the toggle command itself keeps working: the command listener in
-  `content.js` returns for every other command while `enabled` is false.
+  write the setting), no status badge switched (Alt+Shift+H), no `cardStatus` asks for the word
+  colours' deck index (`wordColoursOn()` in `content.js` includes `enabled`, and the poll runs
+  from `syncTick()`), so no request reaches Anki from a YouTube tab. Only the toggle command
+  itself keeps working: the command listener in `content.js` returns for every other command
+  while `enabled` is false.
 - The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on
   it, so its handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`,
   the transcript's close button) act only on trusted events (`ev.isTrusted`): a synthetic click
@@ -532,10 +533,14 @@ real answer brings the verdict back. An ad does not hand the right on: `/sync` k
 through it (see "Gotchas"), so the watched tab keeps asking and keeps the right for the ad's
 length. `statusText()` in `content.js` (pure, tested) shows standby and the language pause even
 with `showStatus` off, since they are the only answer to "why is nothing appearing?"; neither is
-styled as an error. In the `ready` case it shows `No speech found in this video` only when the
-covered range the playhead sits in runs from the start of the video (`view.coveredFrom <= 0.5`:
-the first window opens half a second before the playhead, and a video resumed near its end gets
-one window from there on and nothing before it, the server never planning backwards) to its end
+styled as an error. `statusBadge` off shows nothing at all, errors, standby and pause included:
+the viewer's own choice, from the popup's switch or Alt+Shift+H (the `toggle-status` command,
+`toggleStatusBadge()`, which saves the setting and toasts which way it went; the popup's header
+still says how the server is). In the `ready` case it shows `No speech found in this video` only
+when the covered range the playhead sits in runs from the start of the video
+(`view.coveredFrom <= 0.5`: the first window opens half a second before the playhead, and a video
+resumed near its end gets one window from there on and nothing before it, the server never
+planning backwards) to its end
 (`ahead >= view.duration - 1`, the done reading) with `view.duration > 0` and
 `view.cueCount === 0` (a silent clip, an instrumental), never for `view.live`, whose cues keep
 coming; `updateStatus()` passes `cueCount: state.cues.length`, `coveredFrom` (the range's start,
@@ -1675,7 +1680,10 @@ versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and deve
 Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `match.js`, `words.js` and
 `background.js` in that order with classic `importScripts`, so settings globals retain the same
 behavior as Firefox; `addon/tests/settings.test.js` and `scripts/tests/build.test.mjs` hold that
-order.
+order. Chrome refuses an extension whose `commands` suggest more than four shortcuts, so
+`chromeManifest()` keeps the first four in manifest order (`CHROME_MAX_SUGGESTED_KEYS`) and drops
+the default key of the rest (Alt+Shift+H, `toggle-status`, the fifth), which a Chrome user binds at
+`chrome://extensions/shortcuts`; `build.test.mjs` holds that too. A new command goes last.
 
 Server check: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`.
 

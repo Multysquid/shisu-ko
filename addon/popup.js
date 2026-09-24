@@ -980,6 +980,9 @@ async function setupPermissionBanner() {
 
 async function init() {
   setupPermissionBanner();
+  // Chrome allows four suggested shortcuts and the build drops the fifth, Alt+Shift+H, so the
+  // popup does not advertise a key that is not there (chrome://extensions/shortcuts sets one).
+  document.getElementById("statusBadgeKey").classList.toggle("hidden", !START_AVAILABLE);
   const settings = await browser.runtime.sendMessage({ type: "getSettings" });
   // The deck select has no option for the stored deck until Anki lists it, and a select given a
   // value it has no option for shows none; the option comes first, the value after.

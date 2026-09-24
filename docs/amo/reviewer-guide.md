@@ -61,7 +61,9 @@ The demo recording in the README shows the expected behaviour: https://github.co
    "Fetching audio..." through "Decoding audio..." to "Transcribing...", and the first subtitles
    appear after 10-30 s on CPU. Hovering a subtitle pauses the video and shows a pickaxe at its
    right edge; moving the pointer away resumes it. Alt+Shift+L opens the transcript panel;
-   clicking a timestamp seeks the video.
+   clicking a timestamp seeks the video. Alt+Shift+H hides the badge in the top-left corner,
+   whatever it says (the red "server offline" too), and shows it again; the popup's "Status
+   badge on the video, errors too" switch is the same setting.
 
 5. Mining without Anki: open the popup, expand "Anki, clips and server", set "Send screenshot and
    audio to" to Downloads, then press Alt+Shift+M while a subtitle is shown. A toast confirms and
