@@ -6,11 +6,12 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-// The listing texts the release workflow submits with every tag. AMO refuses a version whose
-// release notes or reviewer notes run past 3,000 characters, and says so only when the tag is
-// pushed (0.14.0 was refused that way: 8,920 and 18,844 characters), so the limits are held here,
-// in `npm test` and in CI, and make_metadata.py refuses them too. AMO counts characters, not
-// bytes, which is what String.length counts for these texts (no character outside the BMP).
+// The listing texts a release is published with (amo-listing.yml, by hand, from its tag). AMO
+// refuses a version whose release notes or reviewer notes run past 3,000 characters, and says so
+// only when the version is submitted (0.14.0 was refused that way: 8,920 and 18,844 characters),
+// so the limits are held here, in `npm test` and in CI, and make_metadata.py refuses them too. AMO
+// counts characters, not bytes, which is what String.length counts for these texts (no character
+// outside the BMP).
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const AMO = join(ROOT, "docs", "amo");
 const NOTES_LIMIT = 3000;

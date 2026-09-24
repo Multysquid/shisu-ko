@@ -1865,6 +1865,7 @@ test("compareVersions orders releases numerically, whatever the spelling", () =>
   assert.equal(sandbox.compareVersions("0.9.1", "0.9"), 1);
   assert.equal(sandbox.compareVersions("garbage", "0.0.1"), -1);
   assert.equal(sandbox.compareVersions("", ""), 0);
+  assert.equal(sandbox.compareVersions("0.9.0.1", "0.9.0"), 0, "a listed build is its release");
 });
 
 test("decideUpdate tells the server's case and the extension's apart", () => {
@@ -1887,6 +1888,10 @@ test("decideUpdate tells the server's case and the extension's apart", () => {
   assert.deepEqual(decide({ latest: { version: "" }, serverVersion: "0.8.0", serverLauncher: true }), { server: "unknown", extension: "current" });
   assert.deepEqual(decide(undefined), { server: "unknown", extension: "current" });
   assert.deepEqual(decide({ latest: { version: "v0.10.0" }, serverVersion: "0.9.0", serverLauncher: true, extensionVersion: "0.9.0" }), { server: "newer", extension: "newer" });
+  // The listing's build of a release is its number plus ".1" (scripts/amo-xpi.mjs listing): the
+  // same release as the GitHub one, and behind the next.
+  assert.deepEqual(decide({ latest, serverVersion: "0.9.0", serverLauncher: true, extensionVersion: "0.9.0.1" }), { server: "current", extension: "current" });
+  assert.deepEqual(decide({ latest: { version: "0.9.1" }, serverVersion: "0.9.1", serverLauncher: true, extensionVersion: "0.9.0.1" }), { server: "current", extension: "newer" });
 });
 
 test("releaseFromApi reads the version, the page and the xpi off GitHub's answer", () => {

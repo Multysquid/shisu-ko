@@ -28,6 +28,7 @@ Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScri
 - Alt+Shift+L toggles the transcript panel.
 - Alt+Shift+M mines the current sentence.
 - Alt+Shift+K marks the word under the pointer as known, or takes it off your known words again.
+- Alt+Shift+H hides the status badge on the video, or shows it again.
 - Left and Right jump to the previous or next subtitle (can be turned off).
 
 **Privacy**

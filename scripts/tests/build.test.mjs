@@ -48,6 +48,13 @@ test("build emits Firefox and Chrome packages from the same version", () => {
   assert.equal(chrome.background.service_worker, "service-worker.js");
   assert.equal(chrome.minimum_chrome_version, "120");
   assert.equal(chrome.browser_specific_settings, undefined);
+  // Chrome refuses more than four suggested shortcuts; Firefox takes every one the source names.
+  const keyed = (manifest) => Object.entries(manifest.commands).filter(([, cmd]) => cmd.suggested_key).map(([name]) => name);
+  assert.deepEqual(Object.keys(chrome.commands), Object.keys(firefox.commands), "every command is there");
+  assert.deepEqual(keyed(firefox), Object.keys(firefox.commands));
+  assert.deepEqual(keyed(chrome), Object.keys(firefox.commands).slice(0, 4));
+  assert.ok(Object.keys(firefox.commands).length > 4, "the limit is exercised");
+  for (const name of keyed(chrome)) assert.deepEqual(chrome.commands[name], firefox.commands[name]);
   const server = readFileSync(join(root, "server/server.py"), "utf8");
   assert.equal(server.match(/^VERSION = "([^"]+)"/m)?.[1], firefox.version);
   assert.equal(chrome.icons["128"], "icons/icon-128.png");

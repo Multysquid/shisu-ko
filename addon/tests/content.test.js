@@ -727,6 +727,37 @@ test("updateStatus caps the server's model error like a toast", () => {
   assert.equal(el.textContent, `Shisu-ko: model ${"x".repeat(99)}…: ${"e".repeat(159)}…`);
 });
 
+// Alt+Shift+H, or the popup's switch: the badge goes, whatever it would say, errors included.
+test("statusText and updateStatus show nothing with the status badge off, the red badge included", () => {
+  const { api } = loadContent();
+  for (const patch of [
+    { offline: true },
+    { status: "error", error: "boom" },
+    { modelError: "not a model name", model: "x" },
+    { standby: true },
+    { languagePaused: true, heard: "en" },
+    { status: "connecting" },
+    { ahead: 105 },
+  ]) {
+    assert.notEqual(says(api, patch).text, null, JSON.stringify(patch));
+    assert.equal(says(api, { ...patch, statusBadge: false }).text, null, JSON.stringify(patch));
+    assert.deepEqual(says(api, { ...patch, statusBadge: true }), says(api, patch), "on is the default");
+  }
+  const el = statusElement();
+  api.state.statusEl = el;
+  api.state.videoId = "abcdef1234";
+  api.state.offline = true;
+  api.updateStatus();
+  assert.equal(el.textContent, "Shisu-ko server offline. Start it with server/run.cmd or docker/up.cmd");
+  assert.ok(el.classes.has("shisuko-status-error") && !el.classes.has("shisuko-hidden"));
+  api.state.settings.statusBadge = false;
+  api.updateStatus();
+  assert.ok(el.classes.has("shisuko-hidden"), "the red badge is hidden");
+  api.state.settings.statusBadge = true;
+  api.updateStatus();
+  assert.ok(!el.classes.has("shisuko-hidden"), "and back");
+});
+
 test("updateStatus shows a refused model even with progress messages off, and a load in progress", () => {
   const { api } = loadContent();
   const el = statusElement();
@@ -2742,6 +2773,26 @@ test("the master switch stops the mine, transcript and known-word commands, and 
   assert.deepEqual(saves()[2], { knownWords: "字幕" });
   onCommand({ type: "other" }); // not a command: nothing happens
   assert.equal(mines().length, 1);
+});
+
+test("Alt+Shift+H switches the status badge off and on, says so, and does nothing while off", () => {
+  const { api, sandbox, sent, onCommand } = loadContent();
+  api.state.toastEl = sandbox.document.createElement("div");
+  const saves = () => sent.filter((m) => m.type === "saveSettings").map((m) => plain(m.settings));
+  api.state.settings.enabled = false;
+  onCommand({ type: "command", name: "toggle-status" });
+  assert.deepEqual(saves(), []);
+  assert.equal(api.state.toastEl.textContent, "");
+
+  api.state.settings.enabled = true;
+  assert.equal(api.state.settings.statusBadge, true, "on by default");
+  onCommand({ type: "command", name: "toggle-status" });
+  assert.deepEqual(saves(), [{ statusBadge: false }]);
+  assert.equal(api.state.toastEl.textContent, "Status badge hidden: the same shortcut or the popup shows it again");
+  api.state.settings.statusBadge = false; // what the storage listener brings back
+  onCommand({ type: "command", name: "toggle-status" });
+  assert.deepEqual(saves(), [{ statusBadge: false }, { statusBadge: true }]);
+  assert.equal(api.state.toastEl.textContent, "Status badge shown");
 });
 
 // ------------------------------------------------------------------ sync answers

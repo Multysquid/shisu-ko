@@ -155,16 +155,19 @@ Temporary install (until Firefox restarts):
 3. Firefox asks for access to youtube.com the first time you open the popup; click **Allow on
    YouTube** (or right-click the toolbar icon > Always Allow on www.youtube.com).
 
-Permanent install: [Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/),
-from where Firefox keeps it up to date. Every release is published there by the release
-workflow; the GitHub release carries the same signed `shisu_ko-<version>.xpi` once
-addons.mozilla.org has approved it (usually minutes, a manual review can take days), which
-installs the same add-on and is updated from the listing too. Regular Firefox only keeps signed
+Permanent install: every [GitHub release](https://github.com/Multysquid/shisu-ko/releases/latest)
+carries `shisu_ko-<version>.xpi`, signed by addons.mozilla.org for self-distribution, usually
+within minutes of the release; open it in Firefox to install. Or install
+[Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/), which gets
+selected releases after AMO's review (that can take days), so it may be a release or two behind
+GitHub. Both are the same add-on, and Firefox updates either from the listing: a GitHub install
+moves on to the first listed version newer than its own (a release published there is listed as
+its number plus `.1`, the same code). Regular Firefox only keeps signed
 add-ons; Firefox Developer Edition, Nightly and ESR can instead load the unsigned zip with
 `xpinstall.signatures.required` set to `false` in `about:config`. The popup says when a newer
 release is out (see [Updates](#1-start-the-server)). Since 0.9.0 the extension needs one more permission,
 "Display notifications to you": opening the new `.xpi` over an older version lists it in the
-install prompt, and an automatic update (from the listing, once it is live) is held back by
+install prompt, and an automatic update (from the listing, for a release published there) is held back by
 Firefox until you approve it, from the notice on the application menu (≡) or under Add-ons
 and themes.
 
@@ -198,10 +201,12 @@ comes back.
 | Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
 | Alt+Shift+K | Mark the word under the pointer (or the word selected in a line) as known, or take it off the list again; see [Word colours](#word-colours) |
+| Alt+Shift+H | Hide the status badge in the player's top left, the red "server offline" included, or show it again (the popup's **Status badge on the video, errors too** switch) |
 | ← / → | Jump to the start of the previous / next subtitle. In a gap between lines, Left goes back to the line that just ended. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
-Chrome at `chrome://extensions/shortcuts`.
+Chrome at `chrome://extensions/shortcuts`. Chrome gives an extension four default shortcuts, so
+Alt+Shift+H has none there until you set one on that page.
 
 ## Reading with Yomitan
 
@@ -430,7 +435,8 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Overbar by pitch accent | Draws a bar over each word that has a card, in the colour of its pitch accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka, read from the card's pitch accent field |
 | Font size, keep line after speech | Presentation; the linger time keeps short lines readable |
 | Hide YouTube's own captions | Avoids two subtitle layers |
-| Show progress messages on the video | The status badge; errors are always shown |
+| Status badge on the video | The badge in the player's top left, errors included; off (or Alt+Shift+H) it shows nothing at all |
+| Show progress messages on the video | With the badge on: the progress messages; errors are always shown |
 
 Subtitle style lives in its own drawer. The screenshot shows mincho, a raised position, a lighter
 box, an outline, and the transcript docked left:
@@ -634,6 +640,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | `setup.cmd` says "Python was not found; run without arguments to install from the Microsoft Store" | Windows answers `python` with a shortcut to the Store when no Python is on the PATH, and the setup used to trust it. Since 0.10.2 the setup runs the candidates instead (`py -3`, `python`, `python3`) and takes the first Python 3.10+ that works; with an older `setup.cmd`, install Python from python.org with "Add python.exe to PATH" ticked, or turn `python.exe` off under Settings > Apps > Advanced app settings > App execution aliases. |
 | No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
+| No subtitles and no badge in the player's top left, not even "server offline" | Alt+Shift+H (or the popup's **Status badge on the video, errors too** switch) has hidden the badge; press it again. The popup's header still says whether the server is online. |
 | Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
 | Badge says "the speech is not in the subtitle language" | The server heard a minute of another language and stopped; it starts again when the subtitle language returns. For a video that really does mix languages, start the server with `--language-patience 0`. |
 | Badge says "No speech found in this video" | The whole video, from its start, was transcribed and nothing was heard: a silent clip, an instrumental, a song Whisper does not hear as Japanese, or, with `--lyrics off`, any song. |
@@ -708,7 +715,7 @@ docker/               Windows wrappers for docker compose and the WSL engine ins
 docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing)
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example, flake.nix
 sign-addon.cmd        signs a local build through addons.mozilla.org (unlisted; manual fallback)
-publish-addon.cmd     submits a version to the public listing by hand (the release workflow does it)
+publish-addon.cmd     submits a release to the public listing by hand (fallback for amo-listing.yml)
 AGENTS.md             architecture notes, invariants and gotchas for contributors and coding agents
 ```
 

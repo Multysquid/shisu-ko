@@ -22,10 +22,14 @@ Nothing is sent to us or to any third party. The extension only ever contacts yo
 content script), the local server, the local AnkiConnect and, for its update check, GitHub's
 public API (one anonymous GET, see PERMISSIONS). It contains no remote code, no
 minified or generated code, no third-party libraries and no build step: the uploaded zip is the
-source, identical to the addon/ folder of https://github.com/Multysquid/shisu-ko (tag v<version>).
+source, identical to the addon/ folder of https://github.com/Multysquid/shisu-ko (tag v<version>)
+but for the version line below.
 
-The uploaded zip is dist/firefox from the release workflow (scripts/build.mjs): the addon/ folder
-without its tests. The same signed file is attached to the GitHub release.
+The uploaded zip is dist/firefox, built from the tag by .github/workflows/amo-listing.yml
+(scripts/build.mjs): the addon/ folder without its tests, with one line changed, the manifest's
+version, which reads <version>.1 (scripts/amo-xpi.mjs listing). Every release is signed for
+self-distribution under its own number and attached to its GitHub release, and AMO takes a
+version number once, in either channel, so the listed build of the same code carries the ".1".
 
 HOW TO TEST (about 10 minutes, no GPU or account needed)
 
@@ -57,7 +61,9 @@ The demo recording in the README shows the expected behaviour: https://github.co
    "Fetching audio..." through "Decoding audio..." to "Transcribing...", and the first subtitles
    appear after 10-30 s on CPU. Hovering a subtitle pauses the video and shows a pickaxe at its
    right edge; moving the pointer away resumes it. Alt+Shift+L opens the transcript panel;
-   clicking a timestamp seeks the video.
+   clicking a timestamp seeks the video. Alt+Shift+H hides the badge in the top-left corner,
+   whatever it says (the red "server offline" too), and shows it again; the popup's "Status
+   badge on the video, errors too" switch is the same setting.
 
 5. Mining without Anki: open the popup, expand "Anki, clips and server", set "Send screenshot and
    audio to" to Downloads, then press Alt+Shift+M while a subtitle is shown. A toast confirms and
@@ -101,7 +107,11 @@ The demo recording in the README shows the expected behaviour: https://github.co
    again, and the status line reads "Updating server" until the new version answers (up to
    two minutes, the model is loaded again). A server started without run.sh, or with
    --no-update, answers 409 and the banner says it cannot update itself. With a checkout at
-   the newest release nothing but the result line shows.
+   the newest release and the extension of that release nothing but the result line shows. The
+   listing gets releases by hand and can trail GitHub: when a release newer than <version>
+   exists, the banner reads "A newer extension (<release>) is on the release page (the
+   addons.mozilla.org listing may get it later)" with a button that opens the release page. That
+   is the update check working, not a fault of the build under review.
 
 10. Optional, the word colours (needs Anki with AnkiConnect and a deck with a few Japanese
     words in it): in the popup's "Word colours" section tick "Colour words by their Anki card"

@@ -21,8 +21,8 @@ docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
 flake.nix        Nix package/app/dev shell for the server and the extension build
 sign-addon.cmd   signs a local build through addons.mozilla.org, unlisted (manual fallback, owner's API key)
-publish-addon.cmd  submits a version to the public AMO listing by hand; the release workflow does it on
-                 every tag (see "Release"); docs/amo/ holds the listing text and assets
+publish-addon.cmd  submits a release to the public AMO listing by hand, the fallback for
+                 amo-listing.yml (see "Release"); docs/amo/ holds the listing text and assets
 ```
 
 ## Invariants (do not break these)
@@ -87,10 +87,11 @@ publish-addon.cmd  submits a version to the public AMO listing by hand; the rele
   must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption hiding, no
   arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so Alt+Shift+M would
   still find one), no known word marked (Alt+Shift+K, `markKnown()`, would find one in them too and
-  write the setting), no `cardStatus` asks for the word colours' deck index (`wordColoursOn()` in
-  `content.js` includes `enabled`, and the poll runs from `syncTick()`), so no request reaches Anki
-  from a YouTube tab. Only the toggle command itself keeps working: the command listener in
-  `content.js` returns for every other command while `enabled` is false.
+  write the setting), no status badge switched (Alt+Shift+H), no `cardStatus` asks for the word
+  colours' deck index (`wordColoursOn()` in `content.js` includes `enabled`, and the poll runs
+  from `syncTick()`), so no request reaches Anki from a YouTube tab. Only the toggle command
+  itself keeps working: the command listener in `content.js` returns for every other command
+  while `enabled` is false.
 - The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on
   it, so its handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`,
   the transcript's close button) act only on trusted events (`ev.isTrusted`): a synthetic click
@@ -532,10 +533,14 @@ real answer brings the verdict back. An ad does not hand the right on: `/sync` k
 through it (see "Gotchas"), so the watched tab keeps asking and keeps the right for the ad's
 length. `statusText()` in `content.js` (pure, tested) shows standby and the language pause even
 with `showStatus` off, since they are the only answer to "why is nothing appearing?"; neither is
-styled as an error. In the `ready` case it shows `No speech found in this video` only when the
-covered range the playhead sits in runs from the start of the video (`view.coveredFrom <= 0.5`:
-the first window opens half a second before the playhead, and a video resumed near its end gets
-one window from there on and nothing before it, the server never planning backwards) to its end
+styled as an error. `statusBadge` off shows nothing at all, errors, standby and pause included:
+the viewer's own choice, from the popup's switch or Alt+Shift+H (the `toggle-status` command,
+`toggleStatusBadge()`, which saves the setting and toasts which way it went; the popup's header
+still says how the server is). In the `ready` case it shows `No speech found in this video` only
+when the covered range the playhead sits in runs from the start of the video
+(`view.coveredFrom <= 0.5`: the first window opens half a second before the playhead, and a video
+resumed near its end gets one window from there on and nothing before it, the server never
+planning backwards) to its end
 (`ahead >= view.duration - 1`, the done reading) with `view.duration > 0` and
 `view.cueCount === 0` (a silent clip, an instrumental), never for `view.live`, whose cues keep
 coming; `updateStatus()` passes `cueCount: state.cues.length`, `coveredFrom` (the range's start,
@@ -1514,8 +1519,9 @@ call, the variable inside the loop, the 0/2/4/restart order, `run.sh`'s export i
 
 The add-on side of updates lives in the "updates" section of `addon/background.js` and in
 `popup.js`; the extension never installs itself (no `update_url`, no `.xpi` handling: its
-updates come from addons.mozilla.org, and the GitHub release carries the same signed `.xpi`),
-it only tells the viewer and asks the server to update itself.
+updates come from the addons.mozilla.org listing, and every GitHub release carries an `.xpi` AMO
+signed for self-distribution, see "Release"), it only tells the viewer and asks the server to
+update itself.
 
 - Check. `fetchLatestRelease()` gets `GITHUB_LATEST_URL`
   (`https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, `Accept:
@@ -1674,7 +1680,10 @@ versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and deve
 Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `match.js`, `words.js` and
 `background.js` in that order with classic `importScripts`, so settings globals retain the same
 behavior as Firefox; `addon/tests/settings.test.js` and `scripts/tests/build.test.mjs` hold that
-order.
+order. Chrome refuses an extension whose `commands` suggest more than four shortcuts, so
+`chromeManifest()` keeps the first four in manifest order (`CHROME_MAX_SUGGESTED_KEYS`) and drops
+the default key of the rest (Alt+Shift+H, `toggle-status`, the fifth), which a Chrome user binds at
+`chrome://extensions/shortcuts`; `build.test.mjs` holds that too. A new command goes last.
 
 Server check: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`.
 
@@ -1717,10 +1726,10 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 
 ## Gotchas learned the hard way
 
-- addons.mozilla.org checks the listing texts only when a version is submitted, which the release
-  workflow does after the tag is pushed and the GitHub release exists: release notes and reviewer
+- addons.mozilla.org checks the listing texts only when a version is submitted to the listing,
+  which `amo-listing.yml` does when it is run for a released tag: release notes and reviewer
   notes over 3,000 characters each are refused then ("Ensure this field has no more than 3000
-  characters"), as 0.14.0 was. `make_metadata.py` and `scripts/tests/amo-metadata.test.mjs` hold
+  characters"), as 0.14.0 was when the tag workflow still submitted every tag. `make_metadata.py` and `scripts/tests/amo-metadata.test.mjs` hold
   that limit on every push; the long reviewer text lives in `docs/amo/reviewer-guide.md`.
 - Windows command lines are limited to about 32 KB. Put long scripts in files instead of
   inline heredocs when running tools from a shell.
@@ -1808,29 +1817,82 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 
 ## Release
 
-Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) releases
-everything; `.github/workflows/release.yml`:
+Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) makes the release
+and its `.xpi`, and nothing more; `.github/workflows/release.yml`:
 
-- runs the checks, builds the zips and creates the GitHub release with them;
-- submits `dist/firefox` to the public listing on addons.mozilla.org (`web-ext sign --channel
-  listed --approval-timeout 0`, with the AMO API key from the repository secrets
-  `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET`), the listing texts built from `docs/amo/` by
-  `make_metadata.py`; a version AMO already has is not uploaded again, so the job can be re-run;
-- waits up to 15 minutes for the approval (`scripts/amo-xpi.mjs fetch --wait 900`) and attaches
-  the signed `.xpi` AMO made, the same file the listing serves, to the release. A version held
-  for a manual review is attached later by `.github/workflows/amo-xpi.yml` (every three hours,
-  or by hand with a tag), which asks AMO only while the release has no `.xpi`.
+- runs the checks, builds the zips and creates the GitHub release with them; the listing texts
+  are none of its business (it runs the build tests without `amo-metadata.test.mjs` and never
+  `make_metadata.py`): a text AMO would refuse must not hold up the `.xpi`, and the Tests
+  workflow checks them on every push;
+- uploads `dist/firefox` to addons.mozilla.org's unlisted channel (`web-ext sign --channel
+  unlisted --approval-timeout 0`, no listing texts, with the AMO API key from the repository
+  secrets `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET`), which AMO signs for self-distribution on
+  its own after the automatic validation, usually within minutes (AMO allows itself a day, more
+  for a version it picks for a manual review); a version AMO already has is not uploaded again,
+  so the job can be re-run;
+- waits up to 15 minutes for the signed file (`scripts/amo-xpi.mjs fetch --wait 900`) and
+  attaches `shisu_ko-<version>.xpi` to the release once `amo-xpi.mjs same-build` has shown it to
+  hold this tag's `dist/firefox`, file for file (AMO's `META-INF/` aside, `manifest.json` as
+  JSON): AMO keeps the file of a number's first upload, so a moved tag, or a number signed by
+  hand from other code, fails the job instead of attaching the wrong build. A tag AMO has signed
+  is never moved: fix forward with the next patch version. A version AMO signs later is attached
+  by `.github/workflows/amo-xpi.yml` (every three hours for the newest release, or by hand with a
+  tag), which asks AMO only while the release has no `.xpi` and checks the signed file against
+  the release's own Firefox zip the same way. `fetch` exits 3 while AMO has not signed the
+  version and 4 (`NO_FILE_EXIT`) when AMO has no file for it: the release job fails on 4;
+  `amo-xpi.yml` asks `status` which: `missing` is a warning (the release job may still be
+  uploading, or its upload failed and it has failed on it), `disabled` fails the run, since a
+  rejection usually comes after the release job has ended green.
 
-So every version is a listed one: there is no unlisted signing any more, because AMO refuses a
-version number that was uploaded before in either channel. `make_metadata.py` refuses a
-`release-notes.md` that does not mention the manifest's version, and the Tests workflow runs it on
-every push, so bump the version and write its notes in the same change.
+So every release has its signed `.xpi` on GitHub without waiting for a listing review. The public
+listing is a workflow of its own, `.github/workflows/amo-listing.yml` (`workflow_dispatch` with
+the tag, `gh workflow run amo-listing.yml -f tag=v<version>`), run by hand for the releases worth
+an update for the listing's users and never by a tag. It publishes the newest release only (the
+tag must match `^v\d+\.\d+\.\d+$` whole and be what `gh release view` calls the newest, which also
+means its release workflow got through its checks): AMO takes a listed version only above the
+last approved listed one (unlisted numbers do not count), and a new listed submission disables
+every older listed version still waiting for its review, whatever its number, so an older tag
+would be refused or would throw a newer submission away and put the older listing texts back.
+It takes its scripts from its own commit and the add-on from the tag (a second checkout into
+`release/`, so a tag older than a script's newest command still works), builds the tag's
+`dist/firefox`, rewrites the version in its manifest to `<version>.1` (`scripts/amo-xpi.mjs
+listing`, that one line: AMO refuses a version number that was uploaded before in either channel,
+and the release's own number belongs to its self-distributed build), lints it and submits it with
+`--channel listed --amo-metadata`, the texts built from the tag's `docs/amo/` by
+`make_metadata.py` (whose `<version>` is the tag's number, so the reviewer notes link the tag). A
+listed version AMO already has is not uploaded again, and one AMO has disabled fails the run,
+since that number is never taken again. Firefox asks the listing for the updates of both builds,
+so a GitHub install of `<version>` is offered `<version>.1` once AMO approves it;
+`compareVersions()` reads three parts, so the fourth never makes the popup call the extension
+behind or ahead. web-ext runs pinned to one exact version (`web-ext@10.7.0`) in every workflow and
+in `publish-addon.cmd` / `sign-addon.cmd`, the places that give it the AMO key or lint for CI. The
+listing workflow also refuses tags before v0.14.2: 0.14.1 is a listed version of its own, waiting
+for its review, and `0.14.1.1` would disable it.
+
+The split is a must-test: `scripts/tests/release-workflows.test.mjs` reads the workflows and the
+two `.cmd` scripts as commands (comments and REM lines left out, so a step commented out counts as
+gone) and holds that the tag workflow never uploads to the listed channel, sends listing texts,
+runs `make_metadata.py` or the listing texts' test, and attaches only a signed file `same-build`
+has matched to its build; that the listing workflow has no trigger but the dispatch, checks the
+tag, the v0.14.2 floor and that it is the newest, then builds, stamps, lints and submits in that
+order, and fails for a disabled number; that `amo-xpi.yml` only downloads, fails when the release
+is not there, checks the build before it attaches, warns on a missing file and fails on a
+rejected one; that web-ext is pinned to one version in all of them; that `publish-addon.cmd`
+takes only a major.minor.patch version and v-digits-dots tags (git allows `&`, `|`, `<`, `>` in a
+tag name, and cmd.exe would run them), fetches the tags, checks the newest tag and the tree
+before it builds, stamps, reads the stamp back and submits, and `sign-addon.cmd` checks the
+version and the tree before it builds and signs `dist\firefox`; and that no workflow expands a
+`${{ }}` expression inside a shell script (the tag typed into the dispatch form reaches the shell
+through `env`).
+`make_metadata.py` refuses a `release-notes.md` that does not mention the manifest's version, and
+the Tests workflow runs it on every push, so bump the version and write its notes in the same
+change: any release may be the one published.
 
 **AMO's 3,000-character limit is a must-test.** AMO refuses a version whose release notes or
 reviewer notes (the `approval_notes` field) run past 3,000 characters each ("Ensure this field
-has no more than 3000 characters"), and it says so only at the tag, after the GitHub release
-exists: 0.14.0 was refused that way (8,920 and 18,844 characters) and reached the listing as
-0.14.1. So `make_metadata.py` refuses either file over `NOTES_LIMIT` (3,000, the reviewer notes
+has no more than 3000 characters"), and it says so only when the version is submitted, after the
+GitHub release exists: 0.14.0 was refused that way (8,920 and 18,844 characters) and reached the
+listing as 0.14.1. So `make_metadata.py` refuses either file over `NOTES_LIMIT` (3,000, the reviewer notes
 counted with `<version>` filled in), and `scripts/tests/amo-metadata.test.mjs` (in `npm test` and
 the Tests workflow) holds the limits on the files as they are, and runs `make_metadata.py` on a
 copy of `docs/amo/` to prove it refuses an over-long text; also summary 250 characters without a
@@ -1839,9 +1901,15 @@ version (each GitHub release keeps its own full notes), and `reviewer-notes.md` 
 quick test and the permissions: the full reviewer guide (every feature's test steps, every
 permission and request, the code that needs a word) is `docs/amo/reviewer-guide.md`, linked from
 the notes at the version's tag (`blob/v<version>/docs/amo/reviewer-guide.md`), and it is what a
-change of a permission, a request or a test step updates first. A release whose AMO step failed
-on the texts is not re-tagged: fix the texts and release the next patch version. The privacy policy, icon
+change of a permission, a request or a test step updates first. A release whose listing
+submission failed on the texts is not re-tagged (the listing workflow sends the texts the tag
+holds): fix the texts, release the next patch version and publish that. The privacy policy, icon
 and screenshots in `docs/amo/` are set in the Developer Hub by hand; `docs/amo/README.md` is the
 checklist. `publish-addon.cmd` and `sign-addon.cmd` (repository owner only) are the manual
-fallbacks for a listed submission and an unlisted build; an unlisted build takes its version
-number from the listing for good. Rebuild the Docker image with `docker compose build`.
+fallbacks for the listing workflow and for the release workflow's signing (a failed signing is
+better helped by re-running the release job); both refuse a tree that differs from the release's
+tag, `publish-addon.cmd` also a tag that is not the newest, and `sign-addon.cmd` signs the
+manifest's own number, so never run it for a version still to be released. 0.14.1, the last tag
+the old release workflow submitted to the listing, can only ever get its listed file: `amo-xpi.yml`
+by hand with its tag once AMO approves it, and a listed submission of a newer release before that
+disables it. Rebuild the Docker image with `docker compose build`.

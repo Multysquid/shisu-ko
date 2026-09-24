@@ -16,6 +16,9 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   showTranscript: false,
   hideNativeCaptions: false,
   showStatus: true,
+  // The status badge in the player's top left, errors included; off (Alt+Shift+H) shows nothing.
+  // showStatus above only drops the progress messages.
+  statusBadge: true,
   // Left/Right jump to the previous/next subtitle instead of YouTube's 5 s seek.
   arrowKeysJumpCues: true,
   // subtitle style and position. The defaults reproduce the look before these settings existed.

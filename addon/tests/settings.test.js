@@ -22,6 +22,10 @@ test("the schema is frozen and has the expected core keys", () => {
     assert.ok(key in schema, `missing ${key}`);
   }
   assert.equal(schema.serverUrl, "http://127.0.0.1:8790");
+  // The status badge shows until the viewer switches it off (Alt+Shift+H); the progress messages
+  // are a separate, narrower switch.
+  assert.equal(schema.statusBadge, true);
+  assert.equal(schema.showStatus, true);
 });
 
 // The word colours need Anki and a deck, so both start off; of the switches that refine them,
@@ -64,10 +68,14 @@ test("the content script runs as soon as the DOM is there, not after load", () =
 
 // The keyboard commands: the background forwards each by name to the watched tab, and the
 // content script's listener answers to these names and no other.
-test("the manifest names the four commands, and the content script handles each", () => {
+test("the manifest names the five commands, and the content script handles each", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   const keys = Object.fromEntries(Object.entries(manifest.commands).map(([name, cmd]) => [name, cmd.suggested_key.default]));
-  assert.deepEqual(keys, { "toggle-subtitles": "Alt+Shift+S", "toggle-transcript": "Alt+Shift+L", "mine-current": "Alt+Shift+M", "mark-known": "Alt+Shift+K" });
+  assert.deepEqual(keys, {
+    "toggle-subtitles": "Alt+Shift+S", "toggle-transcript": "Alt+Shift+L", "mine-current": "Alt+Shift+M",
+    "mark-known": "Alt+Shift+K", "toggle-status": "Alt+Shift+H",
+  });
+  assert.equal(new Set(Object.values(keys)).size, Object.keys(keys).length, "no shortcut twice");
   const content = fs.readFileSync(path.join(ADDON, "content.js"), "utf8");
   for (const name of Object.keys(keys)) assert.ok(content.includes(`msg.name === "${name}"`), `content.js does not handle ${name}`);
 });
