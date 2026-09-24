@@ -1820,29 +1820,31 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) makes the release
 and its `.xpi`, and nothing more; `.github/workflows/release.yml`:
 
-- runs the checks, builds the zips and creates the GitHub release with them; the listing texts
-  are none of its business (it runs the build tests without `amo-metadata.test.mjs` and never
-  `make_metadata.py`): a text AMO would refuse must not hold up the `.xpi`, and the Tests
-  workflow checks them on every push;
-- uploads `dist/firefox` to addons.mozilla.org's unlisted channel (`web-ext sign --channel
-  unlisted --approval-timeout 0`, no listing texts, with the AMO API key from the repository
-  secrets `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET`), which AMO signs for self-distribution on
-  its own after the automatic validation, usually within minutes (AMO allows itself a day, more
-  for a version it picks for a manual review); a version AMO already has is not uploaded again,
-  so the job can be re-run;
-- waits up to 15 minutes for the signed file (`scripts/amo-xpi.mjs fetch --wait 900`) and
-  attaches `shisu_ko-<version>.xpi` to the release once `amo-xpi.mjs same-build` has shown it to
-  hold this tag's `dist/firefox`, file for file (AMO's `META-INF/` aside, `manifest.json` as
-  JSON): AMO keeps the file of a number's first upload, so a moved tag, or a number signed by
-  hand from other code, fails the job instead of attaching the wrong build. A tag AMO has signed
-  is never moved: fix forward with the next patch version. A version AMO signs later is attached
-  by `.github/workflows/amo-xpi.yml` (every three hours for the newest release, or by hand with a
-  tag), which asks AMO only while the release has no `.xpi` and checks the signed file against
-  the release's own Firefox zip the same way. `fetch` exits 3 while AMO has not signed the
-  version and 4 (`NO_FILE_EXIT`) when AMO has no file for it: the release job fails on 4;
-  `amo-xpi.yml` asks `status` which: `missing` is a warning (the release job may still be
-  uploading, or its upload failed and it has failed on it), `disabled` fails the run, since a
-  rejection usually comes after the release job has ended green.
+- runs the checks and builds the zips; the listing texts are none of its business (it runs the
+  build tests without `amo-metadata.test.mjs` and never `make_metadata.py`): a text AMO would
+  refuse must not hold up the `.xpi`, and the Tests workflow checks them on every push;
+- signs `dist/firefox` the way the releases up to 0.13.0 were signed: `web-ext sign --channel
+  unlisted` (no listing texts, the AMO API key from the repository secrets `WEB_EXT_API_KEY` /
+  `WEB_EXT_API_SECRET`) uploads it to addons.mozilla.org's unlisted channel, waits up to 15
+  minutes for AMO to sign it for self-distribution (usually a few minutes; AMO allows itself a
+  day, more for a version it picks for a manual review) and downloads the signed
+  `shisu_ko-<version>.xpi` into `dist/`;
+- then creates the GitHub release with the zips and the `.xpi`.
+
+A version AMO has not signed within the 15 minutes fails the job before the release is made.
+AMO takes a number once, so the job cannot upload it again: a re-run finds the number taken
+(`amo-xpi.mjs status`), waits for AMO's signed file of the first upload (`fetch --wait 900`) and
+takes it only when `amo-xpi.mjs same-build` has shown it to hold this tag's `dist/firefox`, file
+for file (AMO's `META-INF/` aside, `manifest.json` as JSON), so a moved tag, or a number signed
+by hand from other code, fails instead of shipping the wrong build. So when AMO is slow, re-run
+the job once AMO has signed the version (its email, or the version's page in the Developer Hub).
+A tag AMO has signed is never moved: fix forward with the next patch version.
+`.github/workflows/amo-xpi.yml` (every three hours for the newest release, or by hand with a tag)
+attaches a signed file to a release that exists without one, checked against the release's own
+Firefox zip the same way: 0.14.1's listed file, and 0.14.2's, whose release came out before AMO
+signed it under the short-lived 0.14.2 workflow. `fetch` exits 3 while AMO has not signed the
+version and 4 (`NO_FILE_EXIT`) when AMO has no file for it; `amo-xpi.yml` asks `status` which:
+`missing` is a warning, `disabled` fails the run.
 
 So every release has its signed `.xpi` on GitHub without waiting for a listing review. The public
 listing is a workflow of its own, `.github/workflows/amo-listing.yml` (`workflow_dispatch` with
@@ -1872,8 +1874,9 @@ for its review, and `0.14.1.1` would disable it.
 The split is a must-test: `scripts/tests/release-workflows.test.mjs` reads the workflows and the
 two `.cmd` scripts as commands (comments and REM lines left out, so a step commented out counts as
 gone) and holds that the tag workflow never uploads to the listed channel, sends listing texts,
-runs `make_metadata.py` or the listing texts' test, and attaches only a signed file `same-build`
-has matched to its build; that the listing workflow has no trigger but the dispatch, checks the
+runs `make_metadata.py` or the listing texts' test, signs with web-ext before it makes the
+release (which carries `dist/*.xpi`), and on a re-run takes AMO's signed file only when
+`same-build` has matched it to its build; that the listing workflow has no trigger but the dispatch, checks the
 tag, the v0.14.2 floor and that it is the newest, then builds, stamps, lints and submits in that
 order, and fails for a disabled number; that `amo-xpi.yml` only downloads, fails when the release
 is not there, checks the build before it attaches, warns on a missing file and fails on a

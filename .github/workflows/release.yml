@@ -1,9 +1,9 @@
 name: Release extensions
 
-# A tag makes a release and its signed .xpi, nothing more: the checks, the GitHub release with the
-# zips, and the Firefox package signed by addons.mozilla.org for self-distribution. The public
-# listing on addons.mozilla.org is a workflow of its own, amo-listing.yml, run by hand for the
-# releases it should get.
+# A tag makes a release and its signed .xpi, nothing more: the checks, the Firefox package signed
+# by addons.mozilla.org for self-distribution, and the GitHub release with the zips and the .xpi.
+# The public listing on addons.mozilla.org is a workflow of its own, amo-listing.yml, run by hand
+# for the releases it should get.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -39,21 +39,15 @@ jobs:
       - name: Check tag version
         if: github.ref_type == 'tag'
         run: test "v$(node -p "require('./addon/manifest.json').version")" = "${GITHUB_REF_NAME}"
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: dist/*.zip
-      # Every tag is signed by addons.mozilla.org for self-distribution (the unlisted channel: no
-      # listing, no listing texts; AMO signs it on its own after the automatic validation, usually
-      # within minutes), and the signed .xpi goes onto the GitHub release: a permanent install for
-      # regular Firefox that waits for no listing review. A version AMO has not signed within the
-      # quarter of an hour is attached later by amo-xpi.yml (on its schedule while it is the newest
-      # release, else by a run by hand with its tag). AMO keeps the file of a number's first upload,
-      # so the signed file is attached only when it holds this tag's build (a moved tag, or a
-      # number signed by hand from other code, fails here). Without the API key in the repository
-      # secrets the release ships the zips only.
-      - name: Sign the version for self-distribution on addons.mozilla.org
+      # Regular Firefox only keeps signed add-ons. The built Firefox package is signed through
+      # addons.mozilla.org (unlisted channel: self-distribution, no listing) with the AMO API key
+      # kept in the repository secrets, before the release is made: web-ext uploads it, waits up to
+      # a quarter of an hour for AMO to sign it and downloads the signed .xpi into dist/, and the
+      # release carries it with the zips. A version AMO has not signed by then fails the job; AMO
+      # takes a number once, so a re-run, once AMO has signed it, takes the signed file of the
+      # first upload from AMO instead, and only when it holds this tag's build. Without the
+      # secrets the release ships the unsigned zips.
+      - name: Sign the Firefox package
         if: env.AMO_KEY == 'true'
         env:
           WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
@@ -62,28 +56,16 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           state="$(node scripts/amo-xpi.mjs status "$version")"
           if [ "$state" = missing ]; then
-            npx --yes web-ext@10.7.0 sign --source-dir dist/firefox --artifacts-dir dist \
-              --channel unlisted --approval-timeout 0 --no-input
+            npx --yes web-ext@10.7.0 sign --source-dir dist/firefox --artifacts-dir dist --channel unlisted --no-input
           else
-            echo "::notice::AMO already has $version ($state); it is not uploaded again"
+            echo "::notice::AMO already has $version ($state) from an earlier run; its signed file is taken from AMO"
+            node scripts/amo-xpi.mjs fetch "$version" --out dist --wait 900
+            node scripts/amo-xpi.mjs same-build dist/*.xpi dist/firefox
           fi
-      - name: Attach the signed .xpi once AMO has signed it
-        if: env.AMO_KEY == 'true'
-        env:
-          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
-          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          code=0
-          node scripts/amo-xpi.mjs fetch "${GITHUB_REF_NAME#v}" --out dist/signed --wait 900 || code=$?
-          case "$code" in
-            0)
-              if ! node scripts/amo-xpi.mjs same-build dist/signed/*.xpi dist/firefox; then
-                echo "::error::AMO's signed ${GITHUB_REF_NAME#v} is not this tag's build (a moved tag?); AMO never signs a number twice: release the next patch version"
-                exit 1
-              fi
-              gh release upload "$GITHUB_REF_NAME" dist/signed/*.xpi --clobber
-              ;;
-            3) echo "::notice::AMO has not signed ${GITHUB_REF_NAME} yet; amo-xpi.yml attaches the .xpi once it has while this is the newest release, else run it by hand: gh workflow run amo-xpi.yml -f tag=${GITHUB_REF_NAME}" ;;
-            *) exit "$code" ;;
-          esac
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.xpi
