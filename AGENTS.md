@@ -1831,22 +1831,35 @@ and its `.xpi`, and nothing more; `.github/workflows/release.yml`:
   `shisu_ko-<version>.xpi` into `dist/`;
 - then creates the GitHub release with the zips and the `.xpi`.
 
-A version AMO has not signed within the 15 minutes fails the job before the release is made.
-AMO takes a number once, so the job cannot upload it again: a re-run finds the number taken
+Every release carries an `.xpi`, signed or not. AMO holds some versions for a human review,
+which can take days (0.14.2 was one); when web-ext's wait runs out on a version AMO did take,
+the job goes on (a warning), a step with no condition copies the Firefox zip to
+`shisu-ko-<version>-firefox-unsigned.xpi`, and the release goes out with that stand-in, which
+installs in Firefox Developer Edition, Nightly and ESR with `xpinstall.signatures.required` off,
+or for the session from `about:debugging`; a release made without the AMO key gets it too. An
+upload AMO never took (`status` still `missing` after web-ext failed) fails the job. AMO takes a
+number once, so the job cannot upload it again: a re-run finds the number taken
 (`amo-xpi.mjs status`), waits for AMO's signed file of the first upload (`fetch --wait 900`) and
 takes it only when `amo-xpi.mjs same-build` has shown it to hold this tag's `dist/firefox`, file
 for file (AMO's `META-INF/` aside, `manifest.json` as JSON), so a moved tag, or a number signed
-by hand from other code, fails instead of shipping the wrong build. So when AMO is slow, re-run
-the job once AMO has signed the version (its email, or the version's page in the Developer Hub).
-A tag AMO has signed is never moved: fix forward with the next patch version.
-`.github/workflows/amo-xpi.yml` (every three hours for the newest release, or by hand with a tag)
-attaches a signed file to a release that exists without one, checked against the release's own
-Firefox zip the same way: 0.14.1's listed file, and 0.14.2's, whose release came out before AMO
-signed it under the short-lived 0.14.2 workflow. `fetch` exits 3 while AMO has not signed the
-version and 4 (`NO_FILE_EXIT`) when AMO has no file for it; `amo-xpi.yml` asks `status` which:
-`missing` is a warning, `disabled` fails the run.
+by hand from other code, fails instead of shipping the wrong build; no signed file yet is the
+same warning and the same stand-in. A tag AMO has signed is never moved: fix forward with the
+next patch version. `.github/workflows/amo-xpi.yml` (every three hours for the newest release,
+or by hand with a tag) puts the signed `.xpi` on a release that has none, checked against the
+release's own Firefox zip the same way, and then deletes the unsigned stand-in (0.14.1's only
+file is its listed one). It tells the two apart by name: AMO names its file
+`shisu_ko-<version>.xpi`, and `releaseFromApi()` in `background.js` skips a name ending in
+`-unsigned.xpi` too, so the popup's `latest.xpi` is always a file regular Firefox installs.
+`fetch` exits 3 while AMO has not signed the version and 4 (`NO_FILE_EXIT`) when AMO has no file
+for it; `amo-xpi.yml` asks `status` which: `missing` is a warning, `disabled` fails the run.
 
-So every release has its signed `.xpi` on GitHub without waiting for a listing review. The public
+`server/tests/conftest.py` ends the pytest process with the session's own exit status once the
+report is written, on CI only (`CI=true`): the native libraries faster-whisper brings can abort
+the interpreter's shutdown with "terminate called without an active exception" (exit 134) after
+every test has passed, as CI's Python 3.10 did once.
+
+So every release has an `.xpi` on GitHub without waiting for a listing review, and its signed
+one as soon as AMO has signed it. The public
 listing is a workflow of its own, `.github/workflows/amo-listing.yml` (`workflow_dispatch` with
 the tag, `gh workflow run amo-listing.yml -f tag=v<version>`), run by hand for the releases worth
 an update for the listing's users and never by a tag. It publishes the newest release only (the
@@ -1875,12 +1888,13 @@ The split is a must-test: `scripts/tests/release-workflows.test.mjs` reads the w
 two `.cmd` scripts as commands (comments and REM lines left out, so a step commented out counts as
 gone) and holds that the tag workflow never uploads to the listed channel, sends listing texts,
 runs `make_metadata.py` or the listing texts' test, signs with web-ext before it makes the
-release (which carries `dist/*.xpi`), and on a re-run takes AMO's signed file only when
-`same-build` has matched it to its build; that the listing workflow has no trigger but the dispatch, checks the
+release (which carries `dist/*.xpi`), fails on an upload AMO never took, takes AMO's signed file
+of an earlier upload only when `same-build` has matched it to its build, and otherwise puts the
+unsigned stand-in in, from a step without a condition; that the listing workflow has no trigger but the dispatch, checks the
 tag, the v0.14.2 floor and that it is the newest, then builds, stamps, lints and submits in that
 order, and fails for a disabled number; that `amo-xpi.yml` only downloads, fails when the release
-is not there, checks the build before it attaches, warns on a missing file and fails on a
-rejected one; that web-ext is pinned to one version in all of them; that `publish-addon.cmd`
+is not there, looks past the unsigned stand-in, checks the build before it attaches and deletes
+the stand-in after, warns on a missing file and fails on a rejected one; that web-ext is pinned to one version in all of them; that `publish-addon.cmd`
 takes only a major.minor.patch version and v-digits-dots tags (git allows `&`, `|`, `<`, `>` in a
 tag name, and cmd.exe would run them), fetches the tags, checks the newest tag and the tree
 before it builds, stamps, reads the stamp back and submits, and `sign-addon.cmd` checks the

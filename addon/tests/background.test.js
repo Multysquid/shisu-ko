@@ -1900,6 +1900,11 @@ test("releaseFromApi reads the version, the page and the xpi off GitHub's answer
   const noAssets = plain(sandbox.releaseFromApi({ tag_name: "0.9.1", html_url: RELEASE.html_url }));
   assert.deepEqual(noAssets, { version: "0.9.1", tag: "0.9.1", url: RELEASE.html_url, xpi: null });
   assert.equal(plain(sandbox.releaseFromApi({ tag_name: "v0.9.0", assets: [{ name: "only.zip", browser_download_url: "https://x/only.zip" }] })).xpi, null);
+  // The unsigned stand-in of a release AMO has not signed yet is not the .xpi Firefox can install.
+  const unsigned = { name: "shisu-ko-0.9.0-firefox-unsigned.xpi", browser_download_url: "https://x/shisu-ko-0.9.0-firefox-unsigned.xpi" };
+  const signed = { name: "shisu_ko-0.9.0.xpi", browser_download_url: "https://x/shisu_ko-0.9.0.xpi" };
+  assert.equal(plain(sandbox.releaseFromApi({ tag_name: "v0.9.0", assets: [unsigned] })).xpi, null);
+  assert.equal(plain(sandbox.releaseFromApi({ tag_name: "v0.9.0", assets: [unsigned, signed] })).xpi, signed.browser_download_url);
   // No tag, no release; and a page that is not https is no page to open.
   assert.equal(sandbox.releaseFromApi({ html_url: RELEASE.html_url }), null);
   assert.equal(sandbox.releaseFromApi({ tag_name: "  " }), null);

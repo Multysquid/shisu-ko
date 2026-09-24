@@ -157,7 +157,10 @@ Temporary install (until Firefox restarts):
 
 Permanent install: every [GitHub release](https://github.com/Multysquid/shisu-ko/releases/latest)
 carries `shisu_ko-<version>.xpi`, signed by addons.mozilla.org for self-distribution, usually
-within minutes of the release; open it in Firefox to install. Or install
+within minutes of the release; open it in Firefox to install. When addons.mozilla.org holds a
+version for a human review, the release carries `shisu-ko-<version>-firefox-unsigned.xpi` until
+the signed file replaces it: regular Firefox refuses an unsigned add-on, Developer Edition,
+Nightly and ESR take it with `xpinstall.signatures.required` set to `false`. Or install
 [Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/), which gets
 selected releases after AMO's review (that can take days), so it may be a release or two behind
 GitHub. Both are the same add-on, and Firefox updates either from the listing: a GitHub install

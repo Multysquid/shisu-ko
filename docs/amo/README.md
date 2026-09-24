@@ -104,16 +104,20 @@ itself up to a day, longer for a version it picks for a manual review) and downl
 `shisu_ko-<version>.xpi`, and the GitHub release is then made with the zips and the `.xpi`: a
 permanent install for regular Firefox that does not wait for any listing review.
 
-A version AMO has not signed within the 15 minutes fails the job, before the release is made.
-AMO takes a number once, so re-run the job once AMO has signed the version (its email, or the
-version's page in the Developer Hub): the re-run finds the number taken, takes AMO's signed file
-of the first upload, checks that it holds the tag's build (`amo-xpi.mjs same-build`; a moved tag
-fails here), and makes the release. A version AMO rejects never gets one: answer the reviewer
-in the Developer Hub and release the next patch version. `.github/workflows/amo-xpi.yml`
-(every three hours for the newest release, or by hand: **Actions** > **Attach the signed
-Firefox package** > **Run workflow**, with a tag) attaches a signed file to a release that
-exists without one, checked against the release's own Firefox zip; that is how 0.14.1 and
-0.14.2 get theirs. Nothing of this touches the listing.
+Every release carries an `.xpi`. AMO holds some versions for a human review, which can take
+days (0.14.2 was one): when AMO has not signed the version within the 15 minutes, the release
+still goes out, with `shisu-ko-<version>-firefox-unsigned.xpi`, the Firefox zip under a name
+that says what it is (it installs in Firefox Developer Edition, Nightly and ESR with
+`xpinstall.signatures.required` set to `false`, or for the session from `about:debugging`).
+`.github/workflows/amo-xpi.yml` (every three hours for the newest release, or by hand:
+**Actions** > **Attach the signed Firefox package** > **Run workflow**, with a tag) then puts
+AMO's signed `shisu_ko-<version>.xpi` on the release as soon as AMO has signed it, checked
+against the release's own Firefox zip (`amo-xpi.mjs same-build`), and deletes the unsigned
+stand-in. An upload AMO never took fails the release job: fix the cause and re-run it. AMO takes
+a number once, so a re-run takes AMO's signed file of the first upload instead, when it holds the
+tag's build (a moved tag fails here). A version AMO rejects never gets a signed file: answer the
+reviewer in the Developer Hub and release the next patch version. 0.14.1's only possible file
+is its listed one. Nothing of this touches the listing.
 
 `node scripts/amo-xpi.mjs status <version>` (with the API key in the environment) says what AMO
 knows of a version: `missing`, `pending`, `public` (signed; for a listed version also approved),
@@ -177,5 +181,5 @@ The unlisted `.xpi` files of 0.7.1 and 0.8.0 to 0.13.0 are the same kind of buil
 none (AMO refused its listing texts). 0.14.1's only possible file is its listed one: once AMO
 approves 0.14.1, `amo-xpi.yml` run by hand with `tag` `v0.14.1` attaches it (the schedule looks at
 the newest release only), and a listed submission of a newer release before that approval
-disables 0.14.1, which then keeps the zips alone. 0.14.2 is the first release with a
-self-distributed `.xpi` of its own.
+disables 0.14.1, which then keeps the zips alone. 0.14.2, held for a human review, carries the
+unsigned `.xpi` until AMO signs it.
