@@ -9,6 +9,8 @@ Every window is decided as Transcriber.process() decides it: one the server woul
 path on (wants_lyrics(), then sung_in_target(): next to no speech heard, not silence, and the
 target language heard in it) is decoded without the detector, and its record carries
 "lyrics": true, which replay_cues.py reads. --lyrics off dumps every window through the detector.
+A talk window whose prompted decode skipped speech is decoded again without the prompt and the
+two spliced (retry_prompt_skips()), as process() does; its record carries "prompt_retry": true.
 
     python server/tools/dump_words.py DhcrgdOzgic --from 80 --to 1120 --out /tmp/words
 """
@@ -122,16 +124,23 @@ def main(argv=None) -> int:
         lyrics = (server.wants_lyrics(lyrics_args, chunk, speech, start, stop)
                   and worker.sung_in_target(stub, chunk, start, stop))
         vad = {"vad_filter": False} if lyrics else {"vad_filter": True, "vad_parameters": server.vad_parameters()}
-        segments, _info = model.transcribe(
-            chunk, language=args.language, task="transcribe", beam_size=args.beam_size,
+        options = dict(
+            language=args.language, task="transcribe", beam_size=args.beam_size,
             word_timestamps=True, condition_on_previous_text=False,
             initial_prompt=None if lyrics else (args.initial_prompt or None),
             temperature=[0.0, 0.2, 0.4, 0.6], no_speech_threshold=0.6, log_prob_threshold=-1.0,
             compression_ratio_threshold=2.4, hallucination_silence_threshold=2.0, **vad,
         )
+        segments, _info = model.transcribe(chunk, **options)
+        segments, skipped, spliced = list(segments), 0.0, 0
+        if not lyrics:
+            # The prompt-skip retry process() runs: the record holds the spliced list, so
+            # replay_cues.py builds on what the server would have built on.
+            segments, skipped, spliced = server.retry_prompt_skips(model, chunk, options, segments, start, speech)
         record = {"window": [start, stop],
                   "speech": [[round(a, 2), round(b, 2)] for a, b in speech],
                   "lyrics": lyrics,
+                  "prompt_retry": skipped > 0,
                   "segments": []}
         for seg in segments:
             record["segments"].append({
@@ -144,7 +153,9 @@ def main(argv=None) -> int:
             })
         out.append(record)
         print(f"  {server.fmt_time(start)}-{server.fmt_time(stop)}: {len(record['segments'])} segments"
-              f"{' [lyrics]' if lyrics else ''}", flush=True)
+              f"{' [lyrics]' if lyrics else ''}"
+              f"{f' [{skipped:.0f} s skipped with the prompt, {spliced} segments from a decode without it]' if skipped else ''}",
+              flush=True)
         start = stop
 
     dest = Path(args.out)

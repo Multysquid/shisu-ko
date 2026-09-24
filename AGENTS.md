@@ -119,8 +119,9 @@ publish-addon.cmd  submits a release to the public AMO listing by hand, the fall
   match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
   file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
-  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 5, bumped for
-  the kanji/katakana seam rule; 4 was 0.12.0's cue geometry (sentence marks, the row boundary at
+  `load_cache()` brings them back from there after a switch back. `CACHE_FORMAT` is 6, bumped for
+  the prompt-skip retry (0.13.0's caches hold windows whose skipped speech was covered blank); 5
+  was 0.13.0's kanji/katakana seam rule; 4 was 0.12.0's cue geometry (sentence marks, the row boundary at
   one, the anomaly gate); every
   record of an older format is dropped whole by the check in `load_cache()`, the title kept, and
   the video transcribed again from the start. That check is the only way a geometry change reaches
@@ -168,6 +169,26 @@ without, and not one line of the prompt reached the transcript. A lyrics window 
 sentence of the prompt, so a noisy window the language head lets through could echo the prompt
 itself into the cache with nothing to catch it. `dump_words.py` resolves the default and withholds
 it the same way, or dump plus replay would no longer be an A/B on the server's own decode.
+
+The prompt has one cost: it sometimes makes Whisper jump its first timestamp past real speech, and
+what it jumped is never decoded. Measured with `dump_words.py`, prompted against unprompted on the
+server's own windows: 10 to 23 s lost at the start of a window, and one first window decoded as a
+single line, 言い返す!, its 返 stretched over thirteen seconds of speech it never heard, while the unprompted decodes start on time; about one skip per
+12 minutes of speech. So `process()` checks every prompted talk window (`retry_prompt_skips()`):
+`skipped_speech()` finds the runs of detected speech holding at least `PROMPT_SKIP_MIN_S` (3 s) that
+no covering segment comes within `PROMPT_SKIP_SLACK` (0.5 s) of. Covering (`kept_spans()`) means the
+gates keep it (`gate_segment()`, the one judge `build_window_cues()` also asks) and no word of it
+spans `PROMPT_SKIP_MIN_S` of detected speech (`stretched_over_speech()`): that
+line passes every gate, and only its word shows the jump; a last word stretched over the silence after
+an utterance spans no speech and still covers. Only then is the window decoded once more with
+`initial_prompt=None`, everything else the same. `splice_segments()` takes from that decode the
+covering segments whose midpoint lies in a skipped stretch and that overlap no covering prompted
+segment by more than `PROMPT_SPLICE_OVERLAP` (0.2 s), drops a stretched prompted segment an added
+one overlaps, and `build_window_cues()` gets the combined list in time order. One retry at most; a
+retry that adds nothing leaves the prompted result as it was. The log line gains
+` [N s skipped with the prompt, K segments from a decode without it]`. Never on a lyrics window or
+with an empty prompt. `dump_words.py` calls the same function, writes the spliced list and marks
+the record `"prompt_retry": true`, so `replay_cues.py` builds on what the server built on.
 
 `repair_lead_words()` runs first, before the gates. faster-whisper anchors a segment's first word to
 the segment's own start, and segment starts run flush with the previous segment's end, so one or two
@@ -296,7 +317,7 @@ Every cue still carries `seg`, the id of the Whisper segment it came from, and a
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
 not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
 mined card gets"). `seg` stays for `cue_stats.py`, which measures a change per segment, and a stale
-id would mis-group it. Cue caches are format 5; older caches are ignored, which is the only way a
+id would mis-group it. Cue caches are format 6; older caches are ignored, which is the only way a
 geometry change reaches a video someone has already watched. `server/tools/cue_stats.py` and
 `retranscribe.py` measure a cache before and after a change, and `dump_words.py` + `replay_cues.py`
 compare two cue builders on identical Whisper output; keep them working (`retranscribe.py` wraps
