@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-// Which build goes where on addons.mozilla.org, a must-test (AGENTS.md, "Release"). A tag makes a
+// Which build goes where on addons.mozilla.org, a must-test (docs/dev/updates-and-release.md, "Release"). A tag makes a
 // release and its .xpi, signed for self-distribution (the unlisted channel), and nothing more; the
 // public listing is a workflow of its own, run by hand for the newest release, under <version>.1,
 // since AMO takes a number once in either channel. A listed upload from the tag workflow would take

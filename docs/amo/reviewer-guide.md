@@ -205,7 +205,7 @@ CODE THAT MAY NEED A WORD
 - background.js, apiRequest()/fetchClip(): the only requests to the server, POST /sync with
   {video_id, url, t, paused, since, model}, GET /clip?video_id&start&end&format (asked for
   the sentence being mined, and 400 ms after a line appears for that line and the next one, so
-  the clip is ready when a card is created; see "Pre-mined sentences" in AGENTS.md), GET /health
+  the clip is ready when a card is created; see "Pre-mined sentences" in docs/dev/mining.md), GET /health
   (the popup's status line, every 2 s while it is open; once at browser start and at install
   or update of the extension, from startupCheck(), for the badge and the start-up
   notification; and, after a click on the update notification, every 3 s for up to 120 s

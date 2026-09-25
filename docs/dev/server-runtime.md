@@ -1,0 +1,223 @@
+# Server runtime: live streams, models, the Start button, the update step
+
+The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, `server/native_host.py`, `server/update.py`, `POST /update` or the launchers.
+
+## How live streams work
+
+yt-dlp reports `is_live`; `Fetcher.download()` then returns None and `Fetcher.follow_live()` runs
+`LiveFollower` on the fetch thread instead of downloading. `DashLiveSource` asks yt-dlp (with
+`live_from_start`) for the audio format's base URL and fetches `…&sq=N` segments: self-contained
+fMP4 whose timestamps are the stream's media clock, verified to be the same clock as the player's
+`getProgressState().current` (a DASH segment cross-correlates at 1.0 with the HLS audio at the
+`PROGRAM-DATE-TIME` position, and the player's `ingestionTime` matches within ~0.2 s). The live
+head comes from the `X-Head-Seqnum` response header; an expired URL (403) is refreshed once a
+minute at most. The follower starts one segment before the playhead (`place_cursor()`), runs
+forward to the head, waits for new segments, jumps after a seek, pauses while no client has
+synced for `--client-timeout`, and exits after `--idle-minutes` (status `evicted`, refetched on
+the next sync). Decoded audio lives in `Session.live_audio` (`LiveAudio`, 16 kHz chunks on the
+stream clock, trimmed to `LIVE_KEEP_BEHIND` seconds behind the playhead); `audio_slice()`,
+`plan_window()` (`plan_live_window()`: a window at the live edge waits until `LIVE_MIN_WINDOW`
+seconds are there instead of being marked covered) and `/clip` read it. Live sessions are never
+written to the cue cache; when the stream ends and comes back as a video, `Fetcher.fetch()` drops
+the live cues and changes the session token so the client starts over on the video's clock.
+`server/tests/test_live.py` drives the follower with a fake source and clock.
+
+## How model switching works
+
+The popup's `model` setting names the Whisper model the server should run; `--model` is only the
+default. The content script sends it with every `/sync` (`modelForSync()`, trimmed, empty for the
+default), and `App.request_model()` stores the wish: an empty name becomes the operator's
+`--model` (that is `--model`, else the model chosen at setup in `config.json`, else large-v3,
+resolved once in `parse_args()`; not validated, it may be a folder), an invalid name is not
+stored (`model_state()` answers that request with `MODEL_NAME_HINT`), a valid one is stored as
+its canonical alias (`canonical_model_name()`, built lazily from `faster_whisper.utils._MODELS`:
+alias -> repo id -> first alias, so `large` and `Systran/faster-whisper-large-v3` are
+`large-v3`), and a name that failed less than `--retry-after` seconds ago is ignored
+(`in_cooldown()`), since the client re-sends the setting every second.
+
+`Transcriber.run()` calls `App.switch_model_if_wanted()` before every window, so the swap never
+runs while a window is being transcribed. It is a small state machine over `wanted_model`,
+`model_name`, `model_preparing`, `model_prepared`, `model_loading` and `model_error`, all under
+`App.lock`:
+
+1. Nothing wanted (`wanted == model_name`): drop leftover prepared files, clear `model_loading`.
+2. Wanted but nothing in flight: start `prepare_model(wanted)` on a daemon thread
+   (`prepare_thread`), set `model_preparing = model_loading = wanted`, keep transcribing with the
+   old model. `prepare_model()` runs `download_model_files()`: `faster_whisper.download_model()`
+   into `MODELS_DIR` plus a `model.bin` check, so a PyTorch checkpoint is refused before
+   `WhisperModel()` sees it (the operator's `--model` folder skips the download). Nothing here
+   touches the GPU, so a typo, a missing repo or an offline hub costs only a failed download:
+   `model_error = (name, friendly_model_error())`, `model_failed_at`, `wanted_model` reset to the
+   loaded model. There is no retry without a new request.
+3. A download still running: keep transcribing, report the wanted name as loading (a change of
+   mind cannot cancel a download; the new name waits behind it and stale files are dropped).
+4. Files prepared for the wanted name: `self.model = None; gc.collect()` first, because on a GPU
+   whose memory is mostly held by other programs two models rarely fit side by side, then
+   `load_model(args, wanted, path=dir)`. Success: `model_name = wanted`, error cleared,
+   `restart_sessions()`. Failure: `model_error`, `wanted_model = previous`, `reload_model(previous)`;
+   if even that fails the server has no model left and calls `os._exit(3)` so the launcher
+   restarts it on `--model`.
+
+`restart_session()` clears cues, covered ranges, speech and `seg_next`, gives the session a new
+token (the client drops everything on a token change, `dropCues()` in `content.js`), sets a
+session without audio back to `pending` so `get_session()` fetches it again (the old model's
+cache may have marked it covered without ever downloading), and calls `load_cache()` for the new
+model. `/health` reports `model` (loaded, canonical), `default_model`, `model_loading`,
+`model_error` as `{model, error, names}` (`names` from `model_spellings()`: every alias and the
+repo id of the failed model, so the popup can match whatever spelling the viewer typed) and
+`models` (`downloaded_models()`, the `models--owner--name` folders under canonical names).
+`/sync` adds `model`, `model_loading` and `model_error`, the last judged for the name that
+request carried and null for any other. `friendly_model_error()` turns huggingface_hub's
+exceptions into one line: unknown size, not found on Hugging Face, could not reach Hugging Face,
+no `model.bin`, else the last line of the message cut to 200 characters.
+
+On the client, `content.js` keeps `state.modelLoading` / `state.modelError` from each answer,
+shows `Loading model X… (a first use downloads it)` or `Shisu-ko: model X: <error>` (an error is
+shown even with progress messages off, both parts capped by `truncate()`), and the storage
+listener clears the verdict and syncs at once when the model setting changes. `popup.js` polls
+`/health` every two seconds while open and in view (the same page is the options page, and a
+hidden tab polls nothing until it is shown again): the badge says "Loading model" during a
+switch, and
+`modelErrorFor()` puts the server's verdict under the field only when the field's value (or the
+default while empty) is one of the failed model's spellings.
+
+Tests: `server/tests/test_model_switch.py` (a faked `faster_whisper`, `switch_model_if_wanted()` called by hand), `server/tests/test_setup_model.py`, `addon/tests/content.test.js`, `addon/tests/popup-copies.test.js`.
+
+### Downloading a model at setup
+
+Model download with a progress bar, what setup runs after the check: `server.py --download-model
+NAME` (`run_download_model()`: validates the name like `/sync` does, resolves the alias,
+`huggingface_hub.snapshot_download()` with faster-whisper's five file patterns and its own tqdm
+bars, refuses a repo without `model.bin`, writes `config.json`; exit 0, else 2, the code the
+launchers end on instead of restarting, so `run.cmd --download-model x` cannot loop; never loads
+a model or takes the instance lock). The download runs on a daemon thread that the main thread
+joins in half-second steps (`wait_for_thread()`): a Ctrl+C inside `snapshot_download()` would
+only surface once its thread pool has finished streaming the current file (model.bin, minutes),
+and Windows delivers the signal only between waits. The interrupt prints one line and ends the
+process with `os._exit(2)`, since a normal exit would wait for that pool's worker at shutdown;
+the partial blob stays as `.incomplete` and the next download resumes it. `setup.cmd`'s pick
+line tests `errorlevel 3` before 2: `choice` answers 255 when it cannot read a key (stdin closed
+or empty), and that takes large-v3 like `setup.sh`'s EOF fallback.
+
+## How the Start server button works
+
+A WebExtension cannot spawn a process, so the popup's button goes through native messaging:
+`background.js` sends `{cmd: "start"}` to the native host `shisuko`, and the host,
+`server/native_host.py`, runs the checkout's own launcher. Firefox only: `register()` writes the
+Mozilla host manifest, Chrome's would have to name the installed extension's id under its own
+key, so `popup.js` hides the button unless `browser.runtime.getURL("")` is `moz-extension:`
+(`START_AVAILABLE`). The host is stdlib only, so the wrapper can fall back to the system Python
+before setup ran, and it never imports `server.py` (`VERSION` is read from it with a regex).
+
+Protocol (Firefox's: 4-byte little-endian length, UTF-8 JSON, one request per message, answered
+in order until stdin closes; `read_message()` / `write_message()`, `serve()`, `handle()`):
+`{"cmd": "status"}` -> `{ok, running, version, root}`, `running` being a `/health` answer within
+1.5 s (`server_running()`); `{"cmd": "start"}` -> `{ok: true, already: true}` for a running
+server, `{ok: true, already: true, starting: true}` for one that holds the instance lock but
+does not answer yet (its model is loading; `server_starting()`), else `launch()` and
+`{ok: true, started: true, log}` (`log` null on Windows, the path of `~/.shisu-ko/server.log`
+elsewhere) or `{ok: false, error}` in one line. Anything else, a request with extra keys
+included, is `{ok: false, error: "unknown command"}`; a frame over 1 MiB is answered and ends
+the host. The instance lock is `APP_DIR/server-<port>.lock`: `server.py` takes it in
+`hold_instance_lock()` before `load_model()` and holds it until the process ends, a second
+server exits 2. `try_lock()` exists in both files (`msvcrt.locking` / `fcntl.flock`); only
+`LOCK_HELD_ERRNOS` mean "held", a filesystem that cannot lock at all counts as no lock.
+`launch()` on Windows runs `cmd.exe /c start "Shisu-ko server" .\run.cmd` with `cwd=server/`
+(cmd.exe splits a full path holding `&` or `(` even when quoted), `DETACHED_PROCESS |
+CREATE_NEW_PROCESS_GROUP` and first `CREATE_BREAKAWAY_FROM_JOB`, retrying without it on
+`PermissionError`; on POSIX `bash run.sh` with `start_new_session=True` and stdout/stderr
+appended to the log (bash, not the file itself: a zip install has no mode bits). The browser
+starts the host with arguments of its own (Firefox: manifest path and extension id); `main()`
+serves whenever no action flag is given and stdin is not a terminal.
+
+Registration (`native_host.py --register | --unregister | --status [--verbose]`, exit 0 on
+success, quiet unless `--verbose`): the manifest `{name: "shisuko", description, path:
+<wrapper>, type: "stdio", allowed_extensions: ["shisu-ko@multysquid.github.io"]}` goes to
+`%USERPROFILE%\.shisu-ko\native-messaging\shisuko.json` (`SHISUKO_HOME` respected) plus the
+default value of `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko` on Windows, to
+`~/.mozilla/native-messaging-hosts/shisuko.json` on Linux and to
+`~/Library/Application Support/Mozilla/NativeMessagingHosts/shisuko.json` on macOS. The
+wrapper is `server/native-host.cmd` (CRLF) or `server/native-host.sh` (LF, mode 755;
+`register()` restores the bit a zip install drops): the venv's Python, else the system one, on
+`native_host.py`. `setup.cmd` / `setup.sh` register and then run `--check`, which reports it;
+`run.cmd` / `run.sh` register on every start, so an install that never re-ran setup gets the
+button after a manual start, with one exception: the start that updates an older checkout to
+this version does not register, because the old launcher is what runs (`run.cmd`'s old
+`update.py ... & goto loop` jumps to `:loop` in the new file, below the register line; `run.sh`'s
+already-parsed old `main()` has no register call), so it is the start after the update, or
+setup, that registers. In `run.cmd` the call sits on its own line before the
+`update.py ... & goto loop` line; in `run.sh` after the update, which rewrites the wrapper.
+`launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
+defaults (`--model` from `config.json`, else large-v3; `--device auto`), and the popup's model
+setting only takes effect after that default model is loaded.
+`run_check()` in `server.py` loads `native_host.py` by path and prints `status_text()`.
+
+Extension side: the popup's flow is `startFlow.state`, `idle -> requesting -> starting ->
+waiting -> idle` once `/health` answers, or `failed` with the reason on the detail line and the
+button back; the permission request is issued in the click handler before its first `await`
+(it needs the user gesture). A server-address edit (`checkServer(true)`) puts a spent flow
+(`failed`, and the update flow's `done` / `stale` / `failed` / `lost`) back to `idle`, since
+its hint was judged at the old address, and overtakes a `/health` request still under way
+(`healthAsked`: the old address may hold it up for the full timeout, and its answer is
+dropped). The background owns the launch (`startServer()`): one
+`sendNativeMessage` at a time (`startInFlight`), raced against `NATIVE_TIMEOUT_MS` (15 s), the
+answer recorded with a `deadline` of `START_WINDOW_MS` (90 s, past any healthy model load) in
+memory and in `browser.storage.session` (Firefox ends an idle event page after 30 s), so a
+reopened popup resumes at "waiting" (`startServerStatus`) instead of offering a second start
+while the first still loads; a `/health` answer through `apiRequest()` forgets the record.
+`nativeError()` maps the browser's exceptions: "No such native application" / "not found" /
+"forbidden" -> `launcher not registered` with `LAUNCHER_HINT`; permission wording, or no
+`sendNativeMessage` at all -> `permission missing`; timeout -> `the launcher did not answer`;
+the host's own `{ok: false, error}` passes through. The popup keeps `already` and the host's
+`starting` (as `loading`) for the hint at the deadline: `START_ELSEWHERE_HINT` when the launcher
+saw a server answering that the popup cannot reach, else `startNotUpHint(log)`. Badge texts:
+`Checking server`, `Server offline`, `Starting server`, `Updating server`, `Loading model`,
+`Server online`. A start and an update exclude each other: `requestStart()` refuses while
+`pendingUpdate()` holds a record (`UPDATE_RUNNING_HINT`), `startStatus()` carries that record
+as `updating` so a reopened popup hides the button before its first paint, and the popup
+disables Update while `START_BUSY` and hides Start while `UPDATE_BUSY`.
+
+Tests: `server/tests/test_native_host.py`, `server/tests/test_server.py` (`hold_instance_lock()`), `addon/tests/background.test.js`, `addon/tests/popup.test.js`, `addon/tests/browser-api.test.js`.
+
+## How the update step works
+
+`server/update.py` (stdlib only) runs first in `run.cmd` / `run.sh`, never in Docker or Nix. In a
+git checkout it fetches the tracked upstream and fast-forwards (`merge --ff-only`); a diverged
+branch, local changes git would overwrite, a detached HEAD or an unreachable remote leave the
+tree alone with a message. In a folder without `.git` it compares `VERSION` with the newest
+GitHub release tag (`v<VERSION>`, so keep bumping `VERSION`, the manifest and the tag together)
+and unpacks the release zip over the folder, staging each file next to its target and
+`os.replace()`-ing it, without deleting anything. Both paths reinstall `requirements.txt` into
+the running interpreter when it changed (only inside a venv) and point out a changed
+`addon/manifest.json` version. It always exits 0: the server must start even when the update
+fails. `--no-update` or `SHISUKO_NO_UPDATE=1` skips it; `server.py` accepts `--no-update` too
+(`args.no_update`) so the launchers can pass all arguments through, and reads it, like the
+variable, as a reason to refuse `POST /update`.
+
+The launchers also run the update on demand, for the popup's Update button: `run.cmd` /
+`run.sh` set `SHISUKO_LAUNCHER=1` for the server they start, `POST /update` then marks
+`App.exit_code = EXIT_UPDATE` (4), answers, and `stop_server_later()` calls `httpd.shutdown()`
+from a helper thread after `SHUTDOWN_DELAY` (0.5 s, so the answer leaves the socket;
+`shutdown()` blocks until `serve_forever()` returns, so the handler thread cannot call it),
+and `main()` runs `server_close()` and then `sys.exit(app.exit_code)`; every worker is a daemon
+thread, so nothing waits for a window. Exit code 4 means "run `update.py`, then start again":
+`run.cmd` has `if "%CODE%"=="4" goto update` after the 0 and 2 branches, `run.sh`
+`[ "$code" -eq 4 ] && { update.py "$@"; native_host.py --register; continue; }` (the register
+call restores the wrapper's mode bits, which the zip update drops). Codes 0 and 2 keep their
+meaning, every other code keeps the 5 s restart.
+
+The update can replace the launcher that is running it. cmd.exe reads batch files incrementally,
+so in `run.cmd` the update call and `goto loop` must stay on one line and the `:loop` label must
+keep its name; `run.sh` keeps everything in `main()` and ends with `main "$@"; exit` for the same
+reason. The code-4 path adds two rules. The `:update` label sits directly above that one-line
+update call, so `goto update` lands on it: the lines between the server's exit and `goto update`
+are read from the old file, which nothing changed since the jump to `:loop`, and the already
+parsed `goto loop` looks its label up in the new file, so no line is ever read from a stale
+offset. And `set "SHISUKO_LAUNCHER=1"` sits directly after `:loop`, not at the top: a launcher
+from before the variable that has just updated itself arrives in the new file through its own,
+already parsed `goto loop`, so only the lines after `:loop` run for it, and its server would
+otherwise refuse the button. `run.sh` cannot help itself the same way (bash parsed the old
+`main()`, which has no code-4 branch, before the update), so `export SHISUKO_LAUNCHER=1` sits
+inside `main()` before the loop and the server's 409 text names "an older launcher that has not
+been restarted since it was updated"; a restart by hand fixes it. 
+Tests: `server/tests/test_update.py` drives the real git against a bare repository in a temp directory and feeds a locally built zip in place of the GitHub download; `server/tests/test_update_endpoint.py` covers the endpoint over a real socket and the launcher texts.

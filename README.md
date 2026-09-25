@@ -722,7 +722,8 @@ server/
                       native-host.cmd/.sh wrap it for Firefox; --register writes the host manifest
   tests/              pytest suite                   tools/        cue statistics, re-transcription
 docker/               Windows wrappers for docker compose and the WSL engine installer
-docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing)
+docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing),
+                      dev/ (developer docs: the design of each subsystem)
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example, flake.nix
 sign-addon.cmd        signs a local build through addons.mozilla.org (unlisted; manual fallback)
 publish-addon.cmd     submits a release to the public listing by hand (fallback for amo-listing.yml)
