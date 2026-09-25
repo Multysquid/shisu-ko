@@ -1,5 +1,6 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
+- 0.14.5: word colours show only what your Anki deck says. Particles (は, です) and names and Latin text (OK) are no longer coloured without a card; both are switches, off by default, in a new "More word colour options" drawer with the katakana switch and your known-words list.
 - 0.14.4: speech Whisper skipped at the start of a stretch of audio (up to 20 seconds with no subtitle, even though someone was talking) is transcribed again and filled in. Videos you watched before are transcribed again on your next visit.
 - 0.14.3 (listed as 0.14.3.1; 0.14.2 had no release of its own): Alt+Shift+H hides the status badge on the video, the red "server offline" too, and shows it again (a popup switch as well). Every release on GitHub carries an .xpi: signed by addons.mozilla.org within minutes or, while it reviews a version, the unsigned build until the signed one replaces it. This listing gets selected releases, each as its number plus .1.
 - 0.14.1: submitted to this listing with everything below (0.14.3.1 takes its place if its review had not finished).
