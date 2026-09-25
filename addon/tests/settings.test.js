@@ -29,14 +29,15 @@ test("the schema is frozen and has the expected core keys", () => {
 });
 
 // The word colours need Anki and a deck, so both start off; of the switches that refine them,
-// particles count as known unless the viewer says otherwise, katakana words do not, and the
-// viewer's own list starts empty.
-test("the word colours start off, particles count as known, katakana and the known list start empty", () => {
+// particles and katakana words count as known, and names and Latin text are blue, only when the
+// viewer says so, and the viewer's own list starts empty.
+test("the word colours start off, the particle, katakana and name switches start off, the known list empty", () => {
   const schema = loadSchema();
   assert.equal(schema.cardStatus, false);
   assert.equal(schema.pitchAccent, false);
-  assert.equal(schema.particlesKnown, true);
+  assert.equal(schema.particlesKnown, false);
   assert.equal(schema.katakanaKnown, false);
+  assert.equal(schema.properNames, false);
   assert.equal(schema.knownWords, "");
 });
 

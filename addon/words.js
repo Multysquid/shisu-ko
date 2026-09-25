@@ -10,7 +10,7 @@
  * A card's word is a dictionary form; the subtitle has it conjugated (食べる, 食べました). The
  * matcher therefore knows a handful of endings: enough to find a verb or adjective in its usual
  * shapes without a morphological analyser. Beside the deck it colours what needs no card: the
- * words the viewer marked as known, names and Latin text ("proper"), and, on request, the
+ * words the viewer marked as known and, on request, names and Latin text ("proper") and the
  * particles and the katakana words, both as known. Everything here is pure; there is no DOM.
  */
 
@@ -1151,15 +1151,19 @@ const SHISUKO_WORDS = (() => {
 
   // The text as runs, in order: a matched run carries its entry's status and pitch, the text
   // between matches is one run with neither. `starts` is the set of indices a word may begin at;
-  // `opts.particles` and `opts.katakana` count the particles and the katakana words as known. At a
-  // word boundary, in this order of precedence:
+  // `opts.particles` and `opts.katakana` count the particles and the katakana words as known,
+  // `opts.names` draws the names "proper". At a word boundary, in this order of precedence:
   //  - a deck word (or a known one), with the honorific prefix ICU cut off it (お in お|風呂, its
   //    status and no pitch, before the word's own run) or the quotative that fronts いう inside one
   //    segment (って in っていう: with the particles a particle, learned; without them the status
   //    of the run it follows, plain when none does or that run is a name);
-  //  - a name, "proper" (nameAt(): Latin text, a place, a suffix joined to it), which takes the
-  //    place of a deck word only when it is longer: 東京駅 over 東京, 丸の内 over 丸, while 東京
-  //    alone stays the deck's;
+  //  - a name (nameAt(): Latin text, a place, a suffix joined to it), which takes the place of a
+  //    deck word only when it is longer: 東京駅 over 東京, 丸の内 over 丸, while 東京 alone stays
+  //    the deck's. With the option it is "proper"; without it the name is still taken whole, so
+  //    no deck word is found inside it (a card for 駅 says nothing about 東京駅), but it stays
+  //    plain text, no card standing behind it, save its katakana head, which the katakana option
+  //    still counts as known (アメリカ, スカイツリー of スカイツリー駅); the particle option never
+  //    takes a name;
   //  - with the option, a katakana word, learned;
   //  - with the option, a particle, learned, each a run of its own and never the colour of the word
   //    before it (まで after 領域 says nothing about 領域's card). Without the option the word
@@ -1171,6 +1175,7 @@ const SHISUKO_WORDS = (() => {
     if (!s) return runs;
     const katakana = !!(opts && opts.katakana);
     const particles = !!(opts && opts.particles);
+    const names = !!(opts && opts.names);
     const bounds = boundsOf(s, starts instanceof Set ? starts : starts ? new Set(starts) : wordStarts(s));
     const usable = !!index && index.size > 0;
     const heads = usable ? index.heads : null;
@@ -1219,6 +1224,15 @@ const SHISUKO_WORDS = (() => {
         if (lead && found.status !== null) colour(i, i + lead, found.status, null);
         colour(i + lead, hit.end, hit.entry.status, hit.entry.pitch);
         i = hit.end;
+        continue;
+      }
+      // A name without its colour is still taken whole, so no deck word is found inside it, and
+      // joins the plain text around it; only the katakana rule may still colour its katakana head
+      // (アメリカ), since hiding the names must not take back what that switch asked for.
+      if (name > i && !names) {
+        const kata = katakana ? katakanaAt(s, i, bounds, tryAt) : -1;
+        if (kata > i) colour(i, Math.min(kata, name), LEARNED, null);
+        i = name;
         continue;
       }
       let end = name;

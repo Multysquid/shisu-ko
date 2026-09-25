@@ -67,9 +67,14 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   knownWords: "",
   // Particles count as known: a particle (は, に, から, です …) that no card, known word or name
   // rule takes is drawn as learned, green wherever it stands. Off, a line colours its words alone,
-  // as 0.12.0 did.
-  particlesKnown: true,
+  // as 0.12.0 did. Off by default: a colour says what the viewer's own deck says, and no card
+  // stands behind a particle.
+  particlesKnown: false,
   // Katakana words count as known: a katakana run that no card, known word or name rule takes is
   // drawn as learned.
   katakanaKnown: false,
+  // Names and Latin text in blue: a place name, a name with its suffix, or a Latin run (OK, YouTube)
+  // drawn "proper". Off by default: a colour says what the viewer's own deck says, and no card
+  // stands behind a name. Off, a name is still read whole, so no deck word is found inside it.
+  properNames: false,
 });

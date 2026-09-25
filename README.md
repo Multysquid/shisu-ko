@@ -285,8 +285,8 @@ need Anki running with AnkiConnect, the same as mining, and share its permission
 **Colour words by their Anki card** colours each word of a subtitle line, and of the transcript
 panel, by the state of its card: green for a card you have learned (in review), yellow for one you
 are still learning, orange for a suspended card, red for a new one. A word with no card keeps the
-text colour, unless it is a name, a word on your list of known words, or a particle or katakana word
-counted as known (below). The cards come from one deck. Left on *Automatic*, that is the deck your
+text colour, unless it is a word on your list of known words, or a particle, katakana word or name
+you chose to colour (below). The cards come from one deck. Left on *Automatic*, that is the deck your
 last mined card went to: nothing is looked up until you have mined a card, and the first mine then
 names the deck (the hint under the **Deck** select says which, or "no card mined yet"). Choose a
 deck in the select to look at that one instead; its subdecks count. Words are taken from the note's
@@ -312,13 +312,15 @@ auxiliary (は, のは, から, でも, だ, です, ます, ない, たい, ん
 since it would paint every line by that card's state. Two cards for one word show the one with the
 least progress; a suspended card only counts when there is no other.
 
-The colours below need no card, but they come with the card colours: they show only while **Colour
-words by their Anki card** is on, and **Overbar by pitch accent** on its own colours none of them.
-They need no deck either: with no card mined and no deck chosen, or with Anki closed, the names,
-your known words and the particles and katakana words counted as known are coloured all the same,
-and the card colours join them once a deck has been read.
+The colours below need no card, so they sit apart, under **More word colour options** at the end of
+the Word colours section (closed until you open it), and the three switches there are off by
+default: a colour should say what your own deck says. They come with the card colours: they show
+only while **Colour words by their Anki card** is on, and **Overbar by pitch accent** on its own
+colours none of them. They need no deck either: with no card mined and no deck chosen, or with Anki
+closed, your known words and the particles, katakana words and names you switched on are coloured
+all the same, and the card colours join them once a deck has been read.
 
-**Particles count as known** (on by default) colours green every particle the browser's word
+**Particles count as known** (off by default) colours green every particle the browser's word
 splitter sets apart as a word of its own, whatever stands before it, and the combinations of
 particles, the copula and the auxiliaries along with them (は, には, から, まで, です, ですね, という
 …; と alone when いう has a card of its own), as grammar you know rather than words with a card;
@@ -332,7 +334,7 @@ particle in thirty is still such a piece, among them a negative cut into particl
 kana (わからない and 分からない show わ, から and ない green); the other way round, the Kansai
 copula や before った or って (日本初やった) looks like やる and stays uncoloured.
 
-Names and Latin text are blue, no card needed: Latin letters (jr, YouTube, iPhone, Ｗｉ－Ｆｉ, and
+**Names and Latin text in blue** (off by default) colours blue, no card needed: Latin letters (jr, YouTube, iPhone, Ｗｉ－Ｆｉ, and
 Tシャツ as one word; www laughter is no name), place names (the prefectures, their capitals and
 big cities, Tokyo's wards, the districts and sights a travel video names, the countries and cities
 abroad: 東京, 丸の内, 北海道, アメリカ), and a place, or any word of two kanji or katakana or more
@@ -340,11 +342,14 @@ that has no card, with a suffix such as 駅, 区, 寺 or 通り after it (東京
 金閣寺), which turns an ordinary word without a card before such a suffix blue as well (予定通り,
 時間通り); a word with a card keeps its colour and the suffix its own (地元駅 with cards for 地元
 and 駅). A card for the same word wins (東京 alone, with 東京 in the deck, is the card's colour),
-a longer name wins over a shorter card (東京駅 over 東京, 丸の内 over 丸).
+a longer name wins over a shorter card (東京駅 over 東京, 丸の内 over 丸). Switched off, a name
+keeps the text colour and is still read whole, so no card is found inside it (a card for 駅 does not
+colour the 駅 of 東京駅); a katakana name such as アメリカ is still green with **Katakana words count
+as known** on.
 
 A word on your list of known words is green whatever its card says (its pitch overbar stays), and a
 known word with no card is found in its conjugations like a deck word. The list is the **Known
-words** field in the Word colours section, one word per line. **Alt+Shift+K** adds the word under
+words** field under More word colour options, one word per line. **Alt+Shift+K** adds the word under
 the pointer in a subtitle or the transcript, or the word you selected there (a word Yomitan has
 selected counts too, so the shortcut works with its popup open), and takes it off the list again
 when it is on it already. The word is the one under the pointer's tip, down to the character: a
@@ -430,10 +435,12 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Left/Right jump between subtitles | Arrow keys move between cues instead of seeking five seconds |
 | Transcript panel | List of all cues so far, with jump and mine buttons |
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
-| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; blue for names and Latin text, green for your known words and, as the two switches below say, for particles and katakana words; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
+| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
-| Particles count as known | On by default: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) are green, as grammar you know; off, they keep the text colour |
-| Katakana words count as known | Katakana words of two characters or more that no card, known word or name covers are green |
+| Particles, katakana, names, known words | Under More word colour options, closed by default |
+| Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) are green, as grammar you know; off, they keep the text colour |
+| Katakana words count as known | Off by default. Katakana words of two characters or more that no card, known word or name covers are green |
+| Names and Latin text in blue | Off by default. Place names, a word with a place suffix (駅, 区 …) and Latin text (OK, iPhone) are blue; off, they keep the text colour |
 | Known words | Your own list, one word per line: green whatever the card says, and found in their conjugations without a card. Alt+Shift+K adds the word under the pointer, or takes it off again |
 | Overbar by pitch accent | Draws a bar over each word that has a card, in the colour of its pitch accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka, read from the card's pitch accent field |
 | Font size, keep line after speech | Presentation; the linger time keeps short lines readable |

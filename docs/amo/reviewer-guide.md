@@ -127,9 +127,11 @@ The demo recording in the README shows the expected behaviour: https://github.co
     field (blue heiban, red atamadaka, orange nakadaka, green odaka), if the note has one. With
     both off, nothing is asked of Anki beyond step 5. Inspecting a subtitle shows the text as
     text nodes inside <span class="shisuko-word" data-status=... data-pitch=...>, nothing else.
-    Three more rules colour without a card: particles in green ("Particles count as known", on by
-    default), names and Latin text in blue, and the viewer's own list of known words (a text box
-    in the popup, one word per line); "Katakana words count as known" is off by default.
+    Four more rules colour without a card, all under "More word colour options" in the popup's
+    Word colours section: particles in green ("Particles count as known"), katakana words in
+    green ("Katakana words count as known"), names and Latin text in blue ("Names and Latin text
+    in blue"), the three switches off by default, and the viewer's own list of known words (a
+    text box, one word per line).
     Alt+Shift+K with the pointer over a subtitle word puts it on that list, or takes it off, with
     a toast; the list is a setting like any other and never leaves the browser.
 

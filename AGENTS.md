@@ -738,17 +738,20 @@ does not remove an entry: two words from one line make two cards.
 
 Two opt-in colourings of the words of a line, both off by default: `cardStatus` colours a word by
 the state of its Anki card (`data-status`: `learned` green, `learning` yellow, `suspended`
-orange, `new` red, and `proper` blue for a name or Latin text, which no card has; colours as
+orange, `new` red, and `proper` blue for a name or Latin text, which no card has, only with
+`properNames` on; colours as
 custom properties on `.shisuko-root` in `content.css`), `pitchAccent` draws an overline in the
 colour of its pitch accent pattern (`data-pitch`: `heiban` blue, `atamadaka` red, `nakadaka`
 orange, `odaka` green). `cardStatusDeck` names the deck (empty is automatic: the deck the last
 mined card went to; nothing mined and nothing chosen means no deck, so a collection is never
 searched by guesswork), `ankiPitchField` the note field holding the pitch (empty: found by
-name). Three settings refine what `cardStatus` shows, and none of them asks Anki: `knownWords`
+name). Four settings refine what `cardStatus` shows, and none of them asks Anki: `knownWords`
 (the viewer's own list, one word per line, `learned` whatever the card says; Alt+Shift+K, the
 `mark-known` command, puts the word under the pointer on it or takes it off), `particlesKnown`
-(on by default: a particle is `learned`) and `katakanaKnown` (a katakana word no card, known
-word or name takes is `learned`). Like the names, what they add is a status (a known word keeps
+(off by default; on, a particle is `learned`), `katakanaKnown` (a katakana word no card, known
+word or name takes is `learned`) and `properNames` (off by default, since no card stands behind a
+name; on, a name or Latin text is `proper`, blue; off, it is still read whole, so no deck word is
+found inside it, and drawn plain, save a katakana head `katakanaKnown` still makes `learned`). Like the names, what they add is a status (a known word keeps
 its card's pitch, the rest have none), so it shows only with `cardStatus` on; it needs no deck:
 until a deck answer builds the index, a failed ask (no card mined and no deck chosen, Anki closed
 or refusing) builds one of the known list alone, and the names, known words, particles and
@@ -845,8 +848,9 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   any error; it never throws. ICU keeps a compound in one segment (日本語, あるいは, 見せかけ).
 - `markWords(text, index, starts, opts)` -> runs `[{text, status, pitch}]` covering the text in
   order, unmatched characters joined into one run with nulls; `opts.particles` and
-  `opts.katakana` count the particles and the katakana words as known (below), and without
-  `opts` the deck, the known words and the names are all it colours. Left to right; only a
+  `opts.katakana` count the particles and the katakana words as known and `opts.names` draws the
+  names `proper` (below); without `opts` the deck and the known words are all it colours, a name
+  being taken whole and left plain. Left to right; only a
   position in `starts` (an iterable, `wordStarts(text)` by default) is tried, a deck word only
   where the character is in `heads` (a null or empty index finds none, the names and options
   still apply); after a run `i` jumps to its end (no overlaps). At a position, in this order: a
@@ -967,7 +971,12 @@ from them and marks the words of every line. Everything in words.js is pure, wit
     そういう or といった. With the particles option the quotative is a particle, `learned`;
     without it, it takes the status of the run that ends at `i` (って after 話しかけていただく, と
     after 猫), else it stays plain (彼と | いう, and after a name: blue is no card's colour).
-  - Names, status `proper` (blue in content.css), where no deck or known word from the same start is
+  - Names, status `proper` (blue in content.css) with `opts.names`; without it the same span is
+    taken whole, so no deck word is found inside it (東京 with 京 in the deck stays plain) and the
+    particle rule never takes it over, and joins the plain text around it, save its katakana head
+    (`katakanaAt()` from the name's start, cut at the name's end), which `opts.katakana` still
+    makes `learned`: hiding the names must not take back what the katakana switch asked for
+    (アメリカ green, スカイツリー of スカイツリー駅 green and 駅 plain). Found where no deck or known word from the same start is
     as long (`nameAt()`; a card wins the tie, so 東京 alone is the card's, while 東京駅 and 丸の内
     are blue with 東京, 駅 and 丸 in the viewer's deck, whose の of 丸の内 was left white by "the
     deck always wins"): Latin text (`LATIN`, sticky: a letter, then letters, digits, `'`, `&`, `.`
@@ -995,7 +1004,7 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   - With `opts.katakana`, a katakana word (`KATAKANA_RUN`: two characters or more, ー and ・
     inside, never one) that no deck word, known word or name takes is `learned`, cut before a
     deck word that begins inside it at a boundary (`katakanaAt()`: コーヒー|カップ).
-  - With `opts.particles` (the setting `particlesKnown`, on by default: a particle counts as grammar
+  - With `opts.particles` (the setting `particlesKnown`, off by default: on, a particle counts as grammar
     the viewer knows, another claim than the one 0.12.0 removed, where a particle took the card
     state of the word before it), at a start where nothing above matched, `particleAt()`: the
     quotative with いう ICU keeps whole (`QUOTE_PHRASES`: っていう, ていう, という; という only
@@ -1114,7 +1123,10 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   never ending inside ちゃった), Latin text (full-width with its marks, a letter with its
   katakana, laughter plain), places and their suffixes, the suffix joined only where no card
   begins (結構|山, 昨日|海, 地元|駅, 天然|温泉), チリ no place, the longer span between a card and a
-  name, katakana words, known words, and a long line with every option on.
+  name, katakana words, known words, a long line with every option on, and without `opts.names` a
+  name kept whole and plain (`OKよ。` with no `proper` run, no card found inside a Latin run or a
+  place, a card the name's length keeping its colour, the particle rule not taking a name over, a
+  katakana name green with the katakana option and plain without it).
 
 ### The background index (`addon/background.js`, "word colours" section)
 
@@ -1235,8 +1247,8 @@ read again, a merged duplicate, the fields the viewer named, the TTL
   the index of the known list alone, below), and, being statuses (a known word's card pitch
   aside), show only with `cardStatus` on. `lookOf()` answers from `cueLooks` when the entry's
   `serial` is `wordIndexSerial` under the same pair of colours and the same switches
-  (`sameSwitches()`: `katakanaKnown`, `particlesKnown`), else runs
-  `SHISUKO_WORDS.markWords(cue.text, index, starts, {katakana, particles})` with the entry's
+  (`sameSwitches()`: `katakanaKnown`, `particlesKnown`, `properNames`), else runs
+  `SHISUKO_WORDS.markWords(cue.text, index, starts, {katakana, particles, names})` with the entry's
   `starts` (`wordStarts(cue.text)` the first time, kept whatever the index) and records it under the
   serial of now; a look never holds an index, so a cue drawn while the transcript was hidden pins no
   old index. A rebuilt panel and the line on screen for a cue whose line is up ask the matcher and
@@ -1276,8 +1288,8 @@ read again, a merged duplicate, the fields the viewer named, the TTL
   null, serial and generation on, stamp, key and `askedAt` 0), then `refreshWordMarks()` (plain text
   again at once, in place) and, with the colours on, `pollWordIndex()`. A change to `knownWords`
   alone runs `rebuildWordIndex()` (the index again from `wordEntries`, or from no entries while no
-  deck answer is in hand, with the new `knownList()`, the serial on), a change to `katakanaKnown`
-  or `particlesKnown` needs no new index (every look found under the old switch fails
+  deck answer is in hand, with the new `knownList()`, the serial on), a change to `katakanaKnown`,
+  `particlesKnown` or `properNames` needs no new index (every look found under the old switch fails
   `sameSwitches()`); either is then drawn in place by `refreshWordMarks()`, with no drop and no
   ask, `refreshText()` replacing only the lines whose `drawKey()` moved. While `enabled` is off
   that draw waits: the lines keep their colours under the hidden root, and turning the add-on on
@@ -1331,9 +1343,11 @@ read again, a merged duplicate, the fields the viewer named, the TTL
   answers, the deck change, the overtaken answer, the mine re-ask, the master switch off sending
   nothing, a new server session keeping the index; `knownList`, the index built with the known list
   and both switches reaching the matcher, a new known list building the index again from the entries
-  in hand without an ask and redrawing the lines it changes, the particles counted as known by
-  default and only with the card colours on, the particle switch redrawing in place (no ask, the
-  index kept, new nodes only for the lines holding a particle), no deck to colour by (the known
+  in hand without an ask and redrawing the lines it changes, the particles counted as known once
+  switched on and only with the card colours on, the particle switch redrawing in place (no ask, the
+  index kept, new nodes only for the lines holding a particle), the name switch (names plain by
+  default, blue once on and only with the card colours on, redrawn in place with no ask and new
+  nodes only for the lines holding a name), no deck to colour by (the known
   words, the particles and the katakana words drawn all the same; a known word changed with no
   deck in hand colouring in place without an ask, a deck answer then replacing the list-only
   index, and off leaving nothing), the known list and the switches changed while off redrawing
@@ -1351,12 +1365,16 @@ read again, a merged duplicate, the fields the viewer named, the TTL
 ### The popup (`addon/popup.html` / `popup.js`)
 
 The "Word colours" section holds `#cardStatus` and its legend (the four states and a blue swatch,
-`proper`, for names and Latin text), the `#cardStatusDeck` select (first option value `""`),
-`#deck-hint`, `#particlesKnown` (checked by default) above `#katakanaKnown`, the `#knownWords`
-textarea (a typed field, saved at its change event; `readField()` stores it through
+`proper`, for names and Latin text "when switched on"), the `#cardStatusDeck` select (first option
+value `""`), `#deck-hint`, and `#pitchAccent` with its legend (swatches in `popup.css`). What
+colours without a card is folded into a drawer at the section's end, a `<details>` ("More word
+colour options") built like the other drawers (`<summary>`, `<div class="drawer">`; closed, no
+state kept; `section details` / `section summary` / `section .drawer` in `popup.css` let the
+section's padding and line stand in for the drawer's own): `#particlesKnown`, `#katakanaKnown` and
+`#properNames` ("Names and Latin text in blue"), all three unchecked by default, and the
+`#knownWords` textarea (a typed field, saved at its change event; `readField()` stores it through
 `knownWordsText()`, one word per line, each trimmed, blank lines out, as `knownList()` reads it)
-with a hint naming Alt+Shift+K, and `#pitchAccent` with its legend (swatches in `popup.css`); none
-of the three new fields asks Anki. Alt+Shift+K writes `knownWords` from a YouTube tab while the
+with a hint naming Alt+Shift+K; none of these asks Anki. Alt+Shift+K writes `knownWords` from a YouTube tab while the
 options page may hold the list focused for hours, so a focused text field keeps a change made
 elsewhere out only while the viewer is typing in it (`typing()`: its value, as `readField()` reads
 it, differs from `typedBaseline`, what `init()` or `onStorageChanged()` last put in or `flushSave()`
@@ -1395,9 +1413,12 @@ AnkiConnect URL, the word colours edited in the other copy of the form landing i
 hint, Reset style taking a pending deck edit with it, the ask it carried following that one save,
 the known words and the katakana switch loading and saving trimmed, one word per line, a focused
 known-words list nobody is typing in taking the marks made on the video and its next edit keeping
-them, and the particle switch loading checked, above the katakana one, and saving when unticked.
-`addon/tests/settings.test.js` holds the defaults: the colours off, `particlesKnown` true,
-`katakanaKnown` false, `knownWords` empty.
+them, the particle switch loading unchecked, above the katakana one, and saving when ticked, and
+the name switch loading unchecked, after the katakana one, saving when ticked and landing from the
+other copy of the form, and the three switches and the known-words list with its hint inside the
+closed drawer, the card colours, the deck and the pitch accent above it.
+`addon/tests/settings.test.js` holds the defaults: the colours off, `particlesKnown` false,
+`katakanaKnown` false, `properNames` false, `knownWords` empty.
 
 ## How the Start server button works
 
