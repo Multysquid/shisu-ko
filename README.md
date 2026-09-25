@@ -318,7 +318,7 @@ They need no deck either: with no card mined and no deck chosen, or with Anki cl
 your known words and the particles and katakana words counted as known are coloured all the same,
 and the card colours join them once a deck has been read.
 
-**Particles count as known** (on by default) colours green every particle the browser's word
+**Particles count as known** (off by default) colours green every particle the browser's word
 splitter sets apart as a word of its own, whatever stands before it, and the combinations of
 particles, the copula and the auxiliaries along with them (は, には, から, まで, です, ですね, という
 …; と alone when いう has a card of its own), as grammar you know rather than words with a card;
@@ -432,7 +432,7 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
 | Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; blue for names and Latin text, green for your known words and, as the two switches below say, for particles and katakana words; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
-| Particles count as known | On by default: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) are green, as grammar you know; off, they keep the text colour |
+| Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) are green, as grammar you know; off, they keep the text colour |
 | Katakana words count as known | Katakana words of two characters or more that no card, known word or name covers are green |
 | Known words | Your own list, one word per line: green whatever the card says, and found in their conjugations without a card. Alt+Shift+K adds the word under the pointer, or takes it off again |
 | Overbar by pitch accent | Draws a bar over each word that has a card, in the colour of its pitch accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka, read from the card's pitch accent field |

@@ -848,7 +848,7 @@ const DECK = [["日本語", "learned", null], ["字幕", "new", "heiban"]];
 const LINE = "これは日本語の字幕です";
 
 // The lines of these tests show the deck's words alone, which is what they are about: the
-// particle switch, on by default, is off unless a test is about it ("the particle switch" below),
+// particle switch, off by default, stays off unless a test is about it ("the particle switch" below),
 // so what they expect holds whatever the matcher makes of a particle.
 const WORDS_ALONE = Object.freeze({ particlesKnown: false });
 
@@ -1500,7 +1500,7 @@ test("with no deck to colour by, the known words, the particles and the katakana
     const { api, sandbox } = loadContent();
     await settled();
     watching(api);
-    Object.assign(api.state.settings, { cardStatus: true, knownWords: "猫", katakanaKnown: true });
+    Object.assign(api.state.settings, { cardStatus: true, knownWords: "猫", katakanaKnown: true, particlesKnown: true });
     subtitleBox(api, sandbox);
     sandbox.console = { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} };
     api.mergeCues([{ id: 0, start: 0, end: 2, text: NO_DECK_LINE }]);
@@ -1520,7 +1520,7 @@ test("a known word changed with no deck in hand colours in place and asks nothin
   const { api, sandbox, onSettingsChanged } = loadContent();
   await settled();
   watching(api);
-  Object.assign(api.state.settings, { cardStatus: true, katakanaKnown: true });
+  Object.assign(api.state.settings, { cardStatus: true, katakanaKnown: true, particlesKnown: true });
   subtitleBox(api, sandbox);
   sandbox.console = { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} };
   api.mergeCues([{ id: 0, start: 0, end: 2, text: NO_DECK_LINE }]);
@@ -1740,6 +1740,7 @@ test("the deck index is built with the known list, and the katakana and particle
   await settled();
   watching(api);
   api.state.settings.cardStatus = true;
+  api.state.settings.particlesKnown = true;
   api.state.settings.knownWords = "テスト\nはい";
   subtitleBox(api, sandbox);
   const calls = recordingWords(sandbox);
@@ -1827,7 +1828,7 @@ test("a known list that changed builds the index again from the deck in hand, as
 
 // ------------------------------------------------------------------ the particle switch
 
-// On by default, a particle counts as known and is drawn green wherever it stands, between the
+// Off by default. Switched on, a particle counts as known and is drawn green wherever it stands, between the
 // deck's words; off, a line colours the deck's words alone. It is an option of the matcher, not
 // part of the index, so a change of it asks the background nothing and keeps the index.
 const PARTICLES_KNOWN = [
@@ -1840,9 +1841,9 @@ const PARTICLES_KNOWN = [
 ];
 const WORDS_ONLY = ["これは", "shisuko-word{status=learned}:日本語", "の", "shisuko-word{status=new}:字幕", "です"];
 
-test("particles count as known by default: green between the deck's words, and only with the card colours on", () => {
+test("particles count as known once switched on: green between the deck's words, and only with the card colours on", () => {
   const { api, sandbox } = loadContent();
-  assert.equal(api.state.settings.particlesKnown, true);
+  assert.equal(api.state.settings.particlesKnown, false);
   giveIndex(api, { cardStatus: true, particlesKnown: true });
   const el = sandbox.document.createElement("span");
   api.renderText(el, cue(0, LINE));

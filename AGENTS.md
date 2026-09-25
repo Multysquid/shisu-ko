@@ -747,7 +747,7 @@ searched by guesswork), `ankiPitchField` the note field holding the pitch (empty
 name). Three settings refine what `cardStatus` shows, and none of them asks Anki: `knownWords`
 (the viewer's own list, one word per line, `learned` whatever the card says; Alt+Shift+K, the
 `mark-known` command, puts the word under the pointer on it or takes it off), `particlesKnown`
-(on by default: a particle is `learned`) and `katakanaKnown` (a katakana word no card, known
+(off by default; on, a particle is `learned`) and `katakanaKnown` (a katakana word no card, known
 word or name takes is `learned`). Like the names, what they add is a status (a known word keeps
 its card's pitch, the rest have none), so it shows only with `cardStatus` on; it needs no deck:
 until a deck answer builds the index, a failed ask (no card mined and no deck chosen, Anki closed
@@ -995,7 +995,7 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   - With `opts.katakana`, a katakana word (`KATAKANA_RUN`: two characters or more, ー and ・
     inside, never one) that no deck word, known word or name takes is `learned`, cut before a
     deck word that begins inside it at a boundary (`katakanaAt()`: コーヒー|カップ).
-  - With `opts.particles` (the setting `particlesKnown`, on by default: a particle counts as grammar
+  - With `opts.particles` (the setting `particlesKnown`, off by default: on, a particle counts as grammar
     the viewer knows, another claim than the one 0.12.0 removed, where a particle took the card
     state of the word before it), at a start where nothing above matched, `particleAt()`: the
     quotative with いう ICU keeps whole (`QUOTE_PHRASES`: っていう, ていう, という; という only
@@ -1352,7 +1352,7 @@ read again, a merged duplicate, the fields the viewer named, the TTL
 
 The "Word colours" section holds `#cardStatus` and its legend (the four states and a blue swatch,
 `proper`, for names and Latin text), the `#cardStatusDeck` select (first option value `""`),
-`#deck-hint`, `#particlesKnown` (checked by default) above `#katakanaKnown`, the `#knownWords`
+`#deck-hint`, `#particlesKnown` (unchecked by default) above `#katakanaKnown`, the `#knownWords`
 textarea (a typed field, saved at its change event; `readField()` stores it through
 `knownWordsText()`, one word per line, each trimmed, blank lines out, as `knownList()` reads it)
 with a hint naming Alt+Shift+K, and `#pitchAccent` with its legend (swatches in `popup.css`); none
@@ -1395,8 +1395,8 @@ AnkiConnect URL, the word colours edited in the other copy of the form landing i
 hint, Reset style taking a pending deck edit with it, the ask it carried following that one save,
 the known words and the katakana switch loading and saving trimmed, one word per line, a focused
 known-words list nobody is typing in taking the marks made on the video and its next edit keeping
-them, and the particle switch loading checked, above the katakana one, and saving when unticked.
-`addon/tests/settings.test.js` holds the defaults: the colours off, `particlesKnown` true,
+them, and the particle switch loading unchecked, above the katakana one, and saving when unticked.
+`addon/tests/settings.test.js` holds the defaults: the colours off, `particlesKnown` false,
 `katakanaKnown` false, `knownWords` empty.
 
 ## How the Start server button works

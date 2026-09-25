@@ -980,23 +980,23 @@ test("a focused known-words list nobody is typing in takes the marks made on the
   popup.document.activeElement = null;
 });
 
-// The particle switch: on for a viewer who never touched it, a checkbox like any other, above the
+// The particle switch: off for a viewer who never touched it, a checkbox like any other, above the
 // katakana one. The legend no longer promises green particles; the switch says it.
-test("the particle switch loads checked by default, sits above the katakana one, and saves when unticked", async () => {
+test("the particle switch loads unchecked by default, sits above the katakana one, and saves when ticked", async () => {
   const state = { health: offline, settings: {} };
   const { popup, saves, elsewhere } = await openForm(state);
   const box = popup.el("particlesKnown");
   assert.equal(box.type, "checkbox");
-  assert.equal(box.checked, true);
+  assert.equal(box.checked, false);
   assert.equal(popup.el("katakanaKnown").checked, false);
-  box.checked = false;
+  box.checked = true;
   box.dispatch("input");
   await wait(200);
-  assert.deepEqual(saves(), [{ particlesKnown: false }]);
-  assert.equal(state.settings.particlesKnown, false);
-  // Ticked again in the other copy of the form: it lands here.
-  elsewhere({ particlesKnown: true });
-  assert.equal(box.checked, true);
+  assert.deepEqual(saves(), [{ particlesKnown: true }]);
+  assert.equal(state.settings.particlesKnown, true);
+  // Unticked again in the other copy of the form: it lands here.
+  elsewhere({ particlesKnown: false });
+  assert.equal(box.checked, false);
   assert.match(HTML, /<input type="checkbox" id="particlesKnown">\s*<span>Particles count as known<\/span>/);
   assert.ok(HTML.indexOf('id="particlesKnown"') < HTML.indexOf('id="katakanaKnown"'));
   assert.doesNotMatch(HTML, /particles green/);
