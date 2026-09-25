@@ -73,4 +73,8 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // Katakana words count as known: a katakana run that no card, known word or name rule takes is
   // drawn as learned.
   katakanaKnown: false,
+  // Names and Latin text in blue: a place name, a name with its suffix, or a Latin run (OK, YouTube)
+  // drawn "proper". Off by default: a colour says what the viewer's own deck says, and no card
+  // stands behind a name. Off, a name is still read whole, so no deck word is found inside it.
+  properNames: false,
 });

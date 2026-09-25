@@ -647,6 +647,20 @@ summary:hover {
   padding: 0 16px 16px;
 }
 
+/* A drawer inside a section: the section already pads it and draws the line under it. */
+section details {
+  border-bottom: none;
+}
+
+section summary {
+  padding: 4px 0;
+}
+
+section .drawer {
+  gap: 8px;
+  padding: 4px 0 0;
+}
+
 /* The check button and its result line belong together, closer than the drawer's rows. */
 .drawer .updates {
   display: flex;

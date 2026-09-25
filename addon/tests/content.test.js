@@ -1750,17 +1750,18 @@ test("the deck index is built with the known list, and the katakana and particle
   await api.pollWordIndex();
   assert.deepEqual(calls.built, [{ entries: DECK, known: ["テスト", "はい"] }]);
   assert.deepEqual(plain(api.state.wordEntries), DECK); // kept, for a list that changes
-  // The defaults: katakana as the deck says, particles counted as known.
-  assert.deepEqual(calls.marked, [{ text: LINE, opts: { katakana: false, particles: true } }]);
+  // Katakana as the deck says (the default), particles counted as known (switched on above), the
+  // names plain (the default).
+  assert.deepEqual(calls.marked, [{ text: LINE, opts: { katakana: false, particles: true, names: false } }]);
   // Each switch is part of a look: flipped, the line is matched again with it, and once only.
   api.state.settings.katakanaKnown = true;
   api.refreshWordMarks();
-  assert.deepEqual(calls.marked.slice(1), [{ text: LINE, opts: { katakana: true, particles: true } }]);
+  assert.deepEqual(calls.marked.slice(1), [{ text: LINE, opts: { katakana: true, particles: true, names: false } }]);
   api.refreshWordMarks();
   assert.equal(calls.marked.length, 2);
   api.state.settings.particlesKnown = false;
   api.refreshWordMarks();
-  assert.deepEqual(calls.marked.slice(2), [{ text: LINE, opts: { katakana: true, particles: false } }]);
+  assert.deepEqual(calls.marked.slice(2), [{ text: LINE, opts: { katakana: true, particles: false, names: false } }]);
   api.refreshWordMarks();
   assert.equal(calls.marked.length, 3);
   api.renderText(sandbox.document.createElement("span"), api.cueById(0));
@@ -1810,7 +1811,7 @@ test("a known list that changed builds the index again from the deck in hand, as
   onSettingsChanged({ settings: { newValue: Object.assign({}, base, { knownWords: "はい", katakanaKnown: true }) } }, "local");
   assert.equal(calls.built.length, 1);
   assert.equal(asks.length, 0);
-  const opts = { katakana: true, particles: false };
+  const opts = { katakana: true, particles: false, names: false };
   assert.deepEqual(calls.marked.map((c) => c.opts), [opts, opts, opts]);
   assert.equal(rebuilds.count, 1);
   assert.equal(lines[0].childNodes[0], drawn[0]); // no katakana in it: the same nodes
@@ -1888,7 +1889,7 @@ test("the particle switch redraws in place: no ask, the index kept, new nodes on
   assert.equal(api.state.wordIndexAt, 1000);
   assert.equal(rebuilds.count, 1); // in place, never a rebuild
   // Every cue matched again, once (the line on screen and its transcript line share the look).
-  const off = { katakana: false, particles: false };
+  const off = { katakana: false, particles: false, names: false };
   assert.deepEqual(calls.marked.map((c) => c.opts), [off, off, off]);
   assert.deepEqual(nodes(api.state.subText), WORDS_ONLY);
   assert.deepEqual(nodes(lines[0]), WORDS_ONLY);
@@ -1905,6 +1906,64 @@ test("the particle switch redraws in place: no ask, the index kept, new nodes on
   assert.deepEqual(nodes(api.state.subText), PARTICLES_KNOWN);
   assert.deepEqual(nodes(lines[0]), PARTICLES_KNOWN);
   assert.equal(lines[1].childNodes[0], drawn[1]);
+  assert.equal(rebuilds.count, 1);
+});
+
+// ------------------------------------------------------------------ the name switch
+
+// Off by default: no card stands behind a name or Latin text, so it is drawn as the text around it.
+// On, it is blue ("proper"). Like the particle switch it is an option of the matcher: a change asks
+// the background nothing, keeps the index and redraws only the lines holding a name.
+const NAME_LINE = "OKよ。";
+
+test("the name switch: names plain by default, blue once switched on, redrawn in place with no ask", async () => {
+  const { api, sandbox, onSettingsChanged } = loadContent();
+  await settled();
+  watching(api);
+  assert.equal(api.state.settings.properNames, false);
+  giveIndex(api, { cardStatus: true, showTranscript: true });
+  api.state.wordEntries = plain(DECK);
+  const rebuilds = overlay(api, sandbox);
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: NAME_LINE }, { id: 1, start: 3, end: 4, text: LINE }]);
+  api.setSubtitle(api.cueById(0));
+  api.refreshWordMarks(); // the index on record as drawn
+  const lines = [0, 1].map((id) => api.state.lineById.get(id).childNodes[1]);
+  const drawn = lines.map((text) => text.childNodes[0]);
+  assert.deepEqual(nodes(api.state.subText), [NAME_LINE]);
+  assert.deepEqual(nodes(lines[0]), [NAME_LINE]);
+  assert.deepEqual(nodes(lines[1]), WORDS_ONLY);
+  const asks = backgroundAnswering(sandbox, []);
+  const calls = recordingWords(sandbox);
+  const index = api.state.wordIndex;
+  const serial = api.state.wordIndexSerial;
+  const base = Object.assign({}, api.state.settings);
+
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base, { properNames: true }) } }, "local");
+  assert.equal(asks.length, 0);
+  assert.equal(calls.built.length, 0);
+  assert.equal(api.state.wordIndex, index);
+  assert.equal(api.state.wordIndexSerial, serial);
+  assert.equal(rebuilds.count, 1); // in place, never a rebuild
+  const on = { katakana: false, particles: false, names: true };
+  assert.deepEqual(calls.marked.map((c) => c.opts), [on, on]);
+  const blue = ["shisuko-word{status=proper}:OK", "よ。"];
+  assert.deepEqual(nodes(api.state.subText), blue);
+  assert.deepEqual(nodes(lines[0]), blue);
+  assert.equal(lines[1].childNodes[0], drawn[1]); // no name in it: the same nodes
+
+  // Blue needs the card colours: with the pitch alone a name is text like the rest.
+  const el = sandbox.document.createElement("span");
+  Object.assign(api.state.settings, { cardStatus: false, pitchAccent: true });
+  api.renderText(el, api.cueById(0));
+  assert.deepEqual(nodes(el), [NAME_LINE]);
+  Object.assign(api.state.settings, { cardStatus: true, pitchAccent: false });
+
+  // Off again: plain, still nothing asked.
+  onSettingsChanged({ settings: { newValue: Object.assign({}, base) } }, "local");
+  assert.equal(asks.length, 0);
+  assert.equal(calls.built.length, 0);
+  assert.deepEqual(nodes(api.state.subText), [NAME_LINE]);
+  assert.deepEqual(nodes(lines[0]), [NAME_LINE]);
   assert.equal(rebuilds.count, 1);
 });
 

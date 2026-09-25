@@ -9,6 +9,7 @@ const { test } = require("node:test");
 const ADDON = path.join(__dirname, "..");
 const HTML = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
 const CSS = fs.readFileSync(path.join(ADDON, "popup.css"), "utf8").replace(/\/\*[^]*?\*\//g, "");
+const POPUP_JS = fs.readFileSync(path.join(ADDON, "popup.js"), "utf8");
 
 // The declarations of the popup.css rule with exactly this selector list, as "property: value".
 function cssDeclarations(selector) {
@@ -943,8 +944,9 @@ test("the known words and the katakana switch load into the form, and save trimm
   elsewhere({ knownWords: "食べる" });
   assert.equal(list.value, "食べる\n東京", "a list being typed in keeps its typing");
   popup.document.activeElement = null;
-  // The legend names the blue of a place name or Latin text beside the four card states.
-  assert.match(HTML, /<span class="sw proper"><\/span>names and Latin text/);
+  // The legend names the blue of a place name or Latin text beside the four card states, and says
+  // it is a switch.
+  assert.match(HTML, /<span class="sw proper"><\/span>names and Latin text, when switched on/);
   assert.ok(cssDeclarations(".sw.proper,\n.sw.heiban").includes("background: #4da3ff"));
 });
 
@@ -1000,6 +1002,52 @@ test("the particle switch loads unchecked by default, sits above the katakana on
   assert.match(HTML, /<input type="checkbox" id="particlesKnown">\s*<span>Particles count as known<\/span>/);
   assert.ok(HTML.indexOf('id="particlesKnown"') < HTML.indexOf('id="katakanaKnown"'));
   assert.doesNotMatch(HTML, /particles green/);
+});
+
+// The name switch: off for a viewer who never touched it, a checkbox like any other, after the
+// katakana one.
+test("the name switch loads unchecked by default, sits after the katakana one, and saves when ticked", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const box = popup.el("properNames");
+  assert.equal(box.type, "checkbox");
+  assert.equal(box.checked, false);
+  box.checked = true;
+  box.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ properNames: true }]);
+  assert.equal(state.settings.properNames, true);
+  // Unticked again in the other copy of the form: it lands here.
+  elsewhere({ properNames: false });
+  assert.equal(box.checked, false);
+  assert.match(HTML, /<input type="checkbox" id="properNames">\s*<span>Names and Latin text in blue<\/span>/);
+  assert.ok(HTML.indexOf('id="katakanaKnown"') < HTML.indexOf('id="properNames"'));
+});
+
+// What colours without a card sits in a drawer of the Word colours section, closed like every
+// other drawer: the particle, katakana and name switches and the known-words list with its hint.
+// The section itself keeps the card colours, the deck and the pitch accent.
+test("the switches that colour without a card and the known words sit in a closed drawer of the Word colours section", () => {
+  const section = HTML.slice(HTML.indexOf("<h2>Word colours</h2>"), HTML.indexOf("<h2>Display</h2>"));
+  const open = section.indexOf("<details>");
+  const close = section.indexOf("</details>");
+  assert.ok(open > 0 && close > open, "the section holds a drawer");
+  assert.match(section.slice(open, close), /^<details>\s*<summary>More word colour options<\/summary>\s*<div class="drawer">/);
+  const drawer = section.slice(open, close);
+  for (const id of ["particlesKnown", "katakanaKnown", "properNames", "knownWords"]) {
+    assert.ok(drawer.includes(`id="${id}"`), `${id} is in the drawer`);
+    assert.equal(HTML.split(`id="${id}"`).length, 2, `${id} appears once`);
+  }
+  assert.match(drawer, /<p class="hint">Drawn as learned whatever their card says/);
+  for (const id of ["cardStatus", "cardStatusDeck", "deck-hint", "pitchAccent"]) {
+    const at = section.indexOf(`id="${id}"`);
+    assert.ok(at > 0 && at < open, `${id} stays in the section, above the drawer`);
+  }
+  // Closed by default, and no script opens it: the drawers keep no state.
+  assert.doesNotMatch(section.slice(open, open + 20), /open/);
+  assert.doesNotMatch(POPUP_JS, /\bdetails\b|\.open\s*=/);
+  // Nested in a section, the drawer takes the section's padding and line rather than its own.
+  assert.ok(cssDeclarations("section details").includes("border-bottom: none"));
 });
 
 // The mousedown on the button blurs the text field, whose change event starts the 150 ms save;

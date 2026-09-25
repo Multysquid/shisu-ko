@@ -68,8 +68,12 @@ function shape(runs) {
   return runs.map((run) => run.text + (run.status || run.pitch ? `(${run.status},${run.pitch})` : "")).join(" | ");
 }
 
+// The names are drawn blue here, as the tests of the matcher were written; "the name switch"
+// below is where they are off.
+const NAMES_ON = Object.freeze({ names: true });
+
 function mark(text, entries, starts) {
-  return shape(markWords(text, buildIndex(entries), starts));
+  return shape(markWords(text, buildIndex(entries), starts, NAMES_ON));
 }
 
 // ------------------------------------------------------------------ constants
@@ -1629,13 +1633,14 @@ test("markWords stays quick on a long line against a large deck", () => {
 
 // ------------------------------------------------------------------ markWords: what needs no card
 
-// markWords with the options (`particles`, `katakana`) and the known words.
+// markWords with the options (`particles`, `katakana`, `names`, the last on unless a test says
+// otherwise) and the known words.
 function markWith(text, entries, opts, known, starts) {
-  return shape(markWords(text, buildIndex(entries, known), starts, opts));
+  return shape(markWords(text, buildIndex(entries, known), starts, { ...NAMES_ON, ...opts }));
 }
 
-const PARTICLES_ON = { particles: true };
-const BOTH_ON = { particles: true, katakana: true };
+const PARTICLES_ON = { particles: true, names: true };
+const BOTH_ON = { particles: true, katakana: true, names: true };
 
 // The viewer's two lines (with the boundaries ICU gives them, Node 24) and a deck of the words they
 // hold: 東京, 来る, よろしく, お願い, 今日, 前, こと, いう.
@@ -1977,6 +1982,37 @@ test("markWords joins a suffix only to a segment no card begins at", () => {
   // No card for 主要: the pair is a name, as before; and a place with its suffix still wins.
   assert.equal(markWith("主要駅", real), "主要駅(proper,null)");
   assert.equal(markWith("東京駅丸の内駅舎", real, PARTICLES_ON), "東京駅(proper,null) | 丸の内(proper,null) | 駅舎(learned,null)");
+});
+
+// The name switch, off by default: no card stands behind a name or Latin text, so the matcher
+// still reads it whole (no deck word begins inside it) but draws it as plain text.
+const NAMES_OFF = Object.freeze({ names: false });
+
+test("markWords without the names option keeps a name whole and plain, save a katakana head the katakana option takes", () => {
+  assert.equal(shape(markWords("OKよ。", buildIndex([]))), "OKよ。");
+  assert.equal(markWith("OKよ。", [], NAMES_OFF), "OKよ。");
+  assert.ok(markWords("iPhoneとTV", buildIndex([])).every((run) => run.status === null && run.pitch === null));
+  // No deck word is found inside a Latin run, even at a boundary the caller gives.
+  assert.equal(markWith("OKよ", [["K", "new", "heiban"]], NAMES_OFF, [], new Set([0, 1, 2])), "OKよ");
+  assert.equal(markWith("OKよ", [["K", "new", "heiban"]], undefined, [], new Set([0, 1, 2])), "OK(proper,null) | よ");
+  // Nor inside a place, which still outruns a shorter card from its start.
+  const deck = [["東京", "learned", "heiban"], ["駅", "learned", "atamadaka"], ["丸", "learned", null], ["行く", "new", null]];
+  assert.equal(markWith("東京駅に行く", deck, NAMES_OFF, [], new Set([0, 2, 3, 4])), "東京駅に | 行く(new,null)");
+  assert.equal(markWith("丸の内", deck, NAMES_OFF), "丸の内");
+  // A card the same length as the name keeps its colour, as with the option.
+  assert.equal(markWith("東京に行く", deck, NAMES_OFF), "東京(learned,heiban) | に | 行く(new,null)");
+  // A place written in kanji stays one plain piece: a card for 京 is not found inside 東京.
+  assert.equal(markWith("東京に", [["京", "new", null]], NAMES_OFF, [], new Set([0, 1, 2])), "東京に");
+  // The katakana switch keeps what it asked for: a name's katakana head is learned, the rest of
+  // the name plain and still closed to the deck (駅 in スカイツリー駅). Without it, plain.
+  assert.equal(markWith("アメリカで", [], { katakana: true, names: false }), "アメリカ(learned,null) | で");
+  assert.equal(markWith("アメリカで", [], NAMES_OFF), "アメリカで");
+  assert.equal(markWith("スカイツリー駅", [["駅", "new", null]], { katakana: true, names: false }, [], new Set([0, 6])), "スカイツリー(learned,null) | 駅");
+  // The particle rule never takes a name over, and a Latin head is no katakana run.
+  assert.equal(markWith("アメリカで", [], { particles: true, names: false }), "アメリカ | で(learned,null)");
+  assert.equal(markWith("Tシャツ", [], { katakana: true, names: false }), "Tシャツ");
+  // A quotative after a name takes no colour from it, as before.
+  assert.equal(markWith("JRっていう", [["いう", "new", null]], NAMES_OFF), "JRって | いう(new,null)");
 });
 
 test("markWords leaves the chili of a dish a word, not Chile", () => {

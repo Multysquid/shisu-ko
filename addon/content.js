@@ -420,7 +420,7 @@
     // asked for at once (never while off, and never from a tab without a video).
     const wordsChanged = WORD_SETTINGS.some((key) => next[key] !== state.settings[key]);
     if (wordsChanged) dropWordIndex();
-    // The viewer's own list and the katakana and particle switches change what the matcher makes
+    // The viewer's own list and the katakana, particle and name switches change what the matcher makes
     // of a line, not the deck: a new list goes into an index built again from the entries in hand
     // (the background is not asked), a switch is an option of the matcher and needs no new index,
     // and the lines are drawn again in place, the looks found under the settings of before being
@@ -428,10 +428,11 @@
     const knownChanged = next.knownWords !== state.settings.knownWords;
     const katakanaChanged = !!next.katakanaKnown !== !!state.settings.katakanaKnown;
     const particlesChanged = !!next.particlesKnown !== !!state.settings.particlesKnown;
+    const namesChanged = !!next.properNames !== !!state.settings.properNames;
     // The master switch decides a line's look as well (wordColoursOn). Off, nothing more is done:
     // the lines keep their colours under the hidden root (setSubtitle(null) clears the screen,
     // and rewriting every coloured line of a transcript nobody sees, in every tab showing one,
-    // would be work for nothing). That holds for the known list and the two switches as well:
+    // would be work for nothing). That holds for the known list and the switches as well:
     // their refresh waits for the switch, whose refresh compares against the index last drawn and
     // the switches each look was found under, and so draws again just the lines they changed.
     // On again, the refresh finds the lines drawn under the index it still holds and touches none
@@ -446,7 +447,7 @@
     if (knownChanged && !wordsChanged) rebuildWordIndex();
     applySettings();
     if (modelChanged) sync();
-    const matcherChanged = knownChanged || katakanaChanged || particlesChanged;
+    const matcherChanged = knownChanged || katakanaChanged || particlesChanged || namesChanged;
     if (wordsChanged || (matcherChanged && next.enabled) || (enabledChanged && next.enabled)) refreshWordMarks();
     if (wordsChanged && wordColoursOn()) pollWordIndex();
   });
@@ -1472,13 +1473,13 @@
   // How a cue's text is to be drawn now: `runs`, a string for plain text and an object for a word
   // whose card has something to show under the settings of now (null while the whole text is
   // plain), and `key`, its drawKey(). Found once per cue, index, pair of colours and pair of
-  // switches (katakana, particles) and kept in cueLooks (the text's word boundaries with it,
+  // switches (katakana, particles, names) and kept in cueLooks (the text's word boundaries with it,
   // whatever the index), so that the panel rebuilt for a style change, or a line the refresh
   // finds untouched, asks the matcher nothing. The look names the index it was found under by its
   // serial, never by holding it: the index of a 10k-word deck weighs a megabyte and a hidden
   // transcript's cues are never visited again. The viewer's known words are in the index
-  // (buildIndex takes them), so the serial dates a look for them too; the katakana and particle
-  // switches reach the matcher as options of their own.
+  // (buildIndex takes them), so the serial dates a look for them too; the katakana, particle and
+  // name switches reach the matcher as options of their own.
   function lookOf(cue) {
     const s = state.settings;
     const index = state.wordIndex;
@@ -1487,13 +1488,14 @@
     const pitchAccent = !!s.pitchAccent;
     const katakana = !!s.katakanaKnown;
     const particles = !!s.particlesKnown;
+    const names = !!s.properNames;
     const serial = state.wordIndexSerial;
     const known = state.cueLooks.get(cue);
     if (known && known.serial === serial && known.cardStatus === cardStatus && known.pitchAccent === pitchAccent && sameSwitches(known, s)) return known;
     const starts = known ? known.starts : SHISUKO_WORDS.wordStarts(cue.text);
     const runs = [];
     let plain = "";
-    for (const run of SHISUKO_WORDS.markWords(cue.text, index, starts, { katakana, particles })) {
+    for (const run of SHISUKO_WORDS.markWords(cue.text, index, starts, { katakana, particles, names })) {
       const status = cardStatus && run.status ? run.status : null;
       const pitch = pitchAccent && run.pitch ? run.pitch : null;
       // A card with nothing to show here is text like any other, joined with its neighbours.
@@ -1506,15 +1508,15 @@
       runs.push({ text: run.text, status, pitch });
     }
     if (plain) runs.push(plain);
-    const look = { serial, cardStatus, pitchAccent, katakana, particles, starts, runs, key: drawKey(cue.text, runs) };
+    const look = { serial, cardStatus, pitchAccent, katakana, particles, names, starts, runs, key: drawKey(cue.text, runs) };
     state.cueLooks.set(cue, look);
     return look;
   }
 
   // Whether a look was found with the matcher's switches as the settings have them now: katakana
-  // words and particles counted as known, or not.
+  // words and particles counted as known, names drawn blue, or not.
   function sameSwitches(look, s) {
-    return look.katakana === !!s.katakanaKnown && look.particles === !!s.particlesKnown;
+    return look.katakana === !!s.katakanaKnown && look.particles === !!s.particlesKnown && look.names === !!s.properNames;
   }
 
   // One string per look of a line: the text and where each mark sits in it. Two draws with the
