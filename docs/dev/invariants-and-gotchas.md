@@ -44,11 +44,15 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   never with a token, cookie or identifier, and there is no second remote endpoint;
   `notifications` stays a required permission (the start-up check notifies with no popup open
   to ask for a grant). The privacy policy, description and reviewer notes in `docs/amo/` state
-  exactly this, so a change here changes them too. On Chrome, a Chrome Web Store install
-  (`CHROME_STORE_ID` in `popup.js`) is updated from the store, which adds its own update URL to
-  the package it serves, and an unpacked Chrome build (the release's zip,
-  `dist/chrome`) only by the viewer loading a newer one. That has no counterpart in
-  `docs/amo/`: those texts go to addons.mozilla.org, which lists the Firefox build only.
+  exactly this, so a change here changes them too. On Chrome, the package carries no
+  `update_url` and no `key`: the Chrome Web Store keeps the item's own key, and refuses a key on
+  a new item and one that is not the item's own on an update (`scripts/tests/build.test.mjs`
+  holds the built Chrome package the store receives, `addon/tests/settings.test.js` the source
+  manifest). A Chrome Web Store install (`CHROME_STORE_ID` in `popup.js`) is updated from the
+  store, which adds its own update URL to the package it serves, and an unpacked Chrome build
+  (the release's zip, `dist/chrome`) only by the viewer loading a newer one. That has no
+  counterpart in `docs/amo/`: those texts go to addons.mozilla.org, which lists the Firefox build
+  only.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`.
   It never takes a path, a program or an argument from a message: the only thing it can run is
   the checkout's own `server/run.cmd` / `server/run.sh` (root = the parent of the folder the
@@ -111,6 +115,31 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   notes over 3,000 characters each are refused then ("Ensure this field has no more than 3000
   characters"), as 0.14.0 was when the tag workflow still submitted every tag. `make_metadata.py` and `scripts/tests/amo-metadata.test.mjs` hold
   that limit on every push; the long reviewer text lives in `docs/amo/reviewer-guide.md`.
+- The Chrome Web Store API v1.1 stops on 2026-10-15. `scripts/cws.mjs` speaks v2 alone
+  (`chromewebstore.googleapis.com/v2/` and `/upload/v2/`, the item under the publisher's path),
+  and `scripts/tests/cws.test.mjs` holds those URLs; nothing may go back to v1.1.
+- The Chrome Web Store takes a version only above the one before, compared as numbers part by
+  part (0.14.6 is above 0.5.0, which a string comparison gets wrong), and it refuses the same
+  version twice. When an upload went in and its publish failed, the draft holds that version and
+  every later upload of it is refused: submit that draft in the Developer Dashboard by hand. So
+  `cws-listing.yml` uploads only the release with the highest version, and a version the store
+  rejected is fixed forward with the next patch version.
+- The Chrome Web Store takes one service account per publisher (Developer Dashboard, Account): the
+  one whose JSON key is the repository secret `CWS_SERVICE_ACCOUNT_JSON` (`docs/cws/README.md`).
+- The Developer Dashboard allows six review cancellations a day. `cws-listing.yml` withdraws a
+  waiting review only when a run by hand asks for it (`cancel_review`), never by itself, and
+  `cws.mjs submit --cancel-review` cancels nothing when no review waits.
+- `workflow_run` knows the release workflow only by its `name:` ("Release extensions"): renamed in
+  `release.yml` alone, every release would wait for the next run of `cws-schedule.yml`, up to
+  three hours, without a word, so `scripts/tests/release-workflows.test.mjs` holds the two equal.
+  It matches by the name alone, and a pull request from a fork can give a workflow of its own the
+  same one: `cws-listing.yml` acts only on a successful tag push in this repository.
+- GitHub switches off a public repository's workflow that has a schedule after 60 days without
+  activity in the repository, and a workflow switched off starts for nothing, not even for a
+  `workflow_run`. That is why the store's schedule is `cws-schedule.yml` and `cws-listing.yml` has
+  none: a release after a long pause still reaches the store, and only the catch-up of releases
+  held back behind an older review waits until `gh workflow enable cws-schedule.yml`.
+  `amo-xpi.yml`'s schedule stops the same way.
 - Windows command lines are limited to about 32 KB. Put long scripts in files instead of
   inline heredocs when running tools from a shell.
 - Hugging Face's xet transfer backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`.
