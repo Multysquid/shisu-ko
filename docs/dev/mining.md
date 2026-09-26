@@ -84,6 +84,19 @@ Four rules keep it from touching the wrong card.
 - No downloads fallback. `mineCue` with `auto: true` never falls back to the Downloads folder: a
   failure the viewer did not ask for must not scatter files.
 
+Every field the settings name (image, audio, sentence, word, pitch) is looked up through
+`SHISUKO_WORDS.fieldKey(fields, name)`: the name itself, trimmed, else the one field whose name
+differs from it in case alone, and written back under the note type's own spelling. Note types
+disagree on case (Lapis and JPMN write `Picture` and `SentenceAudio`, Eminent `picture` and
+`sentenceAudio`), Anki answers a name exactly, and a setting in the other case found nothing:
+every mine into an Eminent card failed with "The new card has none of the fields Picture,
+SentenceAudio". Two fields differing in case alone leave an inexact name unmatched rather than
+guessed, and only the note's own names count (`constructor` is no field). A card with none of
+them is refused before any media is stored, with `missingFieldsError()`: the names looked for,
+the card's own field names in order (the first `MISSING_FIELDS_SHOWN`, 8), and where to change
+them ("Check the field names and change them in the settings if they differ: popup > Anki,
+clips and server").
+
 Right after a successful `updateNoteFields`, `addToAnki()` calls `rememberDeck(url, noteId)`
 without awaiting it (see "How word colours work" in `word-colours.md`): the mine's answer never waits for it, and its
 failure is a `console.debug` line.

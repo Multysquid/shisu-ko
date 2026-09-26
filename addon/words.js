@@ -454,6 +454,27 @@ const SHISUKO_WORDS = (() => {
   // make every odaka word nakadaka on a note type without a reading field for the word.
   const SENTENCE_FIELD = /sentence|文/i;
 
+  // Which of a note's field names a name from the settings means: the name itself, else the one
+  // field whose name differs from it in case alone. Note types spell the same field Picture or
+  // picture, SentenceAudio or sentenceAudio (Lapis and JPMN capitalise, Eminent does not), and
+  // Anki answers a name exactly, so a setting that differed from the note type in case alone found
+  // nothing and every mine failed. Two fields differing in case alone leave an inexact name
+  // unmatched rather than guessed. The name is trimmed; a blank one names nothing.
+  function sameField(names, name) {
+    const wanted = str(name).trim();
+    if (!wanted) return null;
+    if (names.includes(wanted)) return wanted;
+    const lower = wanted.toLowerCase();
+    const same = names.filter((each) => each.toLowerCase() === lower);
+    return same.length === 1 ? same[0] : null;
+  }
+
+  // The key of that field in notesInfo's `fields` object, or null.
+  function fieldKey(fields, name) {
+    if (!fields || typeof fields !== "object") return null;
+    return sameField(Object.keys(fields), name);
+  }
+
   // A note's fields as AnkiConnect's notesInfo lists them, lowest `order` first.
   function fieldsInOrder(fields) {
     const list = [];
@@ -469,12 +490,14 @@ const SHISUKO_WORDS = (() => {
   // as the background's noteSummary().
   function wordFieldOf(list, settings) {
     const wordName = str((settings || {}).ankiWordField).trim();
-    return wordName ? list.find((field) => field.name === wordName) : list.find((field) => field.order === 0);
+    if (!wordName) return list.find((field) => field.order === 0);
+    const name = sameField(list.map((field) => field.name), wordName);
+    return list.find((field) => field.name === name);
   }
 
   // The pitch fields: the one the settings name, else every field whose name says pitch, in order.
   function pitchFieldsOf(list, settings) {
-    const wanted = str((settings || {}).ankiPitchField).trim();
+    const wanted = sameField(list.map((field) => field.name), (settings || {}).ankiPitchField);
     const named = wanted ? list.find((field) => field.name === wanted) : undefined;
     return named ? [named] : list.filter((field) => PITCH_FIELD.test(field.name));
   }
@@ -1268,6 +1291,7 @@ const SHISUKO_WORDS = (() => {
     hasKanjiOrKatakana,
     moraCount,
     readingOf,
+    fieldKey,
     parsePitch,
     pitchOf,
     usuallyKana,

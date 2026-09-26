@@ -396,6 +396,42 @@ test("pitchOf prefers the field the settings name and falls back when it is miss
   assert.equal(pitchOf(note, { ankiPitchField: " Notes " }), "odaka");
   assert.equal(pitchOf(note, { ankiPitchField: "Missing" }), "heiban");
   assert.equal(pitchOf(note, { ankiPitchField: "" }), "heiban");
+  // A name in another case than the note type's is the same field.
+  assert.equal(pitchOf(note, { ankiPitchField: "notes" }), "odaka");
+  assert.equal(pitchOf(note, { ankiPitchField: "NOTES" }), "odaka");
+});
+
+// Note types spell one field Picture or picture (Lapis capitalises, Eminent does not), and a
+// setting in the other case used to find nothing: every mine into an Eminent card failed.
+test("fieldKey names a note's field in whatever case the note type spells it", () => {
+  const { fieldKey } = words;
+  const eminent = fields([["wordDictionaryForm", "切り"], ["sentence", "切り。"], ["sentenceAudio", ""], ["picture", ""]]);
+  assert.equal(fieldKey(eminent, "Picture"), "picture");
+  assert.equal(fieldKey(eminent, "SentenceAudio"), "sentenceAudio");
+  assert.equal(fieldKey(eminent, "Sentence"), "sentence");
+  assert.equal(fieldKey(eminent, "picture"), "picture");
+  assert.equal(fieldKey(eminent, " picture "), "picture", "the setting is trimmed");
+  assert.equal(fieldKey(eminent, "Image"), null);
+  assert.equal(fieldKey(eminent, ""), null);
+  assert.equal(fieldKey(eminent, "   "), null);
+  assert.equal(fieldKey(eminent, undefined), null);
+  assert.equal(fieldKey(null, "Picture"), null);
+  // An object's own names only: nothing inherited is a field.
+  assert.equal(fieldKey(eminent, "constructor"), null);
+  assert.equal(fieldKey(eminent, "toString"), null);
+  // Two fields differing in case alone: the exact name is taken, an inexact one is not guessed.
+  const both = fields([["Picture", ""], ["picture", ""]]);
+  assert.equal(fieldKey(both, "picture"), "picture");
+  assert.equal(fieldKey(both, "Picture"), "Picture");
+  assert.equal(fieldKey(both, "PICTURE"), null);
+});
+
+test("the word field the settings name is found in any case too", () => {
+  const note = fields([["Expression", "更に"], ["Word", "さらに"], ["Reading", "さらに"], ["Glossary", "(adv, uk)"]]);
+  assert.equal(kanaReadingOf(note, { ankiWordField: "Expression" }), "さらに");
+  assert.equal(kanaReadingOf(note, { ankiWordField: "expression" }), "さらに");
+  // The word field is skipped as a reading source whatever case names it.
+  assert.equal(kanaReadingOf(fields([["expression", "更に"], ["Reading", "さらに"], ["Notes", "(uk)"]]), { ankiWordField: "Expression" }), "さらに");
 });
 
 test("pitchOf takes the lowest-order matching field and never reads the pitch field as a reading", () => {

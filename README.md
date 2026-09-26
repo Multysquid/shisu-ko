@@ -262,8 +262,9 @@ To mine by hand instead:
   grab the matching frame, then jumps back).
 
 The first time, Anki shows a dialog asking whether to allow the extension; click **Yes**. Field
-names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types;
-change them in the popup to match yours. An optional sentence field is filled with the subtitle
+names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types, and
+match whatever case your note type writes them in (`picture` and `sentenceAudio` in Eminent);
+change them in the popup when yours are named differently. An optional sentence field is filled with the subtitle
 text only when it is empty, so it never overwrites what Yomitan wrote. An optional word field
 names the field holding the expression, used to tell two similar lines apart and, by the
 [word colours](#word-colours), to read each card's word; left empty, the note's first field is
@@ -679,7 +680,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Server says "Only N MiB of GPU memory is free" or restarts by itself | Other programs (games, Wallpaper Engine, VR software) hold most of the VRAM. The server switches to int8 weights; with under about 2.5 GB free the display driver can reset under load (Windows logs LiveKernelEvent 141). Close GPU-heavy apps or type `kotoba-tech/kotoba-whisper-v2.0-faster` into the popup's model field. Cached cues survive restarts. |
 | CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device; update the NVIDIA driver or type `small` into the popup's model field. |
 | Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
-| Mining says the card has none of the fields | Set the image/audio field names in the popup to the fields of your note type. |
+| Mining says the card has no field "Picture" or "SentenceAudio" | Your note type names them differently; the message lists the card's own fields. Enter the right names under Anki, clips and server > Image field / Audio field in the popup (upper and lower case do not matter). |
 | No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |
 
 `run.cmd --check` prints diagnostics, including whether the Start button's launcher is registered;

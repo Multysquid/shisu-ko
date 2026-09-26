@@ -63,13 +63,14 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   odaka, otherwise nakadaka, with `m` the drawn mora count, else `moraCount()` of the pitch text
   without ꜜ when kana-only, else of `reading`, else of `word`, else unknown (nakadaka).
 - `pitchOf(fields, settings)`: `fields` is `notesInfo`'s `{name: {value, order}}`. The candidates
-  are the field `ankiPitchField` names (trimmed, when present), else every field whose name
+  are the field `ankiPitchField` names (trimmed, in any case, `fieldKey()` as in `mining.md`, when
+  present), else every field whose name
   matches `/pitch|accent|アクセント/i` in `order`; the first whose value `parsePitch()` reads
   decides (a field drawing nothing this reads, such as Jidoujisho's graph, before a position field
   does not hide it). The reading is the lowest-order field other than the candidate matching
   `/reading|furigana|読み|よみ/i` and not `/sentence|文/i` (`isReadingField()`; `SentenceFurigana`
   holds the sentence's kana, whose mora count would make every odaka word nakadaka), through
-  `readingOf()`; the word is `ankiWordField`, else order 0, through `plainWord()`. When no
+  `readingOf()`; the word is `ankiWordField` (in any case), else order 0, through `plainWord()`. When no
   candidate reads, or there is none, the reading fields are the last resort, in order, through
   `drawnPitch()` alone: Yomitan's `{pitch-accents}` is often the reading field itself, while a
   plain reading draws nothing. Null otherwise.

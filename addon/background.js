@@ -1110,11 +1110,32 @@ function extendSentenceField(existing, full) {
   return escapeHtml(text.slice(0, at)) + "<b>" + escapeHtml(word) + "</b>" + escapeHtml(text.slice(at + word.length));
 }
 
+// What a mine that found none of the configured fields says: the names it looked for, the names
+// the card has (a few, in the note type's order), and where the settings are, so the viewer can
+// type the right ones in rather than guess.
+const MISSING_FIELDS_SHOWN = 8;
+function missingFieldsError(what, missing, fields) {
+  const wanted = missing.map((name) => `"${String(name || "").trim()}"`).join(" or ");
+  const names = Object.entries(fields || {})
+    .sort(([, a], [, b]) => Number((a && a.order) || 0) - Number((b && b.order) || 0))
+    .map(([name]) => name);
+  const shown = names.slice(0, MISSING_FIELDS_SHOWN).join(", ") + (names.length > MISSING_FIELDS_SHOWN ? ", …" : "");
+  const has = names.length ? ` (its fields: ${shown})` : "";
+  return `The ${what} card has no field ${wanted}${has}. Check the field names and change them in the settings if they differ: popup > Anki, clips and server.`;
+}
+
+// A field's text by a name from the settings, in whatever case the note type spells it
+// (SHISUKO_WORDS.fieldKey); "" when the note has no such field.
+function noteField(fields, name) {
+  const key = SHISUKO_WORDS.fieldKey(fields, name);
+  return key ? String((fields[key] && fields[key].value) || "").trim() : "";
+}
+
 // The two fields that say what a card is about. The word is whatever the viewer configured, else
 // the note's first field, which is where every Yomitan template puts the expression.
 function noteSummary(info, settings) {
   const fields = (info && info.fields) || {};
-  const read = (name) => String((fields[name] && fields[name].value) || "").trim();
+  const read = (name) => noteField(fields, name);
   const sentenceName = String(settings.ankiSentenceField || "").trim() || "Sentence";
   const wordName = String(settings.ankiWordField || "").trim();
   let word = "";
@@ -1310,7 +1331,7 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
       // The note was picked by id, not by the viewer: make sure it really is about this subtitle
       // before writing media into it.
       const guardName = String(settings.ankiSentenceField || "").trim() || "Sentence";
-      const written = normalizeSentence((fields[guardName] && fields[guardName].value) || "");
+      const written = normalizeSentence(noteField(fields, guardName));
       const spoken = normalizeSentence(sentence.text) || normalizeSentence(cue.text);
       // The card and the subtitle rarely agree word for word: Yomitan's sentence can stop short of
       // the cue, run past it, or carry furigana. The better of the two readings of what was said
@@ -1322,28 +1343,31 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
     }
     const update = {};
     const missing = [];
+    // Each field under the name the note type gives it, whatever case the settings wrote it in.
+    const imageKey = SHISUKO_WORDS.fieldKey(fields, settings.ankiImageField);
+    const audioKey = SHISUKO_WORDS.fieldKey(fields, settings.ankiAudioField);
     if (image) {
-      if (settings.ankiImageField in fields) {
+      if (imageKey) {
         const stored = await storeMedia(url, image.filename, image.base64);
-        update[settings.ankiImageField] = `<img src="${stored}">`;
+        update[imageKey] = `<img src="${stored}">`;
       } else {
         missing.push(settings.ankiImageField);
       }
     }
     if (audio) {
-      if (settings.ankiAudioField in fields) {
+      if (audioKey) {
         const stored = await storeMedia(url, audio.filename, audio.base64);
-        update[settings.ankiAudioField] = `[sound:${stored}]`;
+        update[audioKey] = `[sound:${stored}]`;
       } else {
         missing.push(settings.ankiAudioField);
       }
     }
     // Same field the guard above reads: whoever holds the sentence gets the whole sentence.
     const sentenceField = String(settings.ankiSentenceField || "").trim();
-    const fieldName = sentenceField || "Sentence";
+    const fieldName = SHISUKO_WORDS.fieldKey(fields, sentenceField || "Sentence");
     let extended = false;
-    if (fieldName in fields) {
-      const existing = String((fields[fieldName] && fields[fieldName].value) || "").trim();
+    if (fieldName) {
+      const existing = noteField(fields, fieldName);
       if (!existing) {
         // Filling an unconfigured field was never this add-on's business; only extending is.
         if (sentenceField) update[fieldName] = escapeHtml(sentence.text);
@@ -1356,7 +1380,7 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
       }
     }
     if (!Object.keys(update).length) {
-      return { ok: false, error: `The ${what} card has none of the fields ${missing.join(", ")}. Check the field names in the popup.` };
+      return { ok: false, error: missingFieldsError(what, missing, fields) };
     }
     await anki(url, "updateNoteFields", { note: { id: noteId, fields: update } }, ANKI_REQUEST_TIMEOUT_MS);
     rememberDeck(url, noteId); // not awaited: the mine is done, the deck is for the word colours
