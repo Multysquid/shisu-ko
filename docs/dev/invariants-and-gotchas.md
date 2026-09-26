@@ -52,9 +52,25 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`.
   It never takes a path, a program or an argument from a message: the only thing it can run is
   the checkout's own `server/run.cmd` / `server/run.sh` (root = the parent of the folder the
-  host file lives in), and it registers only under the user's own profile
-  (`HKCU\Software\Mozilla\NativeMessagingHosts`, `~/.mozilla/native-messaging-hosts`,
-  `~/Library/Application Support/Mozilla/NativeMessagingHosts`), never system-wide.
+  host file lives in), and it registers only under the user's own profile, never system-wide:
+  for Firefox (`HKCU\Software\Mozilla\NativeMessagingHosts`, `~/.mozilla/native-messaging-hosts`,
+  `~/Library/Application Support/Mozilla/NativeMessagingHosts`) and for Chrome
+  (`HKCU\Software\Google\Chrome\NativeMessagingHosts`, `~/.config/google-chrome/NativeMessagingHosts`,
+  `~/Library/Application Support/Google/Chrome/NativeMessagingHosts`), plus Chromium on Linux
+  (`~/.config/chromium/NativeMessagingHosts`; `$CHROME_CONFIG_HOME`, else `$XDG_CONFIG_HOME`,
+  replaces `~/.config` for both, as it does for Chrome itself). Firefox's manifest allows the
+  gecko id (`allowed_extensions`), Chrome's the Chrome Web Store install's origin alone
+  (`allowed_origins`, `CHROME_ORIGIN`): never a wildcard, and never an unpacked build's id,
+  which Chrome derives from the folder it was loaded from. The popup shows the button for
+  Firefox and for the store id (`START_AVAILABLE`: `runtime.getURL("")` is `moz-extension:` or
+  exactly `chrome-extension://<CHROME_STORE_ID>/`, and `test_native_host.py` keeps
+  `CHROME_STORE_ID` equal to `CHROME_EXTENSION_ID`), never for an unpacked build. Another
+  Chromium-based browser holding the store install can give the same URL, and the host is
+  registered only in the folders above, so a browser that reads a folder of its own (Chromium
+  outside Linux; on Linux and macOS Chrome Beta, Dev and Canary, whose folders carry the
+  channel's name, `google-chrome-beta` or `Google/Chrome Beta`; Brave, Edge and the like; on
+  Windows every Chrome channel reads the one key) can show the button and answer "launcher not
+  registered" with a hint that cannot help: those browsers are deliberately left out.
   `nativeMessaging` stays in `optional_permissions`, requested by the popup's click handler
   before its first `await` and by nothing else; the button is not a setting.
 - A model name from a client (`model` in `/sync`) must match `MODEL_NAME_RE`
@@ -126,11 +142,17 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.
-- Firefox runs a `.cmd` native host through `cmd.exe /s /c "<host> <manifest path> <extension id>"`.
-  stdout is the protocol, so the wrapper must not `echo`, `pause` or print anything (`@echo off`
-  first), and the host has to accept those two arguments. Firefox keeps the host in a job
-  object: a child that does not `CREATE_BREAKAWAY_FROM_JOB` dies with the host. And cmd.exe
-  splits a quoted path holding `&`, `(` or `^`: name the launcher relative to `cwd`.
+- Firefox runs a `.cmd` native host through `cmd.exe /s /c "<host> <manifest path> <extension id>"`,
+  Chrome through `cmd.exe` too, with the extension's origin and, on Windows,
+  `--parent-window=<handle>` as its arguments. stdout is the protocol, so the wrapper must not
+  `echo`, `pause` or print anything (`@echo off` first), and the host has to accept those
+  arguments. Firefox keeps the host in a job object: a child that does not
+  `CREATE_BREAKAWAY_FROM_JOB` dies with the host. And cmd.exe splits a quoted path holding `&`,
+  `(` or `^`: name the launcher relative to `cwd`.
+- Chrome adds `chrome.runtime.sendNativeMessage` only once the optional `nativeMessaging` is
+  granted, which the popup does while the service worker runs, possibly on a `chrome.runtime`
+  rebuilt for it. `browser-api.js` therefore looks the method up on `chrome.runtime` at each use
+  (a getter); a copy taken at load read "permission missing" until the worker restarted.
 - `scripts/browser-smoke.mjs` waits for `#server-status` to read exactly `Server offline` and
   then `Server online`; keep those badge texts.
 - `browser.downloads.download()` refuses `data:` URLs ("Access denied for URL data:...", thrown

@@ -17,7 +17,7 @@ addon/        Firefox source extension, Manifest V3, plain JS; directly loadable
               both, in that order)
 server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
               native_host.py: the native-messaging host behind the popup's "Start server" button
-              (stdlib only); native-host.cmd / native-host.sh wrap it, Firefox runs the wrapper
+              (stdlib only); Firefox and Chrome run it through native-host.cmd / native-host.sh
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 docs/dev/     developer docs: the full design of each subsystem, its reasons and measurements
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
@@ -64,7 +64,13 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   which is the AMO listing's text.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`. It
   never takes a path, program or argument from a message; it runs only the checkout's own
-  `server/run.cmd` / `server/run.sh` and registers only under the user's own profile.
+  `server/run.cmd` / `server/run.sh` and registers only under the user's own profile, for Firefox
+  (`allowed_extensions`: the gecko id) and Chrome, plus Chromium on Linux (`allowed_origins`: the
+  Chrome Web Store id `CHROME_EXTENSION_ID` alone, never a wildcard or an unpacked build's id).
+  The popup offers the button on Firefox and under that store id (`START_AVAILABLE`,
+  `CHROME_STORE_ID` in `popup.js`; `test_native_host.py` keeps the two ids equal), never to an
+  unpacked build. Other Chromium browsers holding the store install read host folders of their
+  own and are deliberately left out.
   `nativeMessaging` stays in `optional_permissions`, requested by the popup's click handler before
   its first `await` and by nothing else.
 - A client's model name (`model` in `/sync`) must match `MODEL_NAME_RE` and contain no `..`, else it
@@ -83,7 +89,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `seekPlayhead()`.
 - Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`,
   `config.json` (`write_config()`, `read_config()`, `resolve_default_model()`),
-  `server-<port>.lock`, `server.log` and, on Windows, `native-messaging/shisuko.json`. Detail:
+  `server-<port>.lock`, `server.log` and, on Windows, `native-messaging/shisuko.json` (Firefox's
+  host manifest) and `native-messaging/shisuko-chrome.json` (Chrome's). Detail:
   `docs/dev/cue-building.md`, "Runtime data and the cue cache".
 - The cue cache is forever. `CACHE_FORMAT` (6) is the only migration: `load_cache()` drops every
   older record whole before reading anything out of it, so a geometry change bumps it. Cue caches
@@ -226,9 +233,12 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.
-- Firefox runs a `.cmd` native host through `cmd.exe`: the wrapper must print nothing (`@echo off`
-  first), the host must accept Firefox's two arguments, a child must `CREATE_BREAKAWAY_FROM_JOB`,
-  and the launcher is named relative to `cwd` (cmd.exe splits a quoted path holding `&`, `(`, `^`).
+- Firefox and Chrome run a `.cmd` native host through `cmd.exe`: the wrapper must print nothing
+  (`@echo off` first), the host must accept the browsers' arguments (Firefox's two, Chrome's origin
+  and `--parent-window=`), a child must `CREATE_BREAKAWAY_FROM_JOB`, and the launcher is named
+  relative to `cwd` (cmd.exe splits a quoted path holding `&`, `(`, `^`).
+- Chrome adds `runtime.sendNativeMessage` only once `nativeMessaging` is granted, while the
+  service worker runs: `browser-api.js` looks it up on `chrome.runtime` at each use, never at load.
 - `scripts/browser-smoke.mjs` waits for `#server-status` to read exactly `Server offline` and then
   `Server online`; keep those badge texts.
 - `browser.downloads.download()` refuses `data:` URLs. Build a `Blob`, pass

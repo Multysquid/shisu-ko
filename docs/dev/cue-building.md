@@ -276,9 +276,9 @@ The runtime-data invariant in full:
   it), plus what the Start
   button brought: `server-<port>.lock` (`hold_instance_lock()` /
   `try_lock()`, held from before the model load until the server exits), `server.log` (the POSIX
-  `launch()` appends the launched server's output there) and, on Windows only, the host manifest
-  `native-messaging/shisuko.json` (`manifest_path()`; Linux and macOS keep it under Mozilla's
-  own directories). Cue caches are only reused when model (compared canonically) and language
+  `launch()` appends the launched server's output there) and, on Windows only, the host
+  manifests `native-messaging/shisuko.json` (Firefox) and `native-messaging/shisuko-chrome.json`
+  (Chrome) (`manifest_path()`; Linux and macOS keep them under the browsers' own directories). Cue caches are only reused when model (compared canonically) and language
   match. The loaded model's cues are `cache/<video_id>.cues.json`; when another model takes the
   file over, `save_cache()` first archives the old cues as `cache/<video_id>.<slug>.cues.json`
   (slug: the canonical model name with everything outside `[A-Za-z0-9._-]` replaced by `_`), and
