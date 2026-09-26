@@ -44,7 +44,11 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   never with a token, cookie or identifier, and there is no second remote endpoint;
   `notifications` stays a required permission (the start-up check notifies with no popup open
   to ask for a grant). The privacy policy, description and reviewer notes in `docs/amo/` state
-  exactly this, so a change here changes them too.
+  exactly this, so a change here changes them too. On Chrome, a Chrome Web Store install
+  (`CHROME_STORE_ID` in `popup.js`) is updated from the store, which adds its own update URL to
+  the package it serves, and an unpacked Chrome build (the release's zip,
+  `dist/chrome`) only by the viewer loading a newer one. That has no counterpart in
+  `docs/amo/`: those texts go to addons.mozilla.org, which lists the Firefox build only.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`.
   It never takes a path, a program or an argument from a message: the only thing it can run is
   the checkout's own `server/run.cmd` / `server/run.sh` (root = the parent of the folder the
