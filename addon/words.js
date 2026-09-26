@@ -36,7 +36,7 @@ const SHISUKO_WORDS = (() => {
     "は", "が", "を", "に", "へ", "と", "で", "の", "も", "や", "か", "ね", "よ", "な", "わ", "ぞ", "ぜ", "さ", "し", "て", "ば",
     "から", "まで", "より", "こそ", "さえ", "すら", "しか", "だけ", "ばかり", "ほど", "くらい", "ぐらい", "など", "なんて", "なんか",
     "きり", "っきり", "のみ", "だって", "とか", "って", "ってば", "やら", "だの", "なり", "ずつ", "だに", "ながら", "つつ", "たり",
-    "けど", "けれど", "けれども", "のに", "ので", "のは", "のが", "のを", "のか", "には", "とは", "では", "へは", "とも", "にも",
+    "けど", "けども", "けれど", "けれども", "のに", "ので", "のは", "のが", "のを", "のか", "には", "とは", "では", "へは", "とも", "にも",
     "でも", "へも", "への", "との", "での", "かも", "かな", "かしら", "っけ", "よね", "ねえ", "なあ", "かい", "ても", "たら", "なら",
     "だ", "だった", "だろう", "だろ", "です", "でした", "でしょう", "でしょ", "ます", "ません", "ました", "ない", "たい", "ん",
     "じゃ", "じゃん", "んじゃ", "もん",
@@ -631,7 +631,7 @@ const SHISUKO_WORDS = (() => {
     "れ", "れる", "られ", "られる", "せ", "せる", "させ", "させる", "ば", "う", "よ", "よう", "ろ", "る", "い", "けれ", "ず",
     "ちゃ", "じゃ", "てる", "でる", "てい", "でい", "いる", "いた", "いて", "います", "いない", "ましょ", "でし", "でしょ", "です",
     "たら", "だら", "たり", "だり", "ても", "でも", "ながら", "なさい", "まい", "とく", "どく", "いか", "いき", "いく", "いけ", "いこ", "いっ",
-    "いただく", "いただき", "いただけ", "いただい", "いただこ", "いただか", "っ", "ー",
+    "いただく", "いただき", "いただけ", "いただい", "いただこ", "いただか", "っ", "ー", "だっ",
   ];
   // 使わせていただきました is わ + せ + て + いただき + まし + た: five tails after the first piece.
   const MAX_TAILS = 5;
@@ -659,7 +659,7 @@ const SHISUKO_WORDS = (() => {
   const follows = (pieces, prevs) => {
     for (const piece of pieces) AFTER[piece] = new Set(prevs);
   };
-  follows(["た", "だ"], ["onbin", "shi", "っ", "し", "かっ", "なかっ", "たかっ", "まし", "でし", "そう", "て", "で", "いっ", "いただい", "ん", "e", "られ", "させ", "せ", "れ"]);
+  follows(["た", "だ"], ["onbin", "shi", "っ", "し", "かっ", "なかっ", "たかっ", "まし", "でし", "だっ", "そう", "て", "で", "いっ", "いただい", "ん", "e", "られ", "させ", "せ", "れ"]);
   follows(["て", "で", "てい", "でい", "てる", "でる"], ["onbin", "shi", "っ", "し", "まし", "でし", "なく", "たく", "ない", "くない", "て", "で", "いっ", "いただい", "ん", ...ICHIDAN_LIKE]);
   follows(["う"], ["o", "よ", "ろ", "いこ", "いただこ", "ましょ", "でしょ", "ちゃ", "じゃ"]);
   follows(["ず"], ["a", "ら", "いただか", "suru:せ", ...ICHIDAN_LIKE]);
@@ -676,6 +676,8 @@ const SHISUKO_WORDS = (() => {
   follows(["なきゃ"], ["a", "ら", "し", "く", "たく", "て", "で", "じゃ", ...ICHIDAN_LIKE]);
   follows(["い", "いる", "いた", "いて", "います", "いない", "いか", "いき", "いく", "いけ", "いこ", "いっ"], ["て", "で", "ちゃ", "じゃ"]);
   follows(["いただく", "いただき", "いただけ", "いただい", "いただこ", "いただか"], ["て", "で"]);
+  // The copula's past after the appearance auxiliary (楽しそうだった, 降りそうだった).
+  follows(["だっ"], ["そう"]);
   follows(
     ["ん"],
     [
@@ -689,10 +691,10 @@ const SHISUKO_WORDS = (() => {
   // is 行う's noun, 引っかかる is a verb of its own), a する verb's さ, せ and す (勉強さ needs
   // せる, 勉強す is 勉強すべき's), かっ, なかっ and たかっ (they only reach かった: 見たかっこいい is
   // 見た and かっこいい), けれ and なけれ (they only reach ければ), まし and でし (they only reach
-  // ました, まして and でした).
+  // ました, まして and でした), だっ (it only reaches だった).
   const OPEN_TAILS = new Set([
     "い", "てい", "でい", "いか", "いこ", "いっ", "いただい", "いただこ", "いただか", "a", "o", "onbin", "ら", "suru:さ", "suru:せ",
-    "suru:す", "かっ", "なかっ", "たかっ", "けれ", "なけれ", "まし", "でし",
+    "suru:す", "かっ", "なかっ", "たかっ", "けれ", "なけれ", "まし", "でし", "だっ",
   ]);
   // What the 音便 kana may be followed by: the た and て pieces only. Every other tail after it
   // begins another word (行います, 行いたい, 彼の行いです are 行う's, 飲んどけ is 飲む and どけ), so
@@ -1042,16 +1044,68 @@ const SHISUKO_WORDS = (() => {
 
   // The word boundaries the matcher goes by: `starts`, plus the index after a て or で that ICU
   // fused with the く of the auxiliary behind it (TE_FORM: 食|べ|てく|れ|た), where a word may
-  // begin and a bounded one end. `starts` itself is never written (the content script keeps
-  // it per cue): the set is copied when there is something to add.
+  // begin and a bounded one end, and the copula's seams (copulaSeam()). `starts` itself is never
+  // written (the content script keeps it per cue): the set is copied when there is something to
+  // add.
   function boundsOf(text, starts) {
     let bounds = starts;
-    for (const pos of starts) {
-      if (!TE_FORM.has(text[pos]) || text[pos + 1] !== "く" || starts.has(pos + 1)) continue;
+    const add = (pos) => {
       if (bounds === starts) bounds = new Set(starts);
-      bounds.add(pos + 1);
+      bounds.add(pos);
+    };
+    for (const pos of starts) {
+      if (TE_FORM.has(text[pos]) && text[pos + 1] === "く" && !starts.has(pos + 1)) add(pos + 1);
+      for (const seam of copulaSeams(text, pos, starts)) add(seam);
     }
     return bounds;
+  }
+
+  // The auxiliaries ICU fuses with the copula after them (そうだ, そうです, そうだね in Firefox:
+  // 良さ|そうだ|な, 大丈夫|そうだ), so that the copula never begins a segment there.
+  const COPULA_HEADS = ["そう", "よう", "みたい"];
+  // The copula ICU cuts in two, a lone だ or で and the rest fused with what follows (Firefox:
+  // 大変|だ|ったね, 学生|で|したね): the entries of PARTICLES that begin with that kana.
+  const COPULA_CUT = [...PARTICLES].filter((piece) => piece.length > 1 && (piece[0] === "だ" || piece[0] === "で"));
+
+  // The lengths of the entries of PARTICLES that `piece` is made of, in order, longest first where
+  // it can be cut more than one way (だね: だ, ね), or null.
+  function particleSplit(piece) {
+    if (!piece) return [];
+    for (let len = Math.min(PARTICLE_MAX_LEN, piece.length); len >= 1; len--) {
+      if (!PARTICLES.has(piece.slice(0, len))) continue;
+      const rest = particleSplit(piece.slice(len));
+      if (rest) return [len, ...rest];
+    }
+    return null;
+  }
+
+  // The indices inside the segment at `pos` where ICU hid the copula's seams, none when it hid
+  // none: after an auxiliary of COPULA_HEADS fused with particles only (そう|だ, そう|だ|ね), or
+  // after the copula's second half fused with particles only (だ|った|ね, で|した|ね, だ|っ|たん), and between
+  // those particles. What follows must be particles alone, so no word ICU knows is ever cut
+  // (ようやく, そうじ; みたいな is みたい and な, both kept as they were).
+  function copulaSeams(text, pos, starts) {
+    const end = segmentEnd(text, pos, starts);
+    const cuts = (from, stop) => {
+      const lens = particleSplit(text.slice(from, stop));
+      if (!lens) return [];
+      const seams = [from];
+      for (const len of lens.slice(0, -1)) seams.push(seams[seams.length - 1] + len);
+      return seams;
+    };
+    const head = COPULA_HEADS.find((piece) => text.startsWith(piece, pos) && pos + piece.length < end);
+    if (head) return cuts(pos + head.length, end);
+    if (end !== pos + 1 || end >= text.length) return [];
+    for (const piece of COPULA_CUT) {
+      const stop = pos + piece.length;
+      if (!text.startsWith(piece, pos) || starts.has(stop) || stop >= text.length) continue;
+      // The segment the piece ends inside: the next one (だ|ったね) or one after it (だ|っ|たん).
+      let next = end;
+      while (next < stop) next = segmentEnd(text, next, starts);
+      const seams = cuts(stop, next);
+      if (seams.length) return seams;
+    }
+    return [];
   }
 
   // The end of the suffix that joins a name ending at `end`: what remains of the segment there
@@ -1172,6 +1226,44 @@ const SHISUKO_WORDS = (() => {
     return shreddedVerb(text, pos, piece, starts, afterPlain) ? -1 : pos + 1;
   }
 
+  // The grammar words a learner reads past like the particles, counted as known with them (the
+  // `particles` option): the verbs that carry the grammar (ある, いる, おる, みる, する, くる, なる,
+  // いく, おく, しまう, くれる, もらう, あげる, やる) in their common forms, since a verb whose stem
+  // is one kana matches its exact form only; the auxiliaries of appearance and hearsay; the こそあど
+  // words, the formal nouns and the everyday adverbs. A deck word at the same start still wins: a
+  // card says more than this list.
+  const godanRu = (stem) => ["る", "った", "って", "ってる", "り", "ります", "りました", "りません", "らない", "らなかった", "れば", "ろう"].map((end) => stem + end);
+  const ichidan = (stem) => ["る", "た", "て", "ます", "ました", "ません", "ない", "なかった", "れば", "よう", "ろ", "たい", "てる"].map((end) => stem + end);
+  const GRAMMAR_WORDS = [
+    ...godanRu("あ").filter((form) => !form.startsWith("あら")), "ない", "なかった",
+    ...godanRu("お"), ...godanRu("な"), ...godanRu("や"),
+    ...ichidan("い"), ...ichidan("み"),
+    "する", "した", "して", "します", "しました", "しません", "しない", "しなかった", "すれば", "しよう", "しろ", "したい", "してる",
+    "くる", "きた", "きて", "きます", "きました", "きません", "こない", "こなかった", "くれば", "こよう", "こい", "きたい", "きてる",
+    "いく", "いった", "いって", "いき", "いきます", "いきました", "いかない", "いけば", "いこう",
+    "おく", "おいた", "おいて", "おきます", "おかない",
+    "しまう", "くれる", "もらう", "あげる",
+    "そう", "よう", "みたい", "らしい",
+    "これ", "それ", "あれ", "どれ", "この", "その", "あの", "どの", "ここ", "そこ", "あそこ", "どこ", "こう", "ああ", "どう",
+    "どうしよう", "こんな", "そんな", "あんな", "どんな", "こちら", "そちら", "あちら", "どちら", "何", "なに", "なん",
+    "こと", "もの", "ため", "わけ", "はず", "ところ", "とき", "ほう",
+    "まだ", "まだまだ", "もう", "また", "よく", "もっと", "ずっと", "ちょっと", "とても", "すごく", "やっぱり", "やはり", "きっと", "たぶん", "いい",
+  ];
+  let grammarIndex = null;
+
+  // The end of the grammar word at `pos` (GRAMMAR_WORDS), or -1. Not after a single kanji or kana
+  // of plain text ICU cut off, whose kana are that word's okurigana (書|い|た, 思|い|ます,
+  // ご|ざ|い|ます), not いる's or ある's. Nor なっ after い or だ, which is the sentence-final な
+  // before a quotative って (すごいなって, 好きだなって), never なる. `afterPlain`: plain text ends
+  // at `pos`.
+  function grammarAt(text, pos, starts, afterPlain) {
+    if (afterPlain && starts.has(pos - 1) && (isKanji(text[pos - 1]) || isKana(text[pos - 1]))) return -1;
+    if (text.startsWith("なっ", pos) && (text[pos - 1] === "い" || text[pos - 1] === "だ")) return -1;
+    if (!grammarIndex) grammarIndex = buildIndex(GRAMMAR_WORDS.map((word) => [word, LEARNED, null]));
+    const hit = matchAt(text, pos, grammarIndex, starts);
+    return hit ? hit.end : -1;
+  }
+
   // The text as runs, in order: a matched run carries its entry's status and pitch, the text
   // between matches is one run with neither. `starts` is the set of indices a word may begin at;
   // `opts.particles` and `opts.katakana` count the particles and the katakana words as known,
@@ -1235,6 +1327,16 @@ const SHISUKO_WORDS = (() => {
       }
       return null;
     };
+    // With the option, where a run ends inside a segment: the particle or grammar word ICU fused
+    // to it, counted as known (広さ in Firefox's 広|さも|ある, whose も boundedEnd() let the word
+    // end before; が in 人|がい|た, whose いた is いる's). Returns where the loop goes on.
+    const followOn = (pos) => {
+      if (!particles || bounds.has(pos) || pos >= s.length) return pos;
+      const stop = Math.max(particleAt(s, pos, bounds, false), grammarAt(s, pos, bounds, false));
+      if (stop <= pos) return pos;
+      colour(pos, stop, LEARNED, null);
+      return followOn(stop);
+    };
     while (i < s.length) {
       if (!bounds.has(i)) {
         i++;
@@ -1246,7 +1348,7 @@ const SHISUKO_WORDS = (() => {
         const { lead, hit } = found;
         if (lead && found.status !== null) colour(i, i + lead, found.status, null);
         colour(i + lead, hit.end, hit.entry.status, hit.entry.pitch);
-        i = hit.end;
+        i = followOn(hit.end);
         continue;
       }
       // A name without its colour is still taken whole, so no deck word is found inside it, and
@@ -1265,12 +1367,12 @@ const SHISUKO_WORDS = (() => {
         status = LEARNED;
       }
       if (end <= i && particles) {
-        end = particleAt(s, i, bounds, from < i);
+        end = Math.max(particleAt(s, i, bounds, from < i), grammarAt(s, i, bounds, from < i));
         status = LEARNED;
       }
       if (end > i) {
         colour(i, end, status, null);
-        i = end;
+        i = followOn(end);
         continue;
       }
       i++;

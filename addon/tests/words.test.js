@@ -1749,7 +1749,7 @@ test("markWords counts the particles as known with the option, wherever they sta
   // The longest entry at each start, one run each.
   assert.equal(markWith("本にはね", [["本", "new", "heiban"]], PARTICLES_ON), "本(new,heiban) | には(learned,null) | ね(learned,null)");
   assert.equal(markWith("学生ですね", [["学生", "new", null]], PARTICLES_ON), "学生(new,null) | です(learned,null) | ね(learned,null)");
-  assert.equal(markWith("いいんじゃないかな", [], PARTICLES_ON), "いい | んじゃ(learned,null) | ない(learned,null) | かな(learned,null)");
+  assert.equal(markWith("いいんじゃないかな", [], PARTICLES_ON), "いい(learned,null) | んじゃ(learned,null) | ない(learned,null) | かな(learned,null)");
   // Never over a deck word, a name or a katakana word, and never inside one.
   assert.equal(markWith("彼女のはなし", [["はなし", "new", null]], PARTICLES_ON), "彼女 | の(learned,null) | はなし(new,null)");
   assert.equal(markWith("jrが", [], PARTICLES_ON), "jr(proper,null) | が(learned,null)");
@@ -1775,8 +1775,8 @@ test("markWords counts the quotative with いう as a particle with the option",
   // A card for という itself wins, and does not reach into っていう; a card for いう never shows in
   // ていう, which no quotative fronts it with.
   assert.equal(markWith("猫という", [["猫", "new", null], ["という", "learning", null]], PARTICLES_ON), "猫(new,null) | という(learning,null)");
-  assert.equal(markWith("ことっていうか", [["という", "learning", null]], PARTICLES_ON), "こと | っていう(learned,null) | か(learned,null)");
-  assert.equal(markWith("ことていうか", [["いう", "learning", null]], PARTICLES_ON), "こと | ていう(learned,null) | か(learned,null)");
+  assert.equal(markWith("ことっていうか", [["という", "learning", null]], PARTICLES_ON), "こと(learned,null) | っていう(learned,null) | か(learned,null)");
+  assert.equal(markWith("ことていうか", [["いう", "learning", null]], PARTICLES_ON), "こと(learned,null) | ていう(learned,null) | か(learned,null)");
   // Without the option a quotative after a name stays plain: blue is no card's colour.
   assert.equal(markWith("jrという", [["いう", "learned", null]]), "jr(proper,null) | と | いう(learned,null)");
 });
@@ -1786,13 +1786,13 @@ test("markWords refuses the particle shapes of a kana verb ICU cut up, as measur
   // of やる, なる, よい, する, もらう, かかる, つながる, and the inflection of a verb the deck
   // lacks. The real segmenter cuts each line as the comment says.
   const cases = [
-    ["ちょっと前からやってきました", "ちょっと前 | から(learned,null) | やってきました"], // や|って|き|ました
-    ["新幹線でやりましたけども", "新幹線 | で(learned,null) | やりましたけども"], // や|り|ました
-    ["地獄コースになってるんで", "地獄コース | に(learned,null) | なってるんで"], // な|って|る
+    ["ちょっと前からやってきました", "ちょっと(learned,null) | 前 | から(learned,null) | やって(learned,null) | きました(learned,null)"], // や|って|き|ました
+    ["新幹線でやりましたけども", "新幹線 | で(learned,null) | やりました(learned,null) | けども(learned,null)"], // や|り|ました
+    ["地獄コースになってるんで", "地獄コース | に(learned,null) | なってるんで(learned,null)"], // な|って|る
     ["ぜひよかったら", "ぜひよかったら"], // よ|か|っ|たら
-    ["ご来場お待ちしております", "ご来場お待ちしております"], // し|て|おり|ます
-    ["反動してますね", "反動してます | ね(learned,null)"], // し|て|ます
-    ["マス見てもらってね", "マス見 | て(learned,null) | もらって | ね(learned,null)"], // も|ら|って
+    ["ご来場お待ちしております", "ご来場お待ち | して(learned,null) | おります(learned,null)"], // し|て|おり|ます: する and おる, grammar words
+    ["反動してますね", "反動 | してます(learned,null) | ね(learned,null)"], // し|て|ます: する, a grammar word
+    ["マス見てもらってね", "マス見 | て(learned,null) | もらって(learned,null) | ね(learned,null)"], // も|ら|って
     ["焼肉がかかってますからね", "焼肉 | が(learned,null) | かかってます | から(learned,null) | ね(learned,null)"], // か|かって
     ["運を使っちゃってる", "運 | を(learned,null) | 使っちゃってる"], // 使|っ|ちゃ|って|る
     ["おはようございます", "おはようございます"], // ご|ざ|い|ます
@@ -1804,27 +1804,27 @@ test("markWords refuses the particle shapes of a kana verb ICU cut up, as measur
   assert.equal(markWith("猫がでた", cat, PARTICLES_ON), "猫(new,null) | が(learned,null) | でた");
   assert.equal(markWith("猫がでた", cat, PARTICLES_ON, [], new Set([0, 1, 2, 3])), "猫(new,null) | が(learned,null) | でた");
   assert.equal(markWith("猫がでたよ", cat, PARTICLES_ON), "猫(new,null) | が(learned,null) | でたよ");
-  assert.equal(markWith("猫にもらった", cat, PARTICLES_ON), "猫(new,null) | に(learned,null) | もらった");
-  assert.equal(markWith("猫にもらった", cat, PARTICLES_ON, [], new Set([0, 1, 2, 3, 4, 5])), "猫(new,null) | に(learned,null) | もらった");
+  assert.equal(markWith("猫にもらった", cat, PARTICLES_ON), "猫(new,null) | に(learned,null) | もらった(learned,null)");
+  assert.equal(markWith("猫にもらった", cat, PARTICLES_ON, [], new Set([0, 1, 2, 3, 4, 5])), "猫(new,null) | に(learned,null) | もらった(learned,null)");
   // What it leaves: な before が (つ|な|が|っ|た), a shape too rare to list.
   assert.equal(markWith("名刺と つながったことで", [], PARTICLES_ON), "名刺 | と(learned,null) |  つ | な(learned,null) | がったこと | で(learned,null)");
   // What it costs: the Kansai copula や before った and って is やる's kana too.
   assert.equal(markWith("日本初やった", [], PARTICLES_ON), "日本(proper,null) | 初やった");
-  assert.equal(markWith("休んだばっかやって", [["休む", "learned", null]], PARTICLES_ON), "休んだ(learned,null) | ばっかやって");
+  assert.equal(markWith("休んだばっかやって", [["休む", "learned", null]], PARTICLES_ON), "休んだ(learned,null) | ばっか | やって(learned,null)");
 });
 
 test("markWords keeps the true particles the tempting guards would refuse", () => {
   // A particle before a kana word ICU cut into single kana (を|お|ご|ら, に|い|ます, で|ご|ざ|い):
   // "a particle before a single kana that is no particle" refused 25 such particles.
   assert.equal(markWith("高級焼肉をおごら", [], PARTICLES_ON), "高級焼肉 | を(learned,null) | おごら");
-  assert.equal(markWith("会場にいますもんね", [], PARTICLES_ON), "会場 | に(learned,null) | います | もん(learned,null) | ね(learned,null)");
+  assert.equal(markWith("会場にいますもんね", [], PARTICLES_ON), "会場 | に(learned,null) | います(learned,null) | もん(learned,null) | ね(learned,null)");
   assert.equal(markWith("優勝でございます", [], PARTICLES_ON), "優勝 | で(learned,null) | ございます");
   assert.equal(markWith("東京でたくさん", [], PARTICLES_ON), "東京(proper,null) | で(learned,null) | たくさん");
   // って after a particle or た, the nominaliser の and the copula だ before っ.
   assert.equal(markWith("首都高とかって", [], PARTICLES_ON), "首都高 | とか(learned,null) | って(learned,null)");
   assert.equal(markWith("逃したからって", [], PARTICLES_ON), "逃した | から(learned,null) | って(learned,null)");
   assert.equal(markWith("見るのって楽しい", [], PARTICLES_ON), "見る | の(learned,null) | って(learned,null) | 楽しい");
-  assert.equal(markWith("こんな感じだったんです", [], PARTICLES_ON), "こんな感じ | だ(learned,null) | ったん | です(learned,null)");
+  assert.equal(markWith("こんな感じだったんです", [], PARTICLES_ON), "こんな(learned,null) | 感じ | だった(learned,null) | ん(learned,null) | です(learned,null)");
   // An inflection's shape after a particle or a kanji is the particle.
   assert.equal(markWith("お金がない", [], PARTICLES_ON), "お金 | が(learned,null) | ない(learned,null)");
 });
@@ -1838,13 +1838,13 @@ test("markWords refuses the kana a kanji verb the deck lacks is cut into", () =>
   assert.equal(markWith("さっき休んだばっか", [], PARTICLES_ON), "さっき休んだばっか");
   // The particles beside them stay: が before ない, か after 何, ん after kana.
   assert.equal(markWith("本がない", [], PARTICLES_ON), "本 | が(learned,null) | ない(learned,null)");
-  assert.equal(markWith("何かない", [], PARTICLES_ON), "何 | か(learned,null) | ない(learned,null)");
+  assert.equal(markWith("何かない", [], PARTICLES_ON), "何(learned,null) | か(learned,null) | ない(learned,null)");
   assert.equal(markWith("食べるんだ", [], PARTICLES_ON), "食べる | ん(learned,null) | だ(learned,null)");
 });
 
 test("markWords refuses the kana of slang and interjections ICU cut up, as measured on the viewer's lines", () => {
   const cases = [
-    ["実質1万しか増えへんやんえ、なにこれ", "実質1万 | しか(learned,null) | 増えへんやんえ、なにこれ"], // な|に|これ
+    ["実質1万しか増えへんやんえ、なにこれ", "実質1万 | しか(learned,null) | 増えへんやんえ、 | なに(learned,null) | これ(learned,null)"], // な|に|これ
     ["おっしゃ!", "おっしゃ!"], // おっ|し|ゃ
     ["やばぁ!", "やばぁ!"], // や|ば|ぁ
     ["マスだせぇ", "マスだせぇ"], // だ|せ|ぇ
@@ -1853,7 +1853,7 @@ test("markWords refuses the kana of slang and interjections ICU cut up, as measu
     ["でっけえやつね", "でっけえやつ | ね(learned,null)"], // で|っけ|え
     ["へえ", "へえ"], // へ|え
     ["かもしれない", "かも(learned,null) | しれない"], // かも|し|れ|ない
-    ["それをしろ", "それ | を(learned,null) | しろ"], // し|ろ
+    ["それをしろ", "それ(learned,null) | を(learned,null) | しろ(learned,null)"], // し|ろ: する's, a grammar word
   ];
   for (const [line, want] of cases) assert.equal(markWith(line, [], PARTICLES_ON), want, line);
   const maybe = [["かもしれない", "learned", null], ["そう", "learned", null]];
@@ -1862,17 +1862,17 @@ test("markWords refuses the kana of slang and interjections ICU cut up, as measu
   // The true particles beside the same kana: な before におい or さかな, a particle drawn out.
   assert.equal(markWith("変なにおい", [], PARTICLES_ON), "変 | な(learned,null) | におい");
   assert.equal(markWith("好きなさかな", [], PARTICLES_ON), "好き | な(learned,null) | さかな");
-  assert.equal(markWith("そうだよぉ", [], PARTICLES_ON), "そうだ | よ(learned,null) | ぉ");
-  assert.equal(markWith("そうかあ", [], PARTICLES_ON), "そう | か(learned,null) | あ");
+  assert.equal(markWith("そうだよぉ", [], PARTICLES_ON), "そう(learned,null) | だ(learned,null) | よ(learned,null) | ぉ");
+  assert.equal(markWith("そうかあ", [], PARTICLES_ON), "そう(learned,null) | か(learned,null) | あ");
 });
 
 test("markWords takes the particle ICU fused with the い of いる, and the one before a quotative", () => {
   // ICU cuts 人|がい|た and 猫|とい|た: no particle ends at a boundary there.
-  assert.equal(markWith("人がいた", [], PARTICLES_ON), "人 | が(learned,null) | いた");
-  assert.equal(markWith("人がいない", [], PARTICLES_ON), "人 | が(learned,null) | いない");
-  assert.equal(markWith("猫がいれば", [], PARTICLES_ON), "猫 | が(learned,null) | いれば");
-  assert.equal(markWith("猫といた", [], PARTICLES_ON), "猫 | と(learned,null) | いた");
-  assert.equal(markWith("人がいる", [], PARTICLES_ON), "人 | が(learned,null) | いる");
+  assert.equal(markWith("人がいた", [], PARTICLES_ON), "人 | が(learned,null) | いた(learned,null)");
+  assert.equal(markWith("人がいない", [], PARTICLES_ON), "人 | が(learned,null) | いない(learned,null)");
+  assert.equal(markWith("猫がいれば", [], PARTICLES_ON), "猫 | が(learned,null) | いれば(learned,null)");
+  assert.equal(markWith("猫といた", [], PARTICLES_ON), "猫 | と(learned,null) | いた(learned,null)");
+  assert.equal(markWith("人がいる", [], PARTICLES_ON), "人 | が(learned,null) | いる(learned,null)");
   // Not at the end of the text, not は (靴|を|はい|た is 履いた), not the と of ておいて.
   assert.equal(markWith("猫がい", [], PARTICLES_ON), "猫がい");
   assert.equal(markWith("靴をはいた", [], PARTICLES_ON), "靴 | を(learned,null) | はいた");
@@ -1883,6 +1883,76 @@ test("markWords takes the particle ICU fused with the い of いる, and the one
   // って after a word the deck holds is the quotative, after ちゃ the verb's.
   assert.equal(markWith("さくらって", [["さくら", "learned", null]], PARTICLES_ON), "さくら(learned,null) | って(learned,null)");
   assert.equal(markWith("運を使っちゃってる", [["使う", "learned", null]], PARTICLES_ON), "運 | を(learned,null) | 使っちゃ(learned,null) | ってる");
+});
+
+// The boundaries of a line cut as "a|b|c": its text and the starts of its segments.
+function cutLine(cut) {
+  const starts = new Set([0]);
+  let at = 0;
+  for (const piece of cut.split("|")) starts.add((at += piece.length));
+  const text = cut.replace(/\|/g, "");
+  starts.delete(text.length);
+  return [text, starts];
+}
+
+function markCut(cut, entries, opts = PARTICLES_ON) {
+  const [text, starts] = cutLine(cut);
+  return markWith(text, entries, opts, [], starts);
+}
+
+test("markWords finds the copula where Firefox's segmenter hides it", () => {
+  // The viewer's line, as Firefox 156 cuts it: そうだ is one segment, so だ began none.
+  const deck = ["上", "寝る", "結構", "良い", "十分", "広さ"].map((word) => [word, "learned", null]);
+  assert.equal(
+    markCut("上|で|寝る|の|も|結構|良さ|そうだ|な|。", deck),
+    "上(learned,null) | で(learned,null) | 寝る(learned,null) | の(learned,null) | も(learned,null) | 結構(learned,null) | " +
+      "良さ(learned,null) | そう(learned,null) | だ(learned,null) | な(learned,null) | 。",
+  );
+  // 広さ ends inside 広|さも: the も after it is a particle, ある a grammar word.
+  assert.equal(
+    markCut("十分|な|広|さも|ある|。", deck),
+    "十分(learned,null) | な(learned,null) | 広さ(learned,null) | も(learned,null) | ある(learned,null) | 。",
+  );
+  assert.equal(markCut("大丈夫|そうだ", []), "大丈夫 | そう(learned,null) | だ(learned,null)");
+  assert.equal(markCut("そうだ|ね", []), "そう(learned,null) | だ(learned,null) | ね(learned,null)");
+  assert.equal(markCut("そうだね", []), "そう(learned,null) | だ(learned,null) | ね(learned,null)");
+  // The copula cut in two, its second half fused with a particle or cut again (Node: だ|っ|たん).
+  assert.equal(markCut("大変|だ|ったね", []), "大変 | だった(learned,null) | ね(learned,null)");
+  assert.equal(markCut("学生|で|したね", []), "学生 | でした(learned,null) | ね(learned,null)");
+  assert.equal(markCut("好き|だ|ろうね", []), "好き | だろう(learned,null) | ね(learned,null)");
+  assert.equal(markCut("感じ|だ|っ|たん|です", []), "感じ | だった(learned,null) | ん(learned,null) | です(learned,null)");
+  // An adjective's form runs on through the copula's past after そう.
+  const fun = [["楽しい", "learned", null]];
+  assert.equal(markCut("楽|しそう|だ|った", fun), "楽しそうだった(learned,null)");
+  assert.equal(markCut("楽|し|そうだ|っ|た", fun), "楽しそうだった(learned,null)");
+  // Only particles after the head: a word ICU knows is never cut (そうじ, ようやく), and without
+  // the option nothing is drawn.
+  assert.equal(markCut("そうじ|だ", []), "そうじ | だ(learned,null)");
+  assert.equal(markCut("ようやく|だ", []), "ようやく | だ(learned,null)");
+  assert.equal(markCut("大丈夫|そうだ", [], NAMES_ON), "大丈夫そうだ");
+});
+
+test("markWords counts the grammar words as known with the particles, and never inside another word", () => {
+  // The verbs that carry the grammar, in the forms the lines have them, and the everyday words.
+  assert.equal(markCut("本|が|あった", []), "本 | が(learned,null) | あった(learned,null)");
+  assert.equal(markCut("ここ|に|いる", []), "ここ(learned,null) | に(learned,null) | いる(learned,null)");
+  assert.equal(markCut("見|て|み|た", []), "見 | て(learned,null) | みた(learned,null)");
+  assert.equal(markCut("持|って|きた", []), "持 | って(learned,null) | きた(learned,null)");
+  assert.equal(markCut("来|て|おり|ます", []), "来 | て(learned,null) | おります(learned,null)");
+  assert.equal(markCut("勉強|する", []), "勉強 | する(learned,null)");
+  assert.equal(markCut("まだ|だ", []), "まだ(learned,null) | だ(learned,null)");
+  assert.equal(markCut("大人|らしい", []), "大人 | らしい(learned,null)");
+  assert.equal(markCut("どうし|よう", []), "どうしよう(learned,null)");
+  // A card says more than the list.
+  assert.equal(markCut("本|が|ある", [["ある", "new", null]]), "本 | が(learned,null) | ある(new,null)");
+  // Never inside a word ICU keeps whole, nor on the okurigana of a word it cut up.
+  for (const cut of ["いただきます", "ありがとう", "したがって", "あるいは", "いくら", "書|い|た", "ご|ざ|い|ます"]) {
+    assert.equal(markCut(cut, []), cut.replace(/\|/g, ""), cut);
+  }
+  // なって after い or だ is the sentence-final な and a quotative.
+  assert.equal(markWith("すごいなって", [], PARTICLES_ON), "すごいなって");
+  // Without the option they stay plain.
+  assert.equal(markCut("本|が|あった", [], NAMES_ON), "本があった");
 });
 
 test("markWords runs a noun on over する's forms", () => {

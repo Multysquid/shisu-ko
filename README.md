@@ -324,8 +324,11 @@ all the same, and the card colours join them once a deck has been read.
 **Particles count as known** (off by default) colours green every particle the browser's word
 splitter sets apart as a word of its own, whatever stands before it, and the combinations of
 particles, the copula and the auxiliaries along with them (は, には, から, まで, です, ですね, という
-…; と alone when いう has a card of its own), as grammar you know rather than words with a card;
-turned off, particles keep the text colour. A particle the splitter joins to a verb's ending keeps
+…; と alone when いう has a card of its own), as grammar you know rather than words with a card,
+and with them the words a learner knows as grammar: the verbs that carry it (ある, いる, おる, みる,
+する, くる, なる, いく, しまう, もらう … in their common forms), そう, よう, みたい, らしい, この, それ,
+ここ, どう and the other こそあど words, こと, もの, わけ, はず, and まだ, もう, また, よく, ちょっと and
+the like; a card for one of them still decides its colour. Turned off, they keep the text colour. A particle the splitter joins to a verb's ending keeps
 the text colour too (the よ of できますよ). Most verbs the deck lacks are not taken apart for it:
 the splitter cuts a kana one it does not know into pieces that look like particles (やって, なった,
 よかった, してます, もらって), and the kana ending of a kanji one into more of them (飲んだ,
@@ -439,7 +442,7 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
 | Particles, katakana, names, known words | Under More word colour options, closed by default |
-| Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) are green, as grammar you know; off, they keep the text colour |
+| Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) and the grammar words (ある, いる, する, この, こと, まだ …) are green, as grammar you know; off, they keep the text colour |
 | Katakana words count as known | Off by default. Katakana words of two characters or more that no card, known word or name covers are green |
 | Names and Latin text in blue | Off by default. Place names, a word with a place suffix (駅, 区 …) and Latin text (OK, iPhone) are blue; off, they keep the text colour |
 | Known words | Your own list, one word per line: green whatever the card says, and found in their conjugations without a card. Alt+Shift+K adds the word under the pointer, or takes it off again |
