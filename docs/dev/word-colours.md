@@ -16,7 +16,7 @@ searched by guesswork), `ankiPitchField` the note field holding the pitch (empty
 name). Four settings refine what `cardStatus` shows, and none of them asks Anki: `knownWords`
 (the viewer's own list, one word per line, `learned` whatever the card says; Alt+Shift+K, the
 `mark-known` command, puts the word under the pointer on it or takes it off), `particlesKnown`
-(off by default; on, a particle is `learned`), `katakanaKnown` (a katakana word no card, known
+(off by default; on, a particle or a grammar word, `GRAMMAR_WORDS`, is `learned`), `katakanaKnown` (a katakana word no card, known
 word or name takes is `learned`) and `properNames` (off by default, since no card stands behind a
 name; on, a name or Latin text is `proper`, blue; off, it is still read whole, so no deck word is
 found inside it, and drawn plain, save a katakana head `katakanaKnown` still makes `learned`). Like the names, what they add is a status (a known word keeps
@@ -63,13 +63,14 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   odaka, otherwise nakadaka, with `m` the drawn mora count, else `moraCount()` of the pitch text
   without ꜜ when kana-only, else of `reading`, else of `word`, else unknown (nakadaka).
 - `pitchOf(fields, settings)`: `fields` is `notesInfo`'s `{name: {value, order}}`. The candidates
-  are the field `ankiPitchField` names (trimmed, when present), else every field whose name
+  are the field `ankiPitchField` names (trimmed, in any case, `fieldKey()` as in `mining.md`, when
+  present), else every field whose name
   matches `/pitch|accent|アクセント/i` in `order`; the first whose value `parsePitch()` reads
   decides (a field drawing nothing this reads, such as Jidoujisho's graph, before a position field
   does not hide it). The reading is the lowest-order field other than the candidate matching
   `/reading|furigana|読み|よみ/i` and not `/sentence|文/i` (`isReadingField()`; `SentenceFurigana`
   holds the sentence's kana, whose mora count would make every odaka word nakadaka), through
-  `readingOf()`; the word is `ankiWordField`, else order 0, through `plainWord()`. When no
+  `readingOf()`; the word is `ankiWordField` (in any case), else order 0, through `plainWord()`. When no
   candidate reads, or there is none, the reading fields are the last resort, in order, through
   `drawnPitch()` alone: Yomitan's `{pitch-accents}` is often the reading field itself, while a
   plain reading draws nothing. Null otherwise.
@@ -343,6 +344,27 @@ from them and marks the words of every line. Everything in words.js is pure, wit
     before った and って stays plain; and a deck verb's form that ends inside a particle ICU fused
     to its ending stays plain whole (読|ん|だって with 読む in the deck: 読んだ would end inside
     だって, and ん and だって are the verb's to the guard).
+  - With `opts.particles`, at the same start, `grammarAt()`: a grammar word (`GRAMMAR_WORDS`, its
+    own small index built once: the verbs that carry the grammar, ある いる おる みる する くる なる
+    いく おく やる しまう くれる もらう あげる, in their common forms, since a verb whose stem is one
+    kana matches its exact form only; そう よう みたい らしい; the こそあど words; the formal nouns
+    こと もの ため わけ はず ところ とき ほう; まだ もう また よく もっと ずっと ちょっと and the like)
+    is `learned`, the longer of it and the particle winning. A deck word at that start still wins
+    (a card says more). Being bounded kana words, they never fire inside a word ICU keeps whole
+    (いただきます, ありがとう, したがって, あるいは, いくら); they are refused after a single kanji
+    or kana of plain text, whose okurigana they would be (書|い|た, 思|い|ます, ご|ざ|い|ます), and
+    なっ after い or だ is the sentence-final な before a quotative (すごいなって), never なる.
+  - The copula's seams (`copulaSeams()`, added to the bounds by `boundsOf()`), which Firefox's
+    segmenter (ICU4X) hides where Node's ICU does not, or the other way round: after そう, よう or
+    みたい fused with particles only (`COPULA_HEADS`: 良さ|そうだ|な, そうだね is そう|だ|ね), and
+    after the copula's second half when ICU cut a lone だ or で off it and fused the rest with
+    particles only (`COPULA_CUT`: 大変|だ|ったね, 学生|で|したね, Node's 感じ|だ|っ|たん). What
+    follows must split into particles alone (`particleSplit()`), so no word ICU knows is cut
+    (そうじ, ようやく). The adjective's form runs through the copula's past after そう (the tail
+    `だっ`: 楽|しそう|だ|った is 楽しそうだった whole).
+  - `followOn()`: with the option, where a run ends inside a segment (a deck word boundedEnd() let
+    end before particles, 広さ in Firefox's 広|さも|ある; a particle fused with the い of いる,
+    人|がい|た), the particle or grammar word there is `learned` too.
 - Tests: `addon/tests/words.test.js`.
 
 ### The background index (`addon/background.js`, "word colours" section)

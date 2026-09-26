@@ -1833,7 +1833,7 @@ test("a known list that changed builds the index again from the deck in hand, as
 // deck's words; off, a line colours the deck's words alone. It is an option of the matcher, not
 // part of the index, so a change of it asks the background nothing and keeps the index.
 const PARTICLES_KNOWN = [
-  "これ",
+  "shisuko-word{status=learned}:これ",
   "shisuko-word{status=learned}:は",
   "shisuko-word{status=learned}:日本語",
   "shisuko-word{status=learned}:の",

@@ -262,8 +262,9 @@ To mine by hand instead:
   grab the matching frame, then jumps back).
 
 The first time, Anki shows a dialog asking whether to allow the extension; click **Yes**. Field
-names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types;
-change them in the popup to match yours. An optional sentence field is filled with the subtitle
+names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types, and
+match whatever case your note type writes them in (`picture` and `sentenceAudio` in Eminent);
+change them in the popup when yours are named differently. An optional sentence field is filled with the subtitle
 text only when it is empty, so it never overwrites what Yomitan wrote. An optional word field
 names the field holding the expression, used to tell two similar lines apart and, by the
 [word colours](#word-colours), to read each card's word; left empty, the note's first field is
@@ -323,8 +324,11 @@ all the same, and the card colours join them once a deck has been read.
 **Particles count as known** (off by default) colours green every particle the browser's word
 splitter sets apart as a word of its own, whatever stands before it, and the combinations of
 particles, the copula and the auxiliaries along with them (は, には, から, まで, です, ですね, という
-…; と alone when いう has a card of its own), as grammar you know rather than words with a card;
-turned off, particles keep the text colour. A particle the splitter joins to a verb's ending keeps
+…; と alone when いう has a card of its own), as grammar you know rather than words with a card,
+and with them the words a learner knows as grammar: the verbs that carry it (ある, いる, おる, みる,
+する, くる, なる, いく, しまう, もらう … in their common forms), そう, よう, みたい, らしい, この, それ,
+ここ, どう and the other こそあど words, こと, もの, わけ, はず, and まだ, もう, また, よく, ちょっと and
+the like; a card for one of them still decides its colour. Turned off, they keep the text colour. A particle the splitter joins to a verb's ending keeps
 the text colour too (the よ of できますよ). Most verbs the deck lacks are not taken apart for it:
 the splitter cuts a kana one it does not know into pieces that look like particles (やって, なった,
 よかった, してます, もらって), and the kana ending of a kanji one into more of them (飲んだ,
@@ -438,7 +442,7 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
 | Particles, katakana, names, known words | Under More word colour options, closed by default |
-| Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) are green, as grammar you know; off, they keep the text colour |
+| Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) and the grammar words (ある, いる, する, この, こと, まだ …) are green, as grammar you know; off, they keep the text colour |
 | Katakana words count as known | Off by default. Katakana words of two characters or more that no card, known word or name covers are green |
 | Names and Latin text in blue | Off by default. Place names, a word with a place suffix (駅, 区 …) and Latin text (OK, iPhone) are blue; off, they keep the text colour |
 | Known words | Your own list, one word per line: green whatever the card says, and found in their conjugations without a card. Alt+Shift+K adds the word under the pointer, or takes it off again |
@@ -679,7 +683,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Server says "Only N MiB of GPU memory is free" or restarts by itself | Other programs (games, Wallpaper Engine, VR software) hold most of the VRAM. The server switches to int8 weights; with under about 2.5 GB free the display driver can reset under load (Windows logs LiveKernelEvent 141). Close GPU-heavy apps or type `kotoba-tech/kotoba-whisper-v2.0-faster` into the popup's model field. Cached cues survive restarts. |
 | CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device; update the NVIDIA driver or type `small` into the popup's model field. |
 | Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
-| Mining says the card has none of the fields | Set the image/audio field names in the popup to the fields of your note type. |
+| Mining says the card has no field "Picture" or "SentenceAudio" | Your note type names them differently; the message lists the card's own fields. Enter the right names under Anki, clips and server > Image field / Audio field in the popup (upper and lower case do not matter). |
 | No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |
 
 `run.cmd --check` prints diagnostics, including whether the Start button's launcher is registered;

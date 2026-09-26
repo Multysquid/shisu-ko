@@ -280,7 +280,8 @@ test("mineCue falls back to Downloads when AnkiConnect is unreachable and mineFa
   const res = await sandbox.mineCue({ videoId: "abc123abc123", cue: { start: 0, end: 1 } });
   assert.equal(res.ok, true, JSON.stringify(res));
   assert.equal(res.warning, true);
-  assert.match(res.message, /Anki/);
+  // The outcome first: a toast is cut at 240 characters, and the Anki error after it may run long.
+  assert.match(res.message, /^Saved to Downloads instead\. Anki: /);
   assert.equal(downloaded.length, 1);
 });
 
@@ -899,6 +900,154 @@ test("addToAnki writes to the note it is given without looking up the newest one
   assert.equal(update.params.note.id, 555);
   assert.equal(update.params.note.fields.Picture, '<img src="shot.jpg">');
   assert.equal(update.params.note.fields.SentenceAudio, "[sound:clip.mp3]");
+});
+
+// Eminent's note type spells its fields picture, sentenceAudio and sentence; the settings'
+// defaults say Picture, SentenceAudio and Sentence. Every mine used to fail with "The new card has
+// none of the fields Picture, SentenceAudio".
+function eminentFields(sentence) {
+  return [{ fields: {
+    wordDictionaryForm: { value: "猫", order: 0 }, sentence: { value: sentence, order: 1 },
+    sentenceAudio: { value: "", order: 5 }, picture: { value: "", order: 6 },
+  } }];
+}
+
+test("addToAnki fills a note type that spells the fields in another case, under its own names", async () => {
+  for (const noteId of [555, null]) {
+    const anki = ankiFetch({
+      requestPermission: granted,
+      findNotes: () => [555],
+      notesInfo: () => eminentFields("これは<b>猫</b>です。"),
+      storeMediaFile: (p) => p.filename,
+      updateNoteFields: null,
+    });
+    const { sandbox } = loadBackground({ fetch: anki.fetch });
+    const settings = await sandbox.getSettings();
+    const res = await sandbox.addToAnki(settings, { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, noteId);
+    assert.equal(res.ok, true, JSON.stringify(res));
+    const update = anki.calls.find((c) => c.action === "updateNoteFields");
+    assert.deepEqual(Object.keys(update.params.note.fields).sort(), ["picture", "sentenceAudio"], "the note type's own names, nothing new");
+    assert.equal(update.params.note.fields.picture, '<img src="shot.jpg">');
+    assert.equal(update.params.note.fields.sentenceAudio, "[sound:clip.mp3]");
+  }
+  // The guard reads the sentence under the note type's name too: a card about something else is
+  // refused rather than read as a card without a sentence.
+  const other = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => eminentFields("まったく別の文です。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: other.fetch });
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.mismatch, true);
+  assert.ok(!other.actions().includes("updateNoteFields"));
+  // And the watcher's summary of a new note finds its sentence the same way.
+  assert.deepEqual(plain(sandbox.noteSummary(eminentFields("これは猫です。")[0], {})), { sentence: "これは猫です。", word: "猫" });
+});
+
+test("a card with none of the configured fields says which it has and where the settings are", async () => {
+  const anki = ankiFetch({
+    requestPermission: granted,
+    findNotes: () => [555],
+    notesInfo: () => [{ fields: {
+      Back: { value: "", order: 1 }, Front: { value: "猫", order: 0 }, Screenshot: { value: "", order: 2 }, Clip: { value: "", order: 3 },
+    } }],
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  // The note Yomitan just made, found by the watcher (the automatic mine), and so without a sentence
+  // field the guard could read: the note's own fields are all there is to go by.
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.ok, false);
+  // Where to change the names before the card's fields, which may run long; the fields that look
+  // like a picture or an audio field first.
+  assert.equal(res.error, 'The new card has no field "Picture" or "SentenceAudio". '
+    + "Check the field names and change them in the settings if they differ: popup > Anki, clips and server. "
+    + "Its fields: Screenshot, Clip, Front, Back.");
+  assert.ok(!anki.actions().includes("updateNoteFields"));
+  assert.ok(!anki.actions().includes("storeMediaFile"), "no media is uploaded for a card that cannot take it");
+  // A long note type lists its first fields only, and a mining note type's media fields, which
+  // sit near its end (Lapis: SentenceAudio 10th, Picture 11th), are among them.
+  const lapis = ["Expression", "ExpressionFurigana", "ExpressionReading", "ExpressionAudio", "SelectionText", "MainDefinition",
+    "DefinitionPicture", "Sentence", "SentenceFurigana", "SentenceAudio", "Picture", "Glossary", "Hint", "IsWordAndSentenceCard"];
+  const lapisFields = Object.fromEntries(lapis.map((name, order) => [name, { value: "", order }]));
+  assert.match(sandbox.missingFieldsError("new", ["Screenshot"], lapisFields),
+    /Its fields: ExpressionAudio, DefinitionPicture, SentenceAudio, Picture, Expression, ExpressionFurigana, ExpressionReading, SelectionText, …\.$/);
+  assert.equal(sandbox.missingFieldsError("new", ["Picture"], {}), 'The new card has no field "Picture". Check the field names and change them in the settings if they differ: popup > Anki, clips and server.');
+  // What the viewer sees, the toast's "Mining failed: " or the fallback's "Saved to Downloads
+  // instead. Anki: " in front, keeps the settings hint inside the toast's 240 characters.
+  for (const prefix of ["Mining failed: ", "Saved to Downloads instead. Anki: "]) {
+    const shown = (prefix + sandbox.missingFieldsError("newest", ["Picture", "SentenceAudio"], lapisFields)).slice(0, 240);
+    assert.ok(shown.includes("popup > Anki, clips and server."), shown);
+  }
+});
+
+// A mine whose frame and clip have nowhere to go is refused, sentence field or not: it used to
+// answer success for an extended sentence, with the media lost and no Downloads fallback.
+test("a card that can take neither the frame nor the clip is refused even when its sentence could grow", async () => {
+  for (const [label, fields] of [
+    ["an Eminent-like note, sentence found in another case", { sentence: { value: "<b>猫</b>です", order: 0 }, Image: { value: "", order: 1 }, Audio: { value: "", order: 2 } }],
+    ["a note with the default sentence field", { Sentence: { value: "<b>猫</b>です", order: 0 }, Image: { value: "", order: 1 } }],
+  ]) {
+    const anki = ankiFetch({ requestPermission: granted, notesInfo: () => [{ fields }], storeMediaFile: (p) => p.filename, updateNoteFields: null });
+    const { sandbox } = loadBackground({ fetch: anki.fetch });
+    const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+    assert.equal(res.ok, false, label);
+    assert.match(res.error, /^The new card has no field "Picture" or "SentenceAudio"\./, label);
+    assert.deepEqual(anki.actions().filter((a) => a === "storeMediaFile" || a === "updateNoteFields"), [], label);
+  }
+  // One of the two missing is still a partial mine, as before.
+  const partial = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => [{ fields: { picture: { value: "", order: 0 }, Sentence: { value: "これは猫です。", order: 1 } } }],
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: partial.fetch });
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.match(res.message, /no field named SentenceAudio/);
+});
+
+test("a card that is no longer in Anki is said to be gone, not to lack fields", async () => {
+  const anki = ankiFetch({ requestPermission: granted, notesInfo: () => [{}], storeMediaFile: (p) => p.filename, updateNoteFields: null });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "The new card is no longer in Anki; nothing attached");
+  assert.deepEqual(anki.actions().filter((a) => a === "storeMediaFile" || a === "updateNoteFields"), []);
+});
+
+test("the sentence goes under the note type's spelling, filled or extended, and a field named __proto__ is written", async () => {
+  // Filled: the settings name "Sentence", the note spells it "sentence", and it is empty.
+  const filled = ankiFetch({ requestPermission: granted, notesInfo: () => eminentFields(""), storeMediaFile: (p) => p.filename, updateNoteFields: null });
+  const a = loadBackground({ storage: makeMemoryStorage({ settings: { ankiSentenceField: "Sentence" } }), fetch: filled.fetch });
+  assert.equal((await a.sandbox.addToAnki(await a.sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555)).ok, true);
+  const f1 = filled.calls.find((c) => c.action === "updateNoteFields").params.note.fields;
+  assert.deepEqual(Object.keys(f1).sort(), ["picture", "sentence", "sentenceAudio"]);
+  assert.equal(f1.sentence, "これは猫です。");
+  // Extended: Yomitan's fragment grown to the spoken sentence, under the note's own spelling.
+  const grown = ankiFetch({ requestPermission: granted, notesInfo: () => eminentFields("<b>猫</b>です"), storeMediaFile: (p) => p.filename, updateNoteFields: null });
+  const b = loadBackground({ fetch: grown.fetch });
+  assert.equal((await b.sandbox.addToAnki(await b.sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555)).ok, true);
+  const f2 = grown.calls.find((c) => c.action === "updateNoteFields").params.note.fields;
+  assert.deepEqual(Object.keys(f2).sort(), ["picture", "sentence", "sentenceAudio"]);
+  assert.equal(f2.sentence, "これは<b>猫</b>です。");
+  // The watcher's summary finds a word field named in another case.
+  assert.equal(b.sandbox.noteSummary(eminentFields("x")[0], { ankiWordField: "WordDictionaryForm" }).word, "猫");
+  // A field literally named __proto__ is an own key of notesInfo's answer and gets its media.
+  const proto = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => JSON.parse('[{"fields":{"__proto__":{"value":"","order":0},"Sentence":{"value":"これは猫です。","order":1}}}]'),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const c = loadBackground({ storage: makeMemoryStorage({ settings: { ankiImageField: "__proto__" } }), fetch: proto.fetch });
+  assert.equal((await c.sandbox.addToAnki(await c.sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, null, 555)).ok, true);
+  const f3 = proto.calls.find((call) => call.action === "updateNoteFields").params.note.fields;
+  assert.ok(Object.prototype.hasOwnProperty.call(f3, "__proto__"), JSON.stringify(f3));
 });
 
 test("addToAnki refuses a note whose sentence is about something else", async () => {
