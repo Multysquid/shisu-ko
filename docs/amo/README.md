@@ -63,7 +63,8 @@ Screenshot captions, in order:
    the tag's build, so a hand-signed file of other code fails the release. A tag AMO has signed
    is never moved; fix forward with the next patch version. Publishing it on the listing is a
    step of its own, taken for the releases the listing should get; the reviewer notes point to
-   the tag.
+   the tag. The Chrome Web Store gets every release by itself once the release is made;
+   `docs/cws/README.md` describes that side.
 
 ## Developer Hub, by hand in the browser
 

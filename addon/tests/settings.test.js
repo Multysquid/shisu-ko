@@ -105,11 +105,16 @@ test("nativeMessaging is an optional permission, never a required one", () => {
 
 // The update check tells the viewer about a release with a system notification, which needs the
 // permission at install: the popup cannot ask for it at browser start, when the check runs. The
-// extension never installs itself (no update_url): its updates are addons.mozilla.org's.
+// extension never installs itself, so the manifest names no update_url, neither Firefox's nor
+// Chrome's: its updates come from addons.mozilla.org and, for a Chrome Web Store install, from the
+// store. It carries no key either: the store keeps the item's own and needs none, and it refuses
+// any key on a new item and one that is not the item's own on an update.
 test("notifications is a required permission, and the manifest names no update_url", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   assert.ok(manifest.permissions.includes("notifications"));
   assert.equal(manifest.browser_specific_settings.gecko.update_url, undefined);
+  assert.equal(manifest.update_url, undefined);
+  assert.equal(manifest.key, undefined);
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
   assert.match(html, /<div id="update-banner" class="banner notice hidden">/);
   for (const id of ["update-text", "update-now", "update-later", "update-release", "check-updates", "update-result"]) {

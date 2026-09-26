@@ -17,6 +17,16 @@ order. Chrome refuses an extension whose `commands` suggest more than four short
 the default key of the rest (Alt+Shift+H, `toggle-status`, the fifth), which a Chrome user binds at
 `chrome://extensions/shortcuts`; `build.test.mjs` holds that too. A new command goes last.
 
+The release's Chrome zip, `shisu-ko-<version>-chrome.zip`, is what the Chrome Web Store receives,
+byte for byte: `cws-listing.yml` downloads the release's asset and uploads it without building it
+again (`updates-and-release.md`, "Release"). So the build must write a package the store takes at
+upload, and `build.test.mjs` ("the Chrome package is one the Chrome Web Store takes at upload")
+holds it: no `key` (the store keeps the item's own, and refuses a key on a new item and one that
+is not the item's own on an update) and no `update_url` in the manifest, a name of at most 75
+characters and a description of at most 132 (it is 131), a version of one to four integers up to
+65535 without leading zeros, and every icon the manifest names, `action.default_icon` included, a
+PNG file in the package.
+
 ## Test loaders
 
 `server/tests/_serverlib.py` loads `server.py` the way `cue-building.md` recommends

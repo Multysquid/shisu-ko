@@ -20,6 +20,7 @@ server/       server.py (single file) + setup/run scripts + update.py; runtime d
               (stdlib only); Firefox and Chrome run it through native-host.cmd / native-host.sh
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 docs/dev/     developer docs: the full design of each subsystem, its reasons and measurements
+docs/cws/     Chrome Web Store setup: the service account and publisher id cws-listing.yml needs
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
 flake.nix        Nix package/app/dev shell for the server and the extension build
 sign-addon.cmd   signs a local build through addons.mozilla.org, unlisted (manual fallback, owner's API key)
@@ -58,10 +59,11 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   (`addon/tests/settings.test.js`); its updates come from addons.mozilla.org. Its one remote
   request is the anonymous `GET` of GitHub's `releases/latest` in `fetchLatestRelease()`, never with
   a token, cookie or identifier. `notifications` stays a required permission. `docs/amo/` states
-  exactly this, so a change here changes them too. On Chrome, a Web Store install is updated by
-  the store (`CHROME_STORE_ID` in `popup.js`) and an unpacked build (the release's zip,
-  `dist/chrome`) only by the viewer loading a newer one; this has no counterpart in `docs/amo/`,
-  which is the AMO listing's text.
+  exactly this, so a change here changes them too. On Chrome, the package carries no `key` or
+  `update_url` (`scripts/tests/build.test.mjs`), a Web Store install is updated by the store
+  (`CHROME_STORE_ID` in `popup.js`) and an unpacked build (the release's zip, `dist/chrome`) only
+  by the viewer loading a newer one; this has no counterpart in `docs/amo/`, which is the AMO
+  listing's text.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`. It
   never takes a path, program or argument from a message; it runs only the checkout's own
   `server/run.cmd` / `server/run.sh` and registers only under the user's own profile, for Firefox
@@ -145,7 +147,8 @@ coloured particles with the word before them.
 
 **Updates and release** (`docs/dev/updates-and-release.md`). `checkForUpdate()`, `decideUpdate()`
 and `requestUpdate()` in `background.js`; `renderUpdate()` in `popup.js`; the workflows under
-`.github/workflows/`.
+`.github/workflows/`, the Chrome Web Store's `cws-listing.yml` and `cws-schedule.yml` among them,
+and `scripts/cws.mjs`.
 
 **Build and tests** (`docs/dev/build-and-test.md`). `scripts/build.mjs` derives Chrome from the
 Firefox source; `_serverlib.py`, `_loadBackground.js` and `_loadContent.js` load the code under test.
@@ -215,6 +218,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 
 - AMO checks the listing texts only when a version is submitted to the listing; release notes and
   reviewer notes over 3,000 characters each are refused then, as 0.14.0 was.
+- Chrome Web Store: API v2 only (v1.1 stops on 2026-10-15); a store version must be higher than
+  the one before, and the store refuses the same version twice (a draft holding it is submitted by
+  hand in the Developer Dashboard).
 - Windows command lines are limited to about 32 KB. Put long scripts in files.
 - Hugging Face's xet backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`, plus
   `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the import.
@@ -270,8 +276,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 
 Full process: `docs/dev/updates-and-release.md`.
 
-- Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) makes the release
-  and its `.xpi`, and nothing more (`.github/workflows/release.yml`).
+- Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) runs
+  `.github/workflows/release.yml`, which makes the release and its `.xpi` and nothing more; the
+  finished release then starts `cws-listing.yml`, which submits it to the Chrome Web Store (below).
 - `make_metadata.py` refuses a `release-notes.md` that does not mention the manifest's version, so
   bump the version and write its notes in the same change.
 - **AMO's 3,000-character limit is a must-test.** `make_metadata.py` refuses release notes or
@@ -283,5 +290,13 @@ Full process: `docs/dev/updates-and-release.md`.
   (`gh workflow run amo-listing.yml -f tag=v<version>`) for the newest release only, never by a tag.
 - web-ext runs pinned to one exact version (`web-ext@10.7.0`) in every workflow and in
   `publish-addon.cmd` / `sign-addon.cmd`.
-- `scripts/tests/release-workflows.test.mjs` holds the split between the tag and listing workflows.
+- Every release goes to the Chrome Web Store by itself: `.github/workflows/cws-listing.yml` uploads
+  the release's own Chrome zip (the highest release, never rebuilt) through `scripts/cws.mjs`,
+  store API v2 only, with the repository secret `CWS_SERVICE_ACCOUNT_JSON` and the repository
+  variable `CWS_PUBLISHER_ID` (`docs/cws/README.md`); `cws-schedule.yml` runs it every three hours
+  for a release that an older review held back.
+- `cws-listing.yml` finds the release workflow by `release.yml`'s `name:` (`workflow_run`): rename
+  both or neither.
+- `scripts/tests/release-workflows.test.mjs` holds the split between the tag and listing workflows,
+  and what `cws-listing.yml` and `cws-schedule.yml` run and do for each word the store gives.
 - Rebuild the Docker image with `docker compose build`.

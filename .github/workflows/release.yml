@@ -3,7 +3,13 @@ name: Release extensions
 # A tag makes a release and its signed .xpi, nothing more: the checks, the Firefox package signed
 # by addons.mozilla.org for self-distribution, and the GitHub release with the zips and the .xpi.
 # The public listing on addons.mozilla.org is a workflow of its own, amo-listing.yml, run by hand
-# for the releases it should get.
+# for the releases it should get. The Chrome Web Store gets each release from cws-listing.yml,
+# which starts by itself once this workflow has made the release and uploads the release's own
+# Chrome zip; it names this workflow by its name:, so a rename goes there too. It has no schedule,
+# so it starts for every release even after a long pause. The three-hourly catch-up of releases
+# held back behind an older review is cws-schedule.yml, which GitHub switches off after 60 days
+# without activity in the repository; only held-back releases wait then, until
+# gh workflow enable cws-schedule.yml turns it back on.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]

@@ -123,8 +123,9 @@ checkout is already gone. `--status` shows the current state.
 Every start first looks for a newer Shisu-ko: a git clone is fast-forwarded to the branch it
 tracks, a folder downloaded as a zip is replaced with the newest release, changed Python
 requirements are installed, and a changed extension is pointed out (reload it in Firefox or
-install the new `.xpi`). Local changes are never overwritten, and being offline just starts
-the current version. `run.cmd --no-update` (or `SHISUKO_NO_UPDATE=1`) skips the check.
+install the new `.xpi`; a Chrome Web Store install is updated by the store). Local changes are
+never overwritten, and being offline just starts the current version. `run.cmd --no-update` (or
+`SHISUKO_NO_UPDATE=1`) skips the check.
 
 **Updates.** A server that keeps running would never see a new release, so the add-on looks for
 one itself: it asks GitHub for the newest release once a day, when Firefox starts or the popup
@@ -148,12 +149,12 @@ only reports that it cannot), and asks for a restart by hand, which
 updates as before. The extension itself is never installed by the add-on: Firefox updates it from
 the listing on addons.mozilla.org, and the banner links to the release page when only the
 extension is behind, once the release carries the signed `.xpi` (until then it says the signed
-`.xpi` is on its way). Chrome updates an install from the Chrome Web Store by itself, once the
-new version has been uploaded to the store and has passed its review, which can be days after
-the GitHub release; until then the banner says so and offers no release page, since an unpacked
-build from there would be a second copy of the extension beside the store's (an unpacked build
-of your own keeps the link). Being offline costs one failed check, shown under **Check for
-updates**; a failed check never notifies.
+`.xpi` is on its way). Chrome updates an install from the Chrome Web Store by itself: every
+release goes to the store by itself, and Chrome gets it once it has passed the store's review,
+which can be days after the GitHub release; until then the banner says so and offers no release
+page, since an unpacked build from there would be a second copy of the extension beside the
+store's (an unpacked build of your own keeps the link). Being offline costs one failed check,
+shown under **Check for updates**; a failed check never notifies.
 
 **Nix / NixOS:** `nix run github:Multysquid/shisu-ko` (or `nix run .` in a checkout) starts the
 server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` opens a shell with
@@ -193,9 +194,9 @@ Firefox until you approve it, from the notice on the application menu (≡) or u
 and themes.
 
 On Chrome, install [Shisu-ko from the Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm).
-Chrome updates it by itself once a new version has been uploaded to the store and has passed its
-review, so it can trail the GitHub release by days; the popup then says the store will update it
-instead of pointing you at the release page.
+Every release goes to the store by itself, and Chrome updates the install by itself once the store
+has reviewed it, so it can trail the GitHub release by days; the popup then says the store will
+update it instead of pointing you at the release page.
 
 Chrome development uses the same source. Run `npm ci` and `npm run build:chrome`, then open
 `chrome://extensions`, enable Developer mode, and choose **Load unpacked** on `dist/chrome`.
@@ -576,8 +577,8 @@ current model's cues are `<video_id>.cues.json`, and when you switch models anot
 cues are kept beside it and come back the moment you switch back.
 
 **Updates.** The one request the extension makes beyond your own machine is
-`GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`: when Firefox starts (or
-the extension is installed or updated) or the popup opens and the last check is over a day old
+`GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`: when the browser starts
+(or the extension is installed or updated) or the popup opens and the last check is over a day old
 or failed, so at most once a day by itself while the checks succeed (a failure is tried again
 at the next of those occasions), and on every click of **Check for updates**. It carries no account, token,
 cookie or identifier, only what any visit to GitHub carries (your IP address and the browser's
@@ -585,6 +586,8 @@ user agent); GitHub's answer (the release's version, page and `.xpi` address, an
 checked) is kept in the extension's storage. The **Update** button then sends `POST /update` to
 the local server, which exits with code 4 so that `run.cmd` / `run.sh` run `update.py` and start
 it again; the server never downloads anything itself, and the extension never installs itself.
+The browser updates it with requests of its own: Firefox from addons.mozilla.org, and Chrome, for
+a Chrome Web Store install, from the store.
 
 ## Server options
 
@@ -756,8 +759,13 @@ server/
                       host manifest for each browser
   tests/              pytest suite                   tools/        cue statistics, re-transcription
 docker/               Windows wrappers for docker compose and the WSL engine installer
-docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing),
-                      dev/ (developer docs: the design of each subsystem)
+docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (the listing on
+                      addons.mozilla.org), cws/ (the Chrome Web Store: how releases get there,
+                      the key's one-time setup), dev/ (developer docs: the design of each subsystem)
+scripts/cws.mjs       asks the Chrome Web Store what it holds, uploads a release's Chrome zip and
+                      submits it for review
+.github/workflows/    cws-listing.yml takes every release to the Chrome Web Store; cws-schedule.yml
+                      runs it every three hours for a release held back behind an older review
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example, flake.nix
 sign-addon.cmd        signs a local build through addons.mozilla.org (unlisted; manual fallback)
 publish-addon.cmd     submits a release to the public listing by hand (fallback for amo-listing.yml)

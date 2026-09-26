@@ -1,15 +1,15 @@
 # Updates and release
 
-How the add-on checks for a new release and asks the server to update, and how a tag becomes a GitHub release and an addons.mozilla.org version.
+How the add-on checks for a new release and asks the server to update, and how a tag becomes a GitHub release, an addons.mozilla.org version and a Chrome Web Store version.
 
 ## How the update check works
 
 The add-on side of updates lives in the "updates" section of `addon/background.js` and in
-`popup.js`; the extension never installs itself (no `update_url`, no `.xpi` handling: its
-updates come from the addons.mozilla.org listing, or for a Chrome Web Store install from the
-store, an unpacked Chrome build only from the viewer loading a newer one, and every GitHub
-release carries an `.xpi` AMO signed for self-distribution, see "Release"), it only tells the
-viewer and asks the server to update itself.
+`popup.js`; the extension never installs itself (no `update_url` and, in the Chrome package, no
+`key`; no `.xpi` handling: its updates come from the addons.mozilla.org listing, or for a Chrome
+Web Store install from the store, an unpacked Chrome build only from the viewer loading a newer
+one, and every GitHub release carries an `.xpi` AMO signed for self-distribution, see "Release"),
+it only tells the viewer and asks the server to update itself.
 
 - Check. `fetchLatestRelease()` gets `GITHUB_LATEST_URL`
   (`https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, `Accept:
@@ -97,14 +97,19 @@ viewer and asks the server to update itself.
   an install from the Chrome Web Store (`CHROME_STORE_ID` in `popup.js`,
   `ecenifonpkaiccmmknpbllbebbfigjnm`; `CHROME_STORE_INSTALL`: `runtime.getURL("")` is exactly
   `chrome-extension://<id>/`) is updated by Chrome from the store, once the store has reviewed the
-  version, so it can trail the GitHub release by days, and only to a version uploaded to the
-  store by hand (see "Release"). For such an install an extension behind gets "the Chrome Web
-  Store updates this one once it has reviewed that version, …" with **Not now** and no release
-  page link, since an unpacked build from the release would be a second extension under its own
-  id; a release never uploaded to the store leaves the badge (and, unless snoozed, that note)
-  up until the store has a version at least as new as the newest release. An unpacked build
-  (`dist/chrome`, the release's Chrome zip) has an id taken from its folder and keeps the release
-  page link, offered at once because the zip is on the release from the start.
+  version, so it can trail the GitHub release by days, and only to a version submitted to the
+  store, which `cws-listing.yml` does for every release (see "Release"). For such an install an
+  extension behind gets "the Chrome Web Store updates this one once it has reviewed that version,
+  …" with **Not now** and no release page link, since an unpacked build from the release would be
+  a second extension under its own id. A release the store does not serve yet leaves the badge
+  (and, unless snoozed, that note) up until the store has a version at least as new as the newest
+  release: one held back behind an older review until the schedule submits it, one staged by a
+  Dashboard submission and not published yet, one the store rejected, one held back behind an
+  older version's rejection with no run by hand, any release while the store has taken the item
+  down, and one never submitted because `CWS_SERVICE_ACCOUNT_JSON` or `CWS_PUBLISHER_ID` is
+  missing. An unpacked build (`dist/chrome`, the release's Chrome zip) has an id taken from its
+  folder and keeps the release page link, offered at once because the zip is on the release from
+  the start.
 
 Messages: `updateStatus {health?, check?}` -> `{latest, checkedAt, error, server: {version,
 launcher} | null, decision, snoozed, updating, extensionVersion}`; `checkForUpdate {force?}` ->
@@ -116,8 +121,9 @@ Tests: `addon/tests/background.test.js`, `addon/tests/popup.test.js`, `addon/tes
 
 ## Release
 
-Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) makes the release
-and its `.xpi`, and nothing more; `.github/workflows/release.yml`:
+Pushing a tag `v<version>` (on the merge commit, matching `addon/manifest.json`) runs
+`.github/workflows/release.yml`, which makes the release and its `.xpi` and nothing more (the
+finished release then starts `cws-listing.yml` for the Chrome Web Store, see below):
 
 - runs the checks and builds the zips; the listing texts are none of its business (it runs the
   build tests without `amo-metadata.test.mjs` and never `make_metadata.py`): a text AMO would
@@ -183,11 +189,115 @@ in `publish-addon.cmd` / `sign-addon.cmd`, the places that give it the AMO key o
 listing workflow also refuses tags before v0.14.2: 0.14.1 is a listed version of its own, waiting
 for its review, and `0.14.1.1` would disable it.
 
-The Chrome Web Store has no workflow: neither a tag nor any workflow submits anything to it. A
-version reaches it only when someone uploads it there, and store installs get it once the
-store's review has passed, which can take days. A release never uploaded never reaches store
-installs, which keep the badge and the popup's store note (see "Chrome." above) until the store
-has a version at least as new as the newest release.
+The Chrome Web Store gets every release by itself, from `.github/workflows/cws-listing.yml`, and
+store installs get it once the store's review has passed, which can take days; until then they keep
+the badge and the popup's store note (see "Chrome." above). Unlike the AMO listing there is nothing
+to decide by hand: a Chrome Web Store install gets its updates only from the store, and the store
+takes a release as it is, with no listing texts to build and no number of its own. The workflow
+starts on `workflow_run` when a run of the workflow named `Release extensions` completes; that is
+`release.yml`'s `name:`, and `workflow_run` knows a workflow by nothing else, so a rename there
+goes into `cws-listing.yml` too. Its job runs only for a release run that succeeded and that the
+push of a tag in this repository started (`conclusion == 'success'`, `event == 'push'`,
+`head_repository.full_name == github.repository`): a failed release made no release, and a pull
+request from a fork can give a workflow of its own the same name, each of whose runs would
+otherwise start this one with the store's key. There is no `branches` filter, since a release run's
+`head_branch` is its tag. The workflow takes its script from its own commit and the package from
+the release: `gh release list` (drafts and pre-releases left out), the highest
+`v<major>.<minor>.<patch>` tag by `sort -V`, and that release's own
+`shisu-ko-<version>-chrome.zip`, the zip the release workflow built, tested and attached; nothing
+is built again. The highest release is not always the one GitHub marks Latest, which is the one
+published last (a re-run of an older tag's release workflow makes the older version Latest), and
+the store takes a version only above the one before, so a lower release has nothing to add. A run
+that finds no release with a release tag fails.
+
+The store is then asked what it holds against that version (`node scripts/cws.mjs status
+<version>`), and one `case` acts on the word:
+
+- `submit`: nothing is in the way, and `cws.mjs submit` uploads the zip and submits it for review
+  (`DEFAULT_PUBLISH`: the store publishes it once the review passes); a notice. A refused upload
+  or publish fails the run, the schedule's too, since nothing else tells anyone, and the error
+  says to fix what the store refused in the Developer Dashboard, after which the schedule uploads
+  and submits the version again within three hours, or to submit the draft there by hand once it
+  holds the version.
+- `waiting`: an older version waits for its review, or is approved and staged, and the store
+  reviews one submission at a time. A notice: the schedule submits this version once the store
+  has published the older one or its review is cancelled; a staged one waits for someone to
+  publish it in the Dashboard (or returns to a draft after 30 days). A run by hand with
+  `cancel_review` (`gh workflow run cws-listing.yml -f cancel_review=true`) runs `submit
+  --cancel-review`, which withdraws the older submission and submits this version in its place.
+  No run cancels by itself: the older review may be nearly through, and the Dashboard allows six
+  cancellations a day. When such a run fails, the log says whether the review was cancelled
+  first: if it was, the schedule takes over; if not, run it by hand with `cancel_review` again.
+- `staged`: this version is approved and staged, which only a Dashboard submission does; a warning
+  to publish it there.
+- `rejected`: the store rejected this version; read the review in the Dashboard and release the
+  next patch version.
+- `rejected-older`: the store rejected an older version, and nothing else is in the way. This
+  version may have been released while that one was in review and repeat what was rejected, so it
+  goes up only on a person's decision: a run by hand, or the first run of this version's own
+  release (`RELEASE_TAG` is `v<version>` and `RUN_ATTEMPT` is 1, both from the `workflow_run`
+  event), which covers a release tagged during the older review whose run ends after the
+  rejection. That arm uploads as for `submit` and then warns to read the review; its error sends
+  the reader to a run by hand, never to the schedule. The schedule, a re-run of a release workflow
+  (for AMO's `.xpi`, say) and another tag's release only warn.
+- `taken-down`: the store has taken the item down; appeal in the Dashboard, or upload and submit a
+  fixed release's Chrome zip there by hand, since the workflow submits nothing while it is down.
+- anything else (`in-review`, `published`, `newer`, `cancelled`): a notice and nothing to do; a
+  review cancelled in the Dashboard is left alone until the next release.
+
+`rejected` and `taken-down` fail a release's run and a run by hand, and only warn on the schedule,
+which meets them eight times a day and whose red runs would bury the failures no one has been told
+of; the store emails the developer about both. Without the repository secret
+`CWS_SERVICE_ACCOUNT_JSON` and the repository variable `CWS_PUBLISHER_ID` every step but the check
+is skipped (`CWS_KEY`): the schedule passes quietly, a release run warns that it did not reach the
+store, and a run by hand fails. The key reaches one step, the one that talks to the store. One run
+goes at a time: the job, not the workflow, sits in the concurrency group `cws-listing` with
+`cancel-in-progress: false` and `queue: max`, so the runs of a release, the schedule and a hand
+start wait their turn in order. GitHub's default keeps one waiting run and cancels it for the
+next, which would drop a run by hand that asked for `cancel_review`; with the group on the job, a
+run whose job is skipped takes no place in the queue, which holds 100. The group holds across the
+repository's workflows, so the schedule's call waits in the same queue.
+
+`.github/workflows/cws-schedule.yml` runs `cws-listing.yml` every three hours (`47 */3 * * *`)
+for the releases held back behind an older review; a rarer schedule would keep such a release from
+the store for as long. Its one job calls `cws-listing.yml` (`uses:`, `secrets: inherit`,
+`contents: read`, no inputs, so `cancel_review` keeps its default, false) and has no step of its
+own; the called workflow runs with the caller's `github` context, so `github.event_name` reads
+`schedule` there. It is a file of its own because GitHub switches off a public repository's
+workflow that has a schedule after 60 days without activity in the repository, and a workflow
+switched off starts for nothing, a `workflow_run` included: kept apart, only the catch-up stops
+then, `cws-listing.yml` has no schedule and still starts for every release, and
+`gh workflow enable cws-schedule.yml` turns the schedule back on. The Actions tab lists the
+schedule's runs under its own name; a run by hand goes to `cws-listing.yml`.
+
+`scripts/cws.mjs` (Node only, no packages) is what talks to the store, and it speaks the store's
+API v2 alone (`chromewebstore.googleapis.com/v2/` and `/upload/v2/`, the item
+`ecenifonpkaiccmmknpbllbebbfigjnm` under the publisher's path), since v1.1 stops on 2026-10-15.
+`status <version>` prints one word on stdout for the workflow, and on stderr what the store
+publishes and holds in its submission ("published 0.5.0 (PUBLISHED); submitted 0.14.6
+(PENDING_REVIEW)"). `decide()` compares versions as numbers part by part (0.14.6 is above 0.5.0),
+takes the highest channel of a staged rollout, and counts a state it does not know, for this
+version, as the store busy with it, never as a reason to upload. `submit <zip> <version>
+[--cancel-review] [--wait <seconds>]` goes on only when the store says `submit` or
+`rejected-older`, or `waiting` with `--cancel-review`, which cancels the older review first (only
+when one waits) and then needs the store to say `submit`; it prints the submission's state. Exit
+codes: 0 done, 1 the store, the network or the zip failed, 2 a usage error or missing or invalid
+credentials, found before anything is sent. It signs in as a Google Cloud service account with
+Google's JWT bearer grant: `serviceAccount()` checks the JSON key before anything is sent and its
+errors quote nothing of it, and `assertion()` signs an RS256 token for the `chromewebstore` scope
+that lives an hour, whose audience and destination are the fixed
+`https://oauth2.googleapis.com/token`, never the key file's own `token_uri`, so a changed key
+cannot send the signed token anywhere else. The key, the signed token and the access token are
+never printed, not even in an error: every line passes a scrub of both tokens, an error body is
+cut to one line of 300 characters, and no line can hold a workflow command (`::` at its start,
+`##[` anywhere). Every request has a 120-second timeout. Before the upload, before a token is even
+asked for, it refuses a zip whose `manifest.json` does not hold the version. An upload the store
+read another version from is never submitted; one it reads in the background is asked about every
+10 seconds for up to `--wait` (300 s), the last time at the deadline, and submitted only once it
+has `SUCCEEDED`. The store's warnings on the publish go to stderr, and afterwards the store's own
+status must hold the version, since the publish answers for whatever the draft held. The
+credentials, a service account the Developer Dashboard knows (one per publisher) and the
+publisher id, are set up once as `docs/cws/README.md` says.
 
 The split is a must-test: `scripts/tests/release-workflows.test.mjs` reads the workflows and the
 two `.cmd` scripts as commands (comments and REM lines left out, so a step commented out counts as
@@ -203,9 +313,47 @@ the stand-in after, warns on a missing file and fails on a rejected one; that we
 takes only a major.minor.patch version and v-digits-dots tags (git allows `&`, `|`, `<`, `>` in a
 tag name, and cmd.exe would run them), fetches the tags, checks the newest tag and the tree
 before it builds, stamps, reads the stamp back and submits, and `sign-addon.cmd` checks the
-version and the tree before it builds and signs `dist\firefox`; and that no workflow expands a
-`${{ }}` expression inside a shell script (the tag typed into the dispatch form reaches the shell
-through `env`).
+version and the tree before it builds and signs `dist\firefox`; and that no workflow, the two
+store workflows included, expands a `${{ }}` expression inside a shell script (the tag typed into
+the dispatch form, and the release run's tag and attempt in `cws-listing.yml`, reach the shell
+through `env`). For the Chrome Web Store it holds that the tag workflow names nothing of the store
+(no `cws.mjs`, no `chromewebstore.googleapis.com`, no `CWS_` variable), so it never holds the
+store's key; that `cws-listing.yml` has no trigger but `workflow_run`, `workflow_call` and
+`workflow_dispatch`, the last two declaring `cancel_review` as the same boolean, off by default;
+that its `workflow_run` names exactly `release.yml`'s `name:`, for `[completed]` only and with no
+branch filter, under the job's condition of a successful tag push in this repository; that the
+job's concurrency group is `cws-listing` with `cancel-in-progress: false` and `queue: max`, and the
+workflow has none; that no step sets `continue-on-error`, `shell` or `defaults` and no script runs
+`set +e`, so a failed `status` or `submit` cannot end green; that every step but the key check
+waits for `CWS_KEY`, and without it the schedule passes quietly, a run by hand fails and a release
+warns; that it never asks `gh release view`, and lists the releases, takes the highest tag, checks
+it, downloads its Chrome zip, asks the store and submits, in that order; that the submit step is
+the status and one `case` on it, whose branches are `submit`, `waiting`, `staged`, `rejected`,
+`rejected-older`, `taken-down` and `*)` in that order, each label the word `decide()` in `cws.mjs`
+gives for its state, and each branch's shape (what it runs, and where it fails, warns or tells)
+held with the message texts left out; that `--cancel-review` appears once, inside the branch that
+asks `CANCEL_REVIEW`; that the `rejected-older` warning arm neither uploads nor exits, and that
+branch's error sends the reader to a run by hand, not to the schedule; what the messages must name
+(the Developer Dashboard in the errors of a refused upload or publish and in the staged warning;
+in the waiting notice a staged version, the schedule's mere warning on a rejection and
+`gh workflow run cws-listing.yml -f cancel_review=true`; the appeal for a take-down); that nothing
+is built again and no action but `actions/checkout` and `actions/setup-node` runs; and that the
+store's key appears once, in the submit step's `env`, beside `EVENT`, `RELEASE_TAG` and
+`RUN_ATTEMPT`. For `cws-schedule.yml` it holds that its one
+trigger is the one cron `47 */3 * * *`; that it has no step and no shell, and one job that calls
+`cws-listing.yml` with `secrets: inherit` and `contents: read` and nothing else (the permission
+blocks and the job held whole: no `with:`, no `cancel_review`, no `concurrency:`); and that the
+headers of `release.yml` and `cws-schedule.yml` name `gh workflow enable cws-schedule.yml` for
+turning the schedule back on, and no workflow names `cws-listing.yml` there.
+`scripts/tests/cws.test.mjs` runs `cws.mjs` against a fake store and token endpoint with a real
+RSA key pair: the v2 URLs, the scope and the item, the version order, `decide()` for every state,
+the key's checks, the signed token (signature, audience, lifetime, `kid`), a submission request by
+request, the upload wait and its deadline, every refusal before an upload, `--cancel-review`, the
+check after the publish, exit 2 before any request, the fixed token URL and a start through a
+junction; and on every run, that no line holds the key, either token or a workflow command, and
+that every request has its 120-second timeout. `scripts/tests/build.test.mjs` holds the store's
+upload limits on the built Chrome package (`build-and-test.md`), and
+`addon/tests/settings.test.js` that the manifest names no `update_url` and no `key`.
 `make_metadata.py` refuses a `release-notes.md` that does not mention the manifest's version, and
 the Tests workflow runs it on every push, so bump the version and write its notes in the same
 change: any release may be the one published.
