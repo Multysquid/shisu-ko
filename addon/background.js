@@ -16,7 +16,8 @@
  *  7. Updates: ask GitHub for the newest release once a day, tell the viewer (toolbar badge, one
  *     system notification, the popup's banner) and, on request, ask the server to update itself:
  *     POST /update makes it exit so that run.cmd / run.sh run update.py and start it again. The
- *     extension never installs itself; its updates come from addons.mozilla.org.
+ *     extension never installs itself; its updates come from addons.mozilla.org (a Chrome Web
+ *     Store install, from the store; an unpacked Chrome build, only from the viewer).
  *  8. Word colours: turn one Anki deck's notes into [word, status, pitch] entries for the
  *     content script, which colours the words of every line by them.
  */

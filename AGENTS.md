@@ -58,7 +58,10 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   (`addon/tests/settings.test.js`); its updates come from addons.mozilla.org. Its one remote
   request is the anonymous `GET` of GitHub's `releases/latest` in `fetchLatestRelease()`, never with
   a token, cookie or identifier. `notifications` stays a required permission. `docs/amo/` states
-  exactly this, so a change here changes them too.
+  exactly this, so a change here changes them too. On Chrome, a Web Store install is updated by
+  the store (`CHROME_STORE_ID` in `popup.js`) and an unpacked build (the release's zip,
+  `dist/chrome`) only by the viewer loading a newer one; this has no counterpart in `docs/amo/`,
+  which is the AMO listing's text.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`. It
   never takes a path, program or argument from a message; it runs only the checkout's own
   `server/run.cmd` / `server/run.sh` and registers only under the user's own profile.

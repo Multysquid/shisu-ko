@@ -134,8 +134,13 @@ the server was not started by `run.cmd` / `run.sh`, whichever of those the cause
 only reports that it cannot), and asks for a restart by hand, which
 updates as before. The extension itself is never installed by the add-on: Firefox updates it from
 the listing on addons.mozilla.org, and the banner links to the release page when only the
-extension is behind. Being offline
-costs one failed check, shown under **Check for updates**; a failed check never notifies.
+extension is behind, once the release carries the signed `.xpi` (until then it says the signed
+`.xpi` is on its way). Chrome updates an install from the Chrome Web Store by itself, once the
+new version has been uploaded to the store and has passed its review, which can be days after
+the GitHub release; until then the banner says so and offers no release page, since an unpacked
+build from there would be a second copy of the extension beside the store's (an unpacked build
+of your own keeps the link). Being offline costs one failed check, shown under **Check for
+updates**; a failed check never notifies.
 
 **Nix / NixOS:** `nix run github:Multysquid/shisu-ko` (or `nix run .` in a checkout) starts the
 server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` opens a shell with
@@ -174,15 +179,22 @@ install prompt, and an automatic update (from the listing, for a release publish
 Firefox until you approve it, from the notice on the application menu (≡) or under Add-ons
 and themes.
 
+On Chrome, install [Shisu-ko from the Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm).
+Chrome updates it by itself once a new version has been uploaded to the store and has passed its
+review, so it can trail the GitHub release by days; the popup then says the store will update it
+instead of pointing you at the release page.
+
 Chrome development uses the same source. Run `npm ci` and `npm run build:chrome`, then open
 `chrome://extensions`, enable Developer mode, and choose **Load unpacked** on `dist/chrome`.
 After edits, run `npm run watch`; reload the extension on that page and reload the YouTube tab.
 The Firefox source remains directly loadable from `addon/manifest.json`. `npm run build` writes
-both unpacked trees and `dist/shisu-ko-<version>-{firefox,chrome}.zip`. For a Chrome release,
-download `shisu-ko-<version>-chrome.zip` from the [Chrome release](https://github.com/Multysquid/shisu-ko/releases/latest),
+both unpacked trees and `dist/shisu-ko-<version>-{firefox,chrome}.zip`. Instead of the store
+install, you can also download `shisu-ko-<version>-chrome.zip` from the [Chrome release](https://github.com/Multysquid/shisu-ko/releases/latest),
 unzip it, and choose **Load unpacked** on the extracted folder. This ZIP is unsigned and is not a
-Chrome Web Store install; it has no automatic updates. Keep the extracted folder and reload the
-extension from `chrome://extensions` after updates. Chrome shortcuts are under
+Chrome Web Store install; it has no automatic updates, and it gets an id of its own, so beside a
+store install it is a second copy of the extension (keep one of the two). Its popup keeps the
+release page link for a newer version. Keep the extracted folder and reload the extension from
+`chrome://extensions` after updates. Chrome shortcuts are under
 `chrome://extensions/shortcuts`.
 
 ### 3. Watch
@@ -427,8 +439,11 @@ that cannot update itself (Docker, Nix, a start by hand, `--no-update`) gets a n
 the button: the banner says the server was not started by `run.cmd` / `run.sh` in every one of
 those cases, since the server only reports whether it can update, not why not (a `--no-update`
 server's own reason sits in its 409 answer, which the popup never asks for without the
-button). While the server is offline there is no banner at all, since its next start
-updates it anyway. When only the extension is behind, the banner links to the release page. The
+button). While the server is offline the banner says nothing about the server, since its next
+start updates it anyway. When the extension is behind and the server is current or offline, the
+banner links to the release page (in Firefox once the release carries the signed `.xpi`, until
+then it says the signed `.xpi` is on its way; for an unpacked Chrome build at once), or, for a
+Chrome Web Store install, says that the store updates it once it has reviewed that version. The
 **Check for updates** link in the *Anki, clips and server* drawer asks GitHub now, whatever the
 age of the daily check, and the line under it keeps the result ("Newest release: 0.9.0, checked
 3 min ago", or why the check failed).

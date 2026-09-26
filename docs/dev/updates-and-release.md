@@ -6,9 +6,10 @@ How the add-on checks for a new release and asks the server to update, and how a
 
 The add-on side of updates lives in the "updates" section of `addon/background.js` and in
 `popup.js`; the extension never installs itself (no `update_url`, no `.xpi` handling: its
-updates come from the addons.mozilla.org listing, and every GitHub release carries an `.xpi` AMO
-signed for self-distribution, see "Release"), it only tells the viewer and asks the server to
-update itself.
+updates come from the addons.mozilla.org listing, or for a Chrome Web Store install from the
+store, an unpacked Chrome build only from the viewer loading a newer one, and every GitHub
+release carries an `.xpi` AMO signed for self-distribution, see "Release"), it only tells the
+viewer and asks the server to update itself.
 
 - Check. `fetchLatestRelease()` gets `GITHUB_LATEST_URL`
   (`https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, `Accept:
@@ -53,11 +54,15 @@ update itself.
   version with **Update** and **Not now** for `newer`, the reason and no Update button
   for `cannot` ("was not started by run.cmd / run.sh", the one text for every blocker, since
   `/health` carries only the flag and a `--no-update` server's 409 text is never fetched) and
-  `behind` ("cannot be updated from
-  here"), the release page link for an extension behind, and nothing for `offline` (the next
-  start updates) or after "Not now" (`updateSnoozed` = latest in `storage.session`). The
-  "Check for updates" link in the last drawer writes `#update-result` ("Newest release: 0.9.0,
-  checked 3 min ago", "No release found, …", "Update check failed: <error> (last seen: X)").
+  `behind` ("cannot be updated from here"). An extension behind gets its line whenever the
+  server has none of its own (`current`, `unknown` or `offline`): the release page link, in
+  Firefox only once `latest.xpi` is set (before that "its signed .xpi reaches the release page
+  once addons.mozilla.org has signed it" and no link), for an unpacked Chrome build at once
+  ("an unpacked build does not update itself"), and for a Chrome Web Store install a note and no
+  link (see "Chrome." below). There is no server text for `offline` (the next start updates) and
+  nothing after "Not now" (`updateSnoozed` = latest in `storage.session`). The "Check for
+  updates" link in the last drawer writes `#update-result` ("Newest release: 0.9.0, checked 3
+  min ago", "No release found, …", "Update check failed: <error> (last seen: X)").
 - Update. Popup **Update** or the notification click -> `{type: "updateServer"}` ->
   `requestUpdate()`: `/health` first (so a spent record ends, see below), refuse without a POST
   (`{ok: false, upToDate: true, error}`) when the server already runs >= latest, else
@@ -88,7 +93,18 @@ update itself.
   (`updating`) before its first paint.
 - Chrome. `browser-api.js` bridges `action.setBadgeText` / `setBadgeBackgroundColor`,
   `notifications.create` / `clear` (with `onClicked` passed through) and `tabs.create`; the
-  endpoint is plain HTTP, so the flow is the same there.
+  endpoint is plain HTTP, so the flow is the same there. The extension itself is another matter:
+  an install from the Chrome Web Store (`CHROME_STORE_ID` in `popup.js`,
+  `ecenifonpkaiccmmknpbllbebbfigjnm`, compared with `browser.runtime.id` as
+  `CHROME_STORE_INSTALL`) is updated by Chrome from the store, once the store has reviewed the
+  version, so it can trail the GitHub release by days, and only to a version uploaded to the
+  store by hand (see "Release"). For such an install an extension behind gets "the Chrome Web
+  Store updates this one once it has reviewed that version, …" with **Not now** and no release
+  page link, since an unpacked build from the release would be a second extension under its own
+  id; a release never uploaded to the store leaves the badge (and, unless snoozed, that note)
+  up until the store has a version at least as new as the newest release. An unpacked build
+  (`dist/chrome`, the release's Chrome zip) has an id taken from its folder and keeps the release
+  page link, offered at once because the zip is on the release from the start.
 
 Messages: `updateStatus {health?, check?}` -> `{latest, checkedAt, error, server: {version,
 launcher} | null, decision, snoozed, updating, extensionVersion}`; `checkForUpdate {force?}` ->
@@ -166,6 +182,12 @@ behind or ahead. web-ext runs pinned to one exact version (`web-ext@10.7.0`) in 
 in `publish-addon.cmd` / `sign-addon.cmd`, the places that give it the AMO key or lint for CI. The
 listing workflow also refuses tags before v0.14.2: 0.14.1 is a listed version of its own, waiting
 for its review, and `0.14.1.1` would disable it.
+
+The Chrome Web Store has no workflow: neither a tag nor any workflow submits anything to it. A
+version reaches it only when someone uploads it there, and store installs get it once the
+store's review has passed, which can take days. A release never uploaded never reaches store
+installs, which keep the badge and the popup's store note (see "Chrome." above) until the store
+has a version at least as new as the newest release.
 
 The split is a must-test: `scripts/tests/release-workflows.test.mjs` reads the workflows and the
 two `.cmd` scripts as commands (comments and REM lines left out, so a step commented out counts as

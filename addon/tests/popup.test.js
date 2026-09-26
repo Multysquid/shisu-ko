@@ -146,7 +146,8 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
     clearTimeout,
     setInterval: (fn, ms) => intervals.push({ fn, ms }),
     browser: {
-      runtime: { sendMessage: async (msg) => answer(msg), getURL: () => runtimeURL },
+      // The id is the URL's host, as Chrome's is; Firefox's is the gecko id, which never matters.
+      runtime: { sendMessage: async (msg) => answer(msg), getURL: () => runtimeURL, id: new URL(runtimeURL).host },
       permissions: { contains: async () => true, request: async () => true },
       tabs: { query: async () => [], create: async (opts) => opened.push(opts.url) },
       storage: { onChanged: { addListener: (fn) => storageListeners.push(fn) } },
@@ -452,15 +453,53 @@ test("an extension behind the release is sent to the release page", async () => 
 });
 
 // The release is there before its signed .xpi: Firefox is not sent to a page it cannot install
-// from, Chrome (whose zip is there from the start) is.
+// from, an unpacked Chrome build (whose zip is there from the start) is, and is not told about a
+// listing on addons.mozilla.org, which never updates a Chrome install.
 test("an extension behind a release without its signed .xpi yet is told so, and not sent to the page in Firefox", async () => {
   const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer" });
   assert.equal(popup.el("update-text").textContent, "A newer extension (0.9.0) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it");
   assert.equal(popup.el("update-release").hidden, true);
   assert.equal(popup.el("update-later").hidden, false);
   const onChrome = await open({ health: healthOf("0.9.0", true), extension: "newer" }, "chrome-extension://test/");
-  assert.equal(onChrome.popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page (the addons.mozilla.org listing may get it later)");
+  assert.equal(onChrome.popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page; an unpacked build does not update itself");
   assert.equal(onChrome.popup.el("update-release").hidden, false);
+});
+
+// Chrome updates a store install from the Chrome Web Store, after the store's review: the popup
+// says so and offers no release page, whose unpacked build would be a second extension.
+test("a Chrome Web Store install behind the release is told the store updates it, and not sent to the page", async () => {
+  const STORE = "chrome-extension://ecenifonpkaiccmmknpbllbebbfigjnm/";
+  const TEXT = "A newer extension (0.9.0) is out; the Chrome Web Store updates this one once it has reviewed that version, which can take days after the GitHub release";
+  for (const latest of [LATEST, { ...LATEST, xpi: "https://github.com/Multysquid/shisu-ko/releases/download/v0.9.0/shisu_ko-0.9.0.xpi" }]) {
+    const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer", latest }, STORE);
+    assert.equal(popup.el("update-banner").hidden, false);
+    assert.equal(popup.el("update-text").textContent, TEXT);
+    assert.equal(popup.el("update-now").hidden, true);
+    assert.equal(popup.el("update-release").hidden, true);
+    assert.equal(popup.el("update-later").hidden, false);
+  }
+  // Every server banner (newer, cannot, behind) comes first there as anywhere: the store says
+  // nothing about the server, and a server that needs a restart by hand must still say so.
+  const server = await open({ health: healthOf("0.8.0", true), extension: "newer" }, STORE);
+  assert.equal(server.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0.");
+  assert.equal(server.popup.el("update-now").hidden, false);
+  const cannot = await open({ health: healthOf("0.8.0", false), extension: "newer" }, STORE);
+  assert.equal(cannot.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0 and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand to update");
+  assert.equal(cannot.popup.el("update-release").hidden, true);
+  const behind = await open({ health: { ok: true, data: { version: "0.8.0", model: "large-v3", device: "cuda", compute_type: "float16" } }, extension: "newer" }, STORE);
+  assert.equal(behind.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0, which cannot be updated from here; restart it by hand to update (run.cmd / run.sh update it at start)");
+  assert.equal(behind.popup.el("update-release").hidden, true);
+  // An offline server has no line of its own (its next start updates it); the store's stays.
+  const serverOff = await open({ health: offline, extension: "newer" }, STORE);
+  assert.equal(serverOff.popup.el("server-status").textContent, "Server offline");
+  assert.equal(serverOff.popup.el("update-text").textContent, TEXT);
+  assert.equal(serverOff.popup.el("update-release").hidden, true);
+  // "Not now" hides it for the session, as it does the release page's banner.
+  const snoozed = await open({ health: healthOf("0.9.0", true), extension: "newer", snoozed: "0.9.0" }, STORE);
+  assert.equal(snoozed.popup.el("update-banner").hidden, true);
+  // Nothing newer: no banner at all.
+  const current = await open({ health: healthOf("0.9.0", true) }, STORE);
+  assert.equal(current.popup.el("update-banner").hidden, true);
 });
 
 test("no banner while the server is offline, and none for a server that says no version", async () => {

@@ -48,6 +48,17 @@ const START_AVAILABLE = (() => {
     return false;
   }
 })();
+// The Chrome Web Store's id for Shisu-ko. Chrome updates an install from the store by itself,
+// once the store has reviewed the version; an unpacked build (dist/chrome, the release's Chrome
+// zip) has an id of its own, taken from its folder, and nothing updates it but the viewer.
+const CHROME_STORE_ID = "ecenifonpkaiccmmknpbllbebbfigjnm";
+const CHROME_STORE_INSTALL = (() => {
+  try {
+    return browser.runtime.id === CHROME_STORE_ID;
+  } catch (err) {
+    return false;
+  }
+})();
 
 // The subtitle font, as content.js builds it (FONT_FAMILY_RE, SUB_FONTS, fontStack there): the
 // popup cannot import the content script, so the sample keeps a copy. Keep the two in step.
@@ -801,9 +812,10 @@ async function refreshUpdate(force) {
 }
 
 // The banner, from the background's verdict and this popup's own flow. Nothing is shown without a
-// release to name, after "Not now" for that release, or when the server can update itself at
-// its next start anyway (offline: the launcher runs update.py before every start). While an
-// update is under way the banner stays, its button muted, and goes once the new version answers.
+// release to name or after "Not now" for that release, and nothing about the server when it can
+// update itself at its next start anyway (offline: the launcher runs update.py before every
+// start); an extension behind still gets its line then. While an update is under way the banner
+// stays, its button muted, and goes once the new version answers.
 function renderUpdate() {
   const banner = document.getElementById("update-banner");
   const text = document.getElementById("update-text");
@@ -834,15 +846,22 @@ function renderUpdate() {
       // next start, and nothing here can tell whether it has one.
       message = `Shisu-ko ${latest} is available — the server runs ${server}, which cannot be updated from here; restart it by hand to update (run.cmd / run.sh update it at start)`;
       showLater = true;
+    } else if (decision.extension === "newer" && CHROME_STORE_INSTALL) {
+      // The Chrome Web Store updates this install once it has reviewed the version, which can
+      // come days after the GitHub release. The release page is not offered: an unpacked build
+      // from it would be a second extension beside this one, under its own id.
+      message = `A newer extension (${latest}) is out; the Chrome Web Store updates this one once it has reviewed that version, which can take days after the GitHub release`;
+      showLater = true;
     } else if (decision.extension === "newer") {
       // Firefox (START_AVAILABLE is the moz-extension: test) needs the signed .xpi, which the
       // release gets once AMO has signed it: minutes after the tag, later for a version AMO holds
       // back. Until the check sees it, the release page has nothing to install, so it is not
-      // offered; Chrome's zip is there from the start.
+      // offered. Chrome here is an unpacked build (a store install took the branch above): its
+      // zip is there from the start, and no listing ever updates it, so none is named.
       const signed = !START_AVAILABLE || !!(updateInfo.latest && updateInfo.latest.xpi);
-      message = signed
-        ? `A newer extension (${latest}) is on the release page (the addons.mozilla.org listing may get it later)`
-        : `A newer extension (${latest}) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it`;
+      if (!START_AVAILABLE) message = `A newer extension (${latest}) is on the release page; an unpacked build does not update itself`;
+      else if (signed) message = `A newer extension (${latest}) is on the release page (the addons.mozilla.org listing may get it later)`;
+      else message = `A newer extension (${latest}) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it`;
       showRelease = signed;
       showLater = true;
     }
@@ -936,8 +955,9 @@ async function checkForUpdatesFromPopup() {
   renderStatus();
 }
 
-// The release page: every release's signed .xpi (and the Chrome zip); the addons.mozilla.org
-// listing gets only the releases published there, later.
+// The release page: every release's signed .xpi (and the Chrome zip, for an unpacked build; a
+// Chrome Web Store install is never sent here); the addons.mozilla.org listing gets only the
+// releases published there, later.
 function openReleasePage() {
   const latest = updateInfo && updateInfo.latest;
   const url = latest && typeof latest.url === "string" && /^https:\/\//.test(latest.url) ? latest.url : RELEASES_URL;
