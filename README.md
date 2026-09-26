@@ -75,7 +75,11 @@ yt-dlp and the CUDA runtime libraries; nothing else on the system is touched. It
 Whisper model the server should use, `1` for large-v3 (best quality, about 3 GB, wants a GPU with
 4 GB or more free) or `2` for small (about 500 MB, fine on a CPU, less accurate), downloads it
 into `~/.shisu-ko/models` with a progress bar and remembers the choice in
-`~/.shisu-ko/config.json`. When it says that everything is ready, close its window and start
+`~/.shisu-ko/config.json`. Where Firefox is installed it also asks whether the server should send
+Firefox's YouTube cookies with every download: YouTube refuses some downloads ("Sign in to confirm
+you're not a bot") until they carry a signed-in browser's cookies. Say yes if you are signed in to
+YouTube in Firefox; the answer goes to the same file (see [YouTube sign-in](#youtube-sign-in)).
+When it says that everything is ready, close its window and start
 `run.cmd` / `run.sh`. The choice is kept even when the download fails or is stopped with Ctrl+C:
 the first start then downloads the chosen model itself, without the progress bar. The server is
 ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
@@ -88,10 +92,11 @@ permission, Firefox to "exchange messages with programs other than Firefox", Chr
 `server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background with its
 output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
 The button passes no options: the server starts with its defaults (the model chosen at setup,
-else large-v3; the GPU when there is one; no cookies), exactly as a bare `run.cmd` / `run.sh`
-start would. The popup's model field switches the model once that default one is up; anything
-else you usually append to `run.cmd` / `run.sh` (`--device cpu`, `--cookies-from-browser`,
-`--js-runtime`, ...) needs a start by hand, see [Server options](#server-options). In Chrome the
+else large-v3; the GPU when there is one; the YouTube cookies of the browser chosen at setup, if
+any, see [YouTube sign-in](#youtube-sign-in)), exactly as a bare `run.cmd` / `run.sh` start
+would. The popup's model field switches the model once that default one is up; anything else you
+usually append to `run.cmd` / `run.sh` (`--device cpu`, `--js-runtime`, ...) needs a start by
+hand, see [Server options](#server-options). In Chrome the
 button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm)
 install only (see [Install the extension](#2-install-the-extension)): the launcher's manifest
 has to name the extension's id, and an unpacked build (`dist/chrome`, the release zip) gets an
@@ -161,6 +166,8 @@ server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` op
 Python, web-ext, Node and Deno for development. The flake takes CTranslate2 with CUDA from the
 `cache.nixos-cuda.org` binary cache, so add it to your substituters or expect a long build. To
 keep the server running in the background: `systemd-run --user --unit=shisu-ko nix run /path/to/shisu-ko`.
+Options go after `--` (`nix run . -- --device cpu`). There is no setup to ask about YouTube's
+sign-in, so if YouTube asks for one, see [YouTube sign-in](#youtube-sign-in).
 
 **Docker:** copy `.env.example` to `.env`, set `DATA_DIR` to where models and caches should
 live, then run `docker\up.cmd` (Windows) or `docker compose up -d`. See [Docker](#docker) below.
@@ -591,11 +598,13 @@ a Chrome Web Store install, from the store.
 
 ## Server options
 
-Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `compose.yaml`.
-The popup's **Start server** button runs `run.cmd` / `run.sh` without any of them, so it always
-starts the defaults below (the model can still be switched from the popup afterwards); a server
-that needs `--device cpu`, cookies or another option is started by hand. Without `--model` the
-server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3.
+Append options to `run.cmd` / `run.sh` (with Nix, after `--`: `nix run . -- --device cpu`), or
+put them in the `command:` line of `compose.yaml`. The popup's **Start server** button runs
+`run.cmd` / `run.sh` without any of them, so it always starts the defaults below (the model can
+still be switched from the popup afterwards); a server that needs `--device cpu` or another
+option is started by hand. Without `--model` the server runs the model chosen at setup
+(`~/.shisu-ko/config.json`), else large-v3; without `--cookies-from-browser` or `--cookies` it
+sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#youtube-sign-in)).
 
 | Option | Effect |
 |---|---|
@@ -604,8 +613,9 @@ server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3
 | `--model small --device cpu` | CPU-only operation |
 | `--download-model small` | Download the model now, with a progress bar, and make it the default of later starts (what setup runs after its environment check); exits instead of starting the server, with code 2 on a failure or Ctrl+C, which `run.cmd` / `run.sh` do not restart on |
 | `--compute-type int8_float16` | Halves GPU memory use; chosen by itself when less than 4.5 GB is free |
-| `--cookies-from-browser firefox` | Age-restricted or members-only videos, or when YouTube asks for a sign-in |
-| `--cookies /path/cookies.txt` | Same, with an exported cookies file (use this inside Docker) |
+| `--cookies-from-browser firefox` | Send that browser's YouTube cookies for this start: when YouTube asks for a sign-in, and for age-restricted or members-only videos. `none` sends no browser's, whatever setup chose |
+| `--save-cookies-from-browser firefox` | Make that browser's YouTube cookies the default of every later start, the popup's **Start server** button included, after checking that they can be read; `none` forgets it. Exits instead of starting the server (see [YouTube sign-in](#youtube-sign-in)) |
+| `--cookies /path/cookies.txt` | Same as `--cookies-from-browser`, with an exported cookies file (use this inside Docker) |
 | `--lookahead 0` | Transcribe to the end of the video instead of stopping 15 minutes ahead |
 | `--window 60` | Longer windows are slightly more efficient, shorter ones react faster to seeking (default 30, faster-whisper's own chunk: a longer window decodes its tail without the initial prompt) |
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
@@ -648,6 +658,35 @@ requests from the extension alone, never from a page, so nothing served on this 
 restart the server. A model name is validated (a size alias or
 `owner/name`, never a path) and resolved through faster-whisper's own download before anything
 is loaded, so a request can never point the server at a local folder.
+
+### YouTube sign-in
+
+YouTube answers some addresses with "Sign in to confirm you're not a bot" and refuses to let
+yt-dlp download anything until the request carries a signed-in browser's cookies. The server can
+send them: setup asks once, where Firefox is installed, and
+`server\run.cmd --save-cookies-from-browser firefox` (`server/run.sh ...` on Linux/macOS;
+`nix run . -- --save-cookies-from-browser firefox` with Nix, which has no setup) sets it at any
+time. That reads Firefox's cookie store once to check that it holds YouTube cookies (only their
+names are looked at), writes `"cookies_from_browser": "firefox"` to `~/.shisu-ko/config.json` and
+exits; from the next start on, every download sends Firefox's YouTube cookies, whether the server
+was started by hand or with the popup's **Start server** button. `--save-cookies-from-browser
+none` forgets it, and `--cookies-from-browser none` leaves it out for one start.
+`run.cmd --check` (`nix run .#check`) says which browser is used.
+
+Firefox is the browser to use on Windows: Chrome and Edge keep their cookies from other programs
+there, so yt-dlp finds none and the command refuses them. The cookies are those of whatever
+account is signed in to YouTube in that browser. yt-dlp does not keep Firefox's contexts apart,
+though: the YouTube cookies of every Multi-Account Container, and those that YouTube players
+embedded in other sites keep, go into one set, so an account signed in in a container can take
+the place of the default one or mix with it. yt-dlp reads the browser's whole cookie store, every
+site's cookies, for each download, through a copy of the store's file that it writes into the
+system's temp folder and deletes after reading, and sends a site only its own: YouTube's to
+YouTube, and GitHub's to GitHub when `--allow-remote-ejs` fetches the solver script there.
+yt-dlp's authors warn that an account used this way may be rate-limited or flagged, so a
+secondary account is the careful choice. The Docker image never takes the browser from
+`config.json` (it has none to read): Docker users export a `cookies.txt` into the data folder and
+add `--cookies /data/cookies.txt` to the `command:` line. Toolbox and distrobox share your home
+folder and its Firefox, so there the saved browser is used as on the host.
 
 ## Docker
 
@@ -708,7 +747,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. |
 | Popup says "X was not found on this computer; the preset is used" or that a font name is letters, digits, spaces, dots, hyphens and underscores | Install the font, or type its family name exactly as the operating system lists it. Quotes, commas and other punctuation are refused; in both cases the preset font applies until the name resolves. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |
-| "YouTube asks for a sign-in" | Restart with `--cookies-from-browser firefox` (native) or `--cookies /data/cookies.txt` (Docker). |
+| "YouTube asks for a sign-in" | Run `server\run.cmd --save-cookies-from-browser firefox` once (`server/run.sh` on Linux/macOS, `nix run . -- --save-cookies-from-browser firefox` with Nix), then start the server again, by hand or with **Start server** (see [YouTube sign-in](#youtube-sign-in)). In Docker, export a `cookies.txt` into the data folder and add `--cookies /data/cookies.txt`. |
+| "YouTube asks for a sign-in although the server sends firefox's YouTube cookies" | Firefox is not signed in to YouTube (or the sign-in has expired): sign in to YouTube in Firefox and play the video again. |
 | Downloads fail after a YouTube update | Update yt-dlp: `~/.shisu-ko/venv/Scripts/python -m pip install -U yt-dlp` (Windows) or the `bin/python` equivalent; or start with `--allow-remote-ejs`. |
 | "This live stream offers no audio segments (DVR may be disabled)" | The streamer turned DVR off. Nothing can be done until the stream is published as a video. |
 | "The live stream has ended" | Reload the page once YouTube shows the recording; the server starts over on the video's clock. |
@@ -787,7 +827,8 @@ Checks:
 - Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
   runs both test suites; `nix build .#addon` produces the extension zip.
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`,
-  `config.json` (the model chosen at setup), the instance lock `server-8790.lock` (one per port,
+  `config.json` (the model and the browser for YouTube's sign-in chosen at setup), the instance
+  lock `server-8790.lock` (one per port,
   held while a server runs), `server.log` (the output of a server the popup started,
   Linux/macOS) and, on Windows, the launcher's host manifests `native-messaging/shisuko.json`
   (Firefox) and `native-messaging/shisuko-chrome.json` (Chrome).

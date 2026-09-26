@@ -150,6 +150,14 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   the viewer through `friendly_model_error()`.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube. The Docker image
   ships Deno; the native setup relies on what is installed.
+- YouTube answers some addresses (the owner's, since September 2026) with "Sign in to confirm
+  you're not a bot" for every video until the download carries a signed-in browser's cookies.
+  The popup's Start button passes no options, so the browser is `config.json`'s
+  `cookies_from_browser` (setup, `--save-cookies-from-browser`), the default of every start.
+  Firefox is the one to offer on Windows: Chrome and Edge encrypt their cookies there so that
+  yt-dlp decrypts none. The Docker image never takes the configured browser (`in_container()`,
+  which is `SHISUKO_CONTAINER` only); toolbox and distrobox do, since they share the home folder
+  and its Firefox profile, so `/.dockerenv` and `/run/.containerenv` must not count.
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
   `add_nvidia_dll_dirs()` must run before `ctranslate2` is imported.
 - GPU memory is often shared with games or wallpaper apps. `load_model()` reads free VRAM with

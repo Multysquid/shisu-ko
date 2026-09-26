@@ -5,7 +5,7 @@ No remote code, no minified or generated code, no third-party libraries: the zip
 Full guide (every feature's test steps, every permission and request): https://github.com/Multysquid/shisu-ko/blob/v<version>/docs/amo/reviewer-guide.md
 
 QUICK TEST (10 minutes, no GPU, no account)
-1. git clone https://github.com/Multysquid/shisu-ko && cd shisu-ko && bash server/setup.sh (answer 2, the small model), then server/run.sh --device cpu. Ready at "Listening on http://127.0.0.1:8790".
+1. git clone https://github.com/Multysquid/shisu-ko && cd shisu-ko && bash server/setup.sh (answer 2, the small model, and N if asked about cookies), then server/run.sh --device cpu. Ready at "Listening on http://127.0.0.1:8790".
 2. about:debugging > Load Temporary Add-on > the zip. The popup says "Server online"; click "Allow on YouTube" (optional host permission).
 3. A YouTube video with Japanese speech (e.g. https://www.youtube.com/@cijapanese): subtitles appear after 10-30 s on CPU. Hovering one pauses the video; Alt+Shift+L opens the transcript. In the popup set mining to Downloads and press Alt+Shift+M: a JPEG and an MP3 land in Downloads/shisu-ko-mining/.
 

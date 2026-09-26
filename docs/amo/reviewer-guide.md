@@ -42,7 +42,8 @@ The demo recording in the README shows the expected behaviour: https://github.co
                                    # it then asks "Which Whisper model should the server use?":
                                    # type 2 (small, about 500 MB), and it downloads that model into
                                    # ~/.shisu-ko/models with a progress bar and keeps the choice in
-                                   # ~/.shisu-ko/config.json
+                                   # ~/.shisu-ko/config.json; where Firefox is installed it asks
+                                   # first whether to send Firefox's YouTube cookies: type N
      server/run.sh --device cpu    # "small" is now the default model, from config.json
    The server is ready when it prints "Listening on http://127.0.0.1:8790".
    (--model base or --model tiny are faster still; Japanese accuracy is lower but subtitles

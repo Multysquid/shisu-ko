@@ -29,7 +29,9 @@ Endpoints
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
 the Python environment, downloaded models, cached audio and cue files, and config.json with
-the model chosen at setup (server.py --download-model NAME), the default of --model.
+the model chosen at setup (server.py --download-model NAME), the default of --model, and the
+browser whose YouTube cookies every download sends (server.py --save-cookies-from-browser NAME),
+the default of --cookies-from-browser.
 """
 from __future__ import annotations
 
@@ -77,7 +79,7 @@ SAMPLE_RATE = 16000
 APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
 MODELS_DIR = APP_DIR / "models"
-CONFIG_PATH = APP_DIR / "config.json"  # {"model": ...}, written by --download-model at setup; read_config()
+CONFIG_PATH = APP_DIR / "config.json"  # {"model": ..., "cookies_from_browser": ...}, written at setup; read_config()
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 # A faster-whisper size or a Hugging Face repo id. WhisperModel() also opens local directories, so
 # anything else (paths, "..") is refused before it can point the server at an arbitrary folder.
@@ -85,6 +87,12 @@ MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-
 MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
                    "or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
+# The browsers yt-dlp reads cookies from (yt_dlp.cookies.SUPPORTED_BROWSERS), the names
+# --save-cookies-from-browser takes and config.json's "cookies_from_browser" may hold.
+COOKIE_BROWSERS = ("brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale")
+# The cookies YouTube sets for a signed-in account; any of them in a browser's store means the
+# sign-in that YouTube's "confirm you're not a bot" wall asks for is there to send.
+YOUTUBE_SIGN_IN_COOKIES = frozenset({"LOGIN_INFO", "SAPISID", "__Secure-3PSID"})
 CACHE_FORMAT = 6  # bumped when cue geometry or fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
@@ -1575,28 +1583,76 @@ def plan_window(s: Session, args) -> Optional[tuple]:
 # --------------------------------------------------------------------------- audio fetching
 
 class YtdlpLogger:
+    def __init__(self):
+        self.warned = set()
+
     def debug(self, msg):
         log.debug("yt-dlp: %s", msg)
 
     def info(self, msg):
         log.debug("yt-dlp: %s", msg)
 
-    def warning(self, msg):
+    def warning(self, msg, only_once=False):
+        # yt-dlp's cookie readers (youtube_cookies()) call this directly, with only_once for what
+        # would repeat for every cookie they cannot decrypt; a download wraps it and passes msg alone.
+        if only_once:
+            if msg in self.warned:
+                return
+            self.warned.add(msg)
         log.warning("yt-dlp: %s", msg)
 
     def error(self, msg):
         log.error("yt-dlp: %s", msg)
 
 
-def friendly_error(exc: Exception) -> str:
+COOKIES_FILE_NOTE = "the cookies file (--cookies)"
+# The Docker image never takes a browser from config.json (resolve_default_cookies()): an exported file is its way.
+DOCKER_COOKIES_FILE = "--cookies /data/cookies.txt"
+
+
+def save_cookies_command(prefix=None, windows=None) -> str:
+    """The command that makes Firefox's YouTube cookies the default of every start on this install.
+
+    run.cmd / run.sh start setup's venv, which a Nix install has not (run.sh refuses there): its
+    Python is the Nix store's (sys.prefix; a venv's is the venv's own folder, wherever its Python
+    came from), and `nix run . --` hands the option to server.py. Each text names only its own
+    install's command, which also keeps the viewer's line within the overlay's 160 characters.
+    """
+    prefix = sys.prefix if prefix is None else prefix
+    windows = os.name == "nt" if windows is None else windows
+    if prefix.startswith("/nix/store/"):
+        launcher = "nix run . --"
+    else:
+        launcher = "run.cmd" if windows else "run.sh"
+    return f"{launcher} --save-cookies-from-browser firefox"
+
+
+def friendly_error(exc: Exception, cookies: str = "") -> str:
+    """One line for the viewer, at most 160 characters (the overlay's STATUS_ERROR_MAX_CHARS cuts the
+    rest). `cookies` names what the download sent (cookies_note()), "" for none: a sign-in wall then
+    asks for cookies the way this install takes them (save_cookies_command(), or Docker's file), and
+    for a signed-in browser (or a fresh cookies file) once they are sent."""
     msg = str(exc) or exc.__class__.__name__
     low = msg.lower()
     if "sign in to confirm" in low or "not a bot" in low:
-        return "YouTube asks for a sign-in. Restart the server with --cookies-from-browser firefox (or --cookies /data/cookies.txt in Docker)"
+        if cookies == COOKIES_FILE_NOTE:
+            # Signing in anywhere leaves an exported file as it was; every download reads it anew.
+            return (f"YouTube asks for a sign-in although the server sends {cookies}: export a fresh one "
+                    "while signed in to YouTube, then play the video again")
+        if cookies:
+            return f"YouTube asks for a sign-in although the server sends {cookies}: sign in to YouTube there, then play the video again"
+        if in_container():
+            return ("YouTube asks for a sign-in. Export a cookies.txt from a browser signed in to YouTube into the data folder "
+                    f"and add {DOCKER_COOKIES_FILE}")
+        return f"YouTube asks for a sign-in. Run {save_cookies_command()} once and start the server again"
     if "private video" in low:
         return "This video is private"
     if "members-only" in low or "join this channel" in low:
-        return "Members-only video. Restart the server with --cookies-from-browser firefox"
+        if cookies:
+            return f"Members-only video, and the account behind {cookies} is not a member"
+        if in_container():
+            return f"Members-only video. Export a cookies.txt from a member's browser into the data folder and add {DOCKER_COOKIES_FILE}"
+        return f"Members-only video. Run {save_cookies_command()} once with a member signed in there and start the server again"
     if "javascript runtime" in low:
         return "yt-dlp needs Node.js or Deno installed to download from YouTube"
     if "video unavailable" in low:
@@ -1672,6 +1728,14 @@ def stream_bytes_per_second(hook_data: dict, fallback_abr: float) -> float:
 class Fetcher:
     def __init__(self, args):
         self.args = args
+
+    def cookies_note(self) -> str:
+        """What a download sends YouTube for a sign-in, in words for friendly_error(); "" for nothing."""
+        if self.args.cookies_from_browser:
+            return f"{self.args.cookies_from_browser}'s YouTube cookies"
+        if self.args.cookies:
+            return COOKIES_FILE_NOTE
+        return ""
 
     def js_runtimes(self) -> dict:
         spec = (self.args.js_runtime or "auto").strip()
@@ -1752,7 +1816,7 @@ class Fetcher:
             log.error("[%s] fetching audio failed: %s", s.video_id, exc)
             with s.lock:
                 s.status = "error"
-                s.error = friendly_error(exc)
+                s.error = friendly_error(exc, self.cookies_note())
                 s.error_at = time.time()
                 s.preview = None  # a preview from a partial download must not outlive the failure
         finally:
@@ -3573,6 +3637,177 @@ def resolve_default_model(args):
     return args
 
 
+def configured_cookies_browser():
+    """The browser chosen for YouTube's sign-in (config.json's "cookies_from_browser"), or None.
+
+    Only a name from COOKIE_BROWSERS counts: anything else is ignored with a warning, since yt-dlp
+    would fail every download on it.
+    """
+    chosen = read_config().get("cookies_from_browser")
+    if chosen is None or chosen == "":
+        return None
+    if isinstance(chosen, str) and chosen.strip().lower() in COOKIE_BROWSERS:
+        return chosen.strip().lower()
+    log.warning("Ignoring cookies_from_browser %r in %s: not one of %s", chosen, CONFIG_PATH, ", ".join(COOKIE_BROWSERS))
+    return None
+
+
+def in_container(environ=os.environ) -> bool:
+    """True inside Shisu-ko's Docker image (SHISUKO_CONTAINER, set by the Dockerfile).
+
+    Not any container: /.dockerenv and /run/.containerenv are in toolbox and distrobox too, which
+    share the home folder and its Firefox profile, so a setup run there reads and saves a browser
+    that its starts must then send.
+    """
+    return bool(environ.get("SHISUKO_CONTAINER"))
+
+
+def resolve_default_cookies(args, environ=os.environ):
+    """Fill in --cookies-from-browser from config.json when neither it nor --cookies was given.
+
+    YouTube answers some addresses with "Sign in to confirm you're not a bot" until a download
+    carries a signed-in browser's cookies, and the popup's Start button starts run.cmd / run.sh
+    without options, so the browser chosen at setup (or with --save-cookies-from-browser) is the
+    default of every start. "none" turns it off for one start. The Docker image never takes it
+    from the config: it shares the data folder with the native setup (DATA_DIR in .env) but has no
+    browser profile to read, and would fail every download.
+    """
+    flag = (args.cookies_from_browser or "").strip()
+    if flag.lower() == "none":
+        args.cookies_from_browser = ""
+    elif flag:
+        args.cookies_from_browser = flag
+    elif not args.cookies and not in_container(environ):
+        args.cookies_from_browser = configured_cookies_browser() or ""
+    return args
+
+
+def youtube_cookies(browser: str) -> tuple[int, bool]:
+    """How many youtube.com cookies `browser` holds, and whether a sign-in is among them.
+
+    Reads the browser's cookie store the way a download does (yt-dlp), counts names and never
+    looks at a value; raises when the store cannot be read.
+    """
+    from yt_dlp.cookies import extract_cookies_from_browser
+
+    jar = extract_cookies_from_browser(browser, logger=YtdlpLogger())
+    names = set()
+    for cookie in jar:
+        domain = (cookie.domain or "").lstrip(".").lower()
+        if domain == "youtube.com" or domain.endswith(".youtube.com"):
+            names.add(cookie.name)
+    return len(names), bool(names & YOUTUBE_SIGN_IN_COOKIES)
+
+
+def write_cookies_config(name) -> bool:
+    """write_config() of "cookies_from_browser" for run_save_cookies(); False, with the reason
+    printed, when config.json cannot be written.
+
+    An error must not end main() on its own: exit code 1 makes run.cmd / run.sh run the command
+    again every 5 seconds, reading the browser's store each time.
+    """
+    try:
+        write_config({"cookies_from_browser": name})
+    except OSError as exc:
+        print(f"Could not write {CONFIG_PATH} ({exc}); it stays as it was.")
+        return False
+    return True
+
+
+def run_save_cookies(name: str) -> int:
+    """--save-cookies-from-browser NAME: make NAME's YouTube cookies the default of every start.
+
+    NAME's store is read first (youtube_cookies()): a browser whose cookies cannot be read, or that
+    holds no youtube.com cookie at all (never on YouTube, or a store it keeps from other programs,
+    as Chrome and Edge do on Windows), is refused and nothing is written. "none" forgets the
+    choice. Returns main()'s exit code, 0 or 2 (the code run.cmd / run.sh end on).
+    """
+    name = (name or "").strip().lower()
+    if name == "none":
+        if not write_cookies_config(None):
+            return 2
+        print("The server no longer sends a browser's YouTube cookies (applies from its next start).")
+        return 0
+    if name not in COOKIE_BROWSERS:
+        print(f"'{name}' is not a browser yt-dlp reads cookies from: use one of {', '.join(COOKIE_BROWSERS)}, or none")
+        return 2
+    try:
+        count, signed_in = youtube_cookies(name)
+    except ImportError as exc:
+        print(f"yt-dlp is missing ({exc}); run setup first. Nothing was saved.")
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        reason = " ".join(str(exc).split())[:200] or exc.__class__.__name__
+        print(f"Could not read {name}'s cookies ({reason}). Nothing was saved.")
+        return 2
+    if not count:
+        print(f"{name} holds no YouTube cookies (YouTube never opened there, or {name} keeps its cookies "
+              "from other programs, as Chrome and Edge do on Windows). Nothing was saved.")
+        return 2
+    if not write_cookies_config(name):
+        return 2
+    if signed_in:
+        print(f"From its next start the server sends {name}'s YouTube cookies (signed in) with every download.")
+    else:
+        print(f"From its next start the server sends {name}'s YouTube cookies with every download. "
+              f"{name} is not signed in to YouTube, though: sign in there for YouTube's sign-in wall.")
+    return 0
+
+
+def firefox_profile_found() -> bool:
+    """Whether yt-dlp would find a Firefox cookie store here; True when that cannot be told.
+
+    Asks yt-dlp's own search (its private helpers, the folders it really reads, snap and flatpak
+    included), so setup offers Firefox exactly where a download could use it; a yt-dlp without
+    them only costs a question that --save-cookies-from-browser then answers.
+    """
+    try:
+        from yt_dlp import cookies
+
+        return any(True for _ in cookies._firefox_cookie_dbs(cookies._firefox_browser_dirs()))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+SETUP_COOKIES_TRIES = 3  # answers to setup's question before it counts as none
+
+
+def run_setup_cookies(ask=input) -> int:
+    """--setup-cookies, what setup runs: offer Firefox's YouTube sign-in for every download.
+
+    Asked only where Firefox keeps a profile (Chrome and Edge lock their cookies away on Windows).
+    Y saves Firefox (run_save_cookies(), which reads the store first), N forgets an earlier
+    Firefox choice (another browser, saved with --save-cookies-from-browser, stays), and no answer
+    at all (stdin closed, or SETUP_COOKIES_TRIES answers that are neither: an unattended setup)
+    leaves config.json as it is. Always 0: setup goes on to the model download whatever happens here.
+    """
+    if not firefox_profile_found():
+        print("Firefox was not found. If YouTube asks for a sign-in later, run.cmd / run.sh "
+              "--save-cookies-from-browser <browser> lets the server use one.")
+        return 0
+    print("YouTube sometimes refuses downloads (\"Sign in to confirm you're not a bot\") until they carry")
+    print("a signed-in browser's cookies. Should the server send Firefox's YouTube cookies with every")
+    print("download? (run.cmd / run.sh --save-cookies-from-browser none undoes it)")
+    # Never asked forever: a stdin that never closes and never says Y or N (an endless pipe into
+    # setup.cmd; setup.sh gives a piped stdin's question an EOF itself) counts as no answer.
+    for _ in range(SETUP_COOKIES_TRIES):
+        try:
+            answer = ask("Type Y or N: ").strip().lower()
+        except EOFError:
+            print()
+            return 0
+        if answer in ("y", "yes"):
+            run_save_cookies("firefox")
+            return 0
+        if answer in ("n", "no"):
+            # The question named Firefox: a no is no answer about any other browser.
+            if configured_cookies_browser() == "firefox":
+                run_save_cookies("none")
+            return 0
+    print("No Y or N: config.json stays as it is (run.cmd / run.sh --save-cookies-from-browser firefox saves it later).")
+    return 0
+
+
 def run_check() -> None:
     print(f"Python {sys.version.split()[0]} at {sys.executable}")
     print(f"Data directory: {APP_DIR}")
@@ -3605,6 +3840,14 @@ def run_check() -> None:
     print("Downloaded models: " + (", ".join(models) if models else "none yet (setup or the first start downloads one)"))
     chosen = configured_model()
     print(f"Default model: {chosen or DEFAULT_MODEL} " + ("(chosen at setup)" if chosen else "(built-in default)"))
+    browser = configured_cookies_browser()
+    if browser:
+        print(f"YouTube sign-in: {browser}'s cookies go with every download (chosen at setup)"
+              + ("; not inside this container" if in_container() else ""))
+    elif in_container():
+        print(f"YouTube sign-in: none (if YouTube asks for one: a cookies.txt in the data folder and {DOCKER_COOKIES_FILE})")
+    else:
+        print(f"YouTube sign-in: none (if YouTube asks for one: {save_cookies_command()})")
     # The native-messaging host behind the popup's "Start server" button lives next to this file;
     # loaded by path so a missing or broken native_host.py only costs this one line.
     try:
@@ -3651,7 +3894,13 @@ def parse_args(argv=None):
     p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically, and the least time between two attempts to load a model that failed to download or load")
     p.add_argument("--client-timeout", type=float, default=30.0, help="stop transcribing ahead for a video whose tab has not synced for this many seconds (0 = never stop)")
     p.add_argument("--cpu-threads", type=int, default=0)
-    p.add_argument("--cookies-from-browser", default="", help="e.g. firefox, for age-restricted or members-only videos")
+    p.add_argument("--cookies-from-browser", default="",
+                   help="e.g. firefox: send that browser's YouTube cookies with every download, for YouTube's sign-in wall, "
+                        "age-restricted or members-only videos (default: the browser chosen at setup, config.json; none for no browser)")
+    p.add_argument("--save-cookies-from-browser", metavar="NAME",
+                   help="make NAME (firefox, chrome, ...) the browser whose YouTube cookies every later start sends, the popup's "
+                        "Start button included, after checking that its cookies can be read; none forgets it")
+    p.add_argument("--setup-cookies", action="store_true", help="ask whether to send Firefox's YouTube cookies; used by setup")
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
     p.add_argument("--js-runtime", default="auto", help="JS runtime for yt-dlp: auto, node, deno, bun, or name:path")
     p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
@@ -3662,7 +3911,7 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     if args.initial_prompt is None:
         args.initial_prompt = DEFAULT_PROMPTS.get(args.language, "")
-    return resolve_default_model(args)
+    return resolve_default_cookies(resolve_default_model(args))
 
 
 def main() -> None:
@@ -3687,6 +3936,12 @@ def main() -> None:
         return
     if getattr(args, "download_model", None) is not None:
         sys.exit(run_download_model(args.download_model))
+    if getattr(args, "save_cookies_from_browser", None) is not None:
+        sys.exit(run_save_cookies(args.save_cookies_from_browser))
+    if getattr(args, "setup_cookies", False):
+        sys.exit(run_setup_cookies())
+    if getattr(args, "cookies_from_browser", ""):
+        log.info("Downloads send %s's YouTube cookies", args.cookies_from_browser)
 
     if not hold_instance_lock(args.port):
         log.error("Another server is already starting or running on port %d (it holds %s). Stop it first.",
