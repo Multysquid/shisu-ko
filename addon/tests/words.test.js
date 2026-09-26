@@ -430,8 +430,9 @@ test("the word field the settings name is found in any case too", () => {
   const note = fields([["Expression", "更に"], ["Word", "さらに"], ["Reading", "さらに"], ["Glossary", "(adv, uk)"]]);
   assert.equal(kanaReadingOf(note, { ankiWordField: "Expression" }), "さらに");
   assert.equal(kanaReadingOf(note, { ankiWordField: "expression" }), "さらに");
-  // The word field is skipped as a reading source whatever case names it.
-  assert.equal(kanaReadingOf(fields([["expression", "更に"], ["Reading", "さらに"], ["Notes", "(uk)"]]), { ankiWordField: "Expression" }), "さらに");
+  // The word field is skipped as a reading source whatever case names it: here it is named like a
+  // reading field and comes first, so without the skip its kanji would be taken for the reading.
+  assert.equal(kanaReadingOf(fields([["reading", "更に"], ["KanaReading", "さらに"], ["Notes", "(uk)"]]), { ankiWordField: "Reading" }), "さらに");
 });
 
 test("pitchOf takes the lowest-order matching field and never reads the pitch field as a reading", () => {

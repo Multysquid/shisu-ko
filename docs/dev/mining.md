@@ -91,11 +91,17 @@ disagree on case (Lapis and JPMN write `Picture` and `SentenceAudio`, Eminent `p
 `sentenceAudio`), Anki answers a name exactly, and a setting in the other case found nothing:
 every mine into an Eminent card failed with "The new card has none of the fields Picture,
 SentenceAudio". Two fields differing in case alone leave an inexact name unmatched rather than
-guessed, and only the note's own names count (`constructor` is no field). A card with none of
-them is refused before any media is stored, with `missingFieldsError()`: the names looked for,
-the card's own field names in order (the first `MISSING_FIELDS_SHOWN`, 8), and where to change
-them ("Check the field names and change them in the settings if they differ: popup > Anki,
-clips and server").
+guessed, and only the note's own names count (`constructor` is no field; `update` has no
+prototype, so a field named `__proto__` is written like any other). A card with neither the image
+nor the audio field is refused before any media is stored, even when its sentence field could be
+extended (one of the two missing is a partial mine, as before), with `missingFieldsError()`: the
+names looked for, where to change them ("Check the field names and change them in the settings if
+they differ: popup > Anki, clips and server") and then the card's own field names, those that
+look like a picture or audio field (`MEDIA_FIELD_NAME`) first, the rest in the note type's order,
+the first `MISSING_FIELDS_SHOWN` (8). The list comes last because a toast is cut at 240
+characters, and the Downloads fallback says "Saved to Downloads instead." before the Anki error
+for the same reason. A note AnkiConnect no longer has (`notesInfo` answers `{}`) is "no longer in
+Anki", not a settings problem.
 
 Right after a successful `updateNoteFields`, `addToAnki()` calls `rememberDeck(url, noteId)`
 without awaiting it (see "How word colours work" in `word-colours.md`): the mine's answer never waits for it, and its
