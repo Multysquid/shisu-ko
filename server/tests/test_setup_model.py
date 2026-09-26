@@ -425,15 +425,16 @@ def no_registry(*args):
 def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
     # run_check() imports ctranslate2 (which would initialise the CUDA driver where the library is
     # installed: the venv, nix run .#tests), faster_whisper and yt_dlp, and loads native_host.py to
-    # look the launcher up in the registry and under ~/.shisu-ko: every one of them is a stand-in
-    # here, and the output shows that they were what the check saw.
+    # look the launcher up in the registry and in the browsers' folders (under the home, and on
+    # Linux under CHROME_CONFIG_HOME or XDG_CONFIG_HOME): every one of them is a stand-in here,
+    # and the output shows that they were what the check saw.
     fake_hub(monkeypatch, tmp_path)
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(__version__="0", get_cuda_device_count=lambda: 0))
     version = SimpleNamespace(__version__="0")
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(version=version))
     monkeypatch.setitem(sys.modules, "yt_dlp.version", version)
     monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(HKEY_CURRENT_USER=0, REG_SZ=1, OpenKey=no_registry))
-    for name in ("SHISUKO_HOME", "USERPROFILE", "HOME"):
+    for name in ("SHISUKO_HOME", "USERPROFILE", "HOME", "CHROME_CONFIG_HOME", "XDG_CONFIG_HOME"):
         monkeypatch.setenv(name, str(tmp_path))
     server.run_check()
     out = capsys.readouterr().out
