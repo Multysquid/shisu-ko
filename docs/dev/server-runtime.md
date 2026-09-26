@@ -103,14 +103,25 @@ or empty), and that takes large-v3 like `setup.sh`'s EOF fallback.
 
 A WebExtension cannot spawn a process, so the popup's button goes through native messaging:
 `background.js` sends `{cmd: "start"}` to the native host `shisuko`, and the host,
-`server/native_host.py`, runs the checkout's own launcher. Firefox only: `register()` writes the
-Mozilla host manifest, Chrome's would have to name the installed extension's id under its own
-key, so `popup.js` hides the button unless `browser.runtime.getURL("")` is `moz-extension:`
-(`START_AVAILABLE`). The host is stdlib only, so the wrapper can fall back to the system Python
-before setup ran, and it never imports `server.py` (`VERSION` is read from it with a regex).
+`server/native_host.py`, runs the checkout's own launcher. Firefox and Chrome: `register()`
+writes a host manifest for each, and Chrome's has to name the extension by an id that is fixed
+only for the Chrome Web Store install (`CHROME_EXTENSION_ID`, `ecenifonpkaiccmmknpbllbebbfigjnm`);
+an unpacked build's id is derived from the path of the folder it was loaded from. So `popup.js`
+shows the button only when `browser.runtime.getURL("")` is `moz-extension:` (`ON_FIREFOX`) or
+exactly `chrome-extension://<CHROME_STORE_ID>/` (`START_AVAILABLE`); `ON_FIREFOX` alone decides
+the Firefox-only rest (the Alt+Shift+H hint Chrome's build has no key for, the signed-.xpi wait
+of the update banner). Another Chromium-based browser holding the store install can give that
+URL, so one that reads host manifests from a folder `browsers()` does not write (Chromium
+outside Linux; on Linux and macOS Chrome Beta, Dev and Canary, whose folders carry the channel's
+name; Brave, Edge and the like) can show the button and get "launcher not registered". On
+Windows every Chrome channel reads the one `HKCU` key. The host is stdlib only, so the wrapper can fall back to the
+system Python before setup ran, and it never imports `server.py` (`VERSION` is read from it with
+a regex). On Chrome the background reaches the host through `browser-api.js`, whose
+`runtime.sendNativeMessage` is a getter over `chrome.runtime`: Chrome adds the method only once
+the popup's grant lands, while the service worker runs.
 
-Protocol (Firefox's: 4-byte little-endian length, UTF-8 JSON, one request per message, answered
-in order until stdin closes; `read_message()` / `write_message()`, `serve()`, `handle()`):
+Protocol (the browsers' own: 4-byte little-endian length, UTF-8 JSON, one request per message,
+answered in order until stdin closes; `read_message()` / `write_message()`, `serve()`, `handle()`):
 `{"cmd": "status"}` -> `{ok, running, version, root}`, `running` being a `/health` answer within
 1.5 s (`server_running()`); `{"cmd": "start"}` -> `{ok: true, already: true}` for a running
 server, `{ok: true, already: true, starting: true}` for one that holds the instance lock but
@@ -127,26 +138,53 @@ server exits 2. `try_lock()` exists in both files (`msvcrt.locking` / `fcntl.flo
 CREATE_NEW_PROCESS_GROUP` and first `CREATE_BREAKAWAY_FROM_JOB`, retrying without it on
 `PermissionError`; on POSIX `bash run.sh` with `start_new_session=True` and stdout/stderr
 appended to the log (bash, not the file itself: a zip install has no mode bits). The browser
-starts the host with arguments of its own (Firefox: manifest path and extension id); `main()`
-serves whenever no action flag is given and stdin is not a terminal.
+starts the host with arguments of its own (Firefox: manifest path and extension id; Chrome: the
+extension's origin and, on Windows, `--parent-window=<handle>`); `main()` serves whenever no
+action flag is given and stdin is not a terminal.
 
 Registration (`native_host.py --register | --unregister | --status [--verbose]`, exit 0 on
-success, quiet unless `--verbose`): the manifest `{name: "shisuko", description, path:
-<wrapper>, type: "stdio", allowed_extensions: ["shisu-ko@multysquid.github.io"]}` goes to
-`%USERPROFILE%\.shisu-ko\native-messaging\shisuko.json` (`SHISUKO_HOME` respected) plus the
-default value of `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko` on Windows, to
-`~/.mozilla/native-messaging-hosts/shisuko.json` on Linux and to
-`~/Library/Application Support/Mozilla/NativeMessagingHosts/shisuko.json` on macOS. The
-wrapper is `server/native-host.cmd` (CRLF) or `server/native-host.sh` (LF, mode 755;
-`register()` restores the bit a zip install drops): the venv's Python, else the system one, on
-`native_host.py`. `setup.cmd` / `setup.sh` register and then run `--check`, which reports it;
-`run.cmd` / `run.sh` register on every start, so an install that never re-ran setup gets the
-button after a manual start, with one exception: the start that updates an older checkout to
-this version does not register, because the old launcher is what runs (`run.cmd`'s old
-`update.py ... & goto loop` jumps to `:loop` in the new file, below the register line; `run.sh`'s
-already-parsed old `main()` has no register call), so it is the start after the update, or
-setup, that registers. In `run.cmd` the call sits on its own line before the
-`update.py ... & goto loop` line; in `run.sh` after the update, which rewrites the wrapper.
+success, quiet unless `--verbose`) writes one manifest per browser in `browsers()`: Firefox and
+Chrome everywhere, Chromium too on Linux. Each is `{name: "shisuko", description, path:
+<wrapper>, type: "stdio"}` plus, for Firefox, `allowed_extensions:
+["shisu-ko@multysquid.github.io"]` and, for Chrome and Chromium, `allowed_origins:
+["chrome-extension://ecenifonpkaiccmmknpbllbebbfigjnm/"]` (`manifest()`). They go to
+(`manifest_path()`): on Windows `%USERPROFILE%\.shisu-ko\native-messaging\shisuko.json` and
+`shisuko-chrome.json` beside it (`SHISUKO_HOME` respected), each named by the default value of
+its key under `HKCU` (`REGISTRY_KEYS`: `Software\Mozilla\NativeMessagingHosts\shisuko`,
+`Software\Google\Chrome\NativeMessagingHosts\shisuko`); on Linux
+`~/.mozilla/native-messaging-hosts/shisuko.json`,
+`~/.config/google-chrome/NativeMessagingHosts/shisuko.json` and
+`~/.config/chromium/NativeMessagingHosts/shisuko.json` (`config_home()`: `$CHROME_CONFIG_HOME`,
+else `$XDG_CONFIG_HOME`, replaces `~/.config` when it is set and not empty, the order Chrome's
+own `chrome_paths_linux.cc` uses; Firefox's folder follows neither); on macOS
+`~/Library/Application Support/Mozilla/NativeMessagingHosts/shisuko.json` and
+`~/Library/Application Support/Google/Chrome/NativeMessagingHosts/shisuko.json`. Every
+browser is tried: one that cannot be written does not keep the others from the button, and
+`register()` then raises `RegistrationError` with the failures and the ones that were written
+(`--register` exits 1 and, with `--verbose`, still lists those). `unregister()` removes every
+manifest and key; `registered()` asks per browser (on Windows the registry value must name an
+existing file); `status_text()` is one line, per browser "<Browser> registered at <path>", with
+"(points at ...)" for another checkout's wrapper and "(out of date ...)" for a manifest that
+differs from what `--register` would write, "<Browser> not registered (run setup or start the
+server once)", or "<Browser> could not be checked (<error>)" when `registered()` raises (a
+folder this user cannot enter, such as a profile a browser once started through sudo left to
+root), which leaves the other browsers reported. Only when every browser was checked and none
+has it is the line the bare "not registered (run setup or start the server once)". The wrapper
+is `server/native-host.cmd` (CRLF) or `server/native-host.sh` (LF, mode 755; `register()`
+restores the bit a zip install drops): the venv's Python, else the system one, on
+`native_host.py`. `setup.cmd` / `setup.sh`
+register and then run `--check`, which reports it; `run.cmd` / `run.sh` register on every
+start, so an install that never re-ran setup gets the button after a manual start, with one
+exception: the start that updates an older checkout to a version with the button does not
+register, because the old launcher is what runs (`run.cmd`'s old `update.py ... & goto loop`
+jumps to `:loop` in the new file, below the register line; `run.sh`'s already-parsed old
+`main()` has no register call), so it is the start after the update, or setup, that registers.
+In `run.cmd` the call sits on its own line before the `update.py ... & goto loop` line; in
+`run.sh` after the update, which rewrites the wrapper. So an install that already has the button
+gets Chrome's registration from the start that updates it on Linux and macOS (`main()` and the
+code-4 branch start the updated `native_host.py --register` after `update.py`), and on Windows
+only from the next `run.cmd` start (its register line runs before the update, and `:update`
+does not register).
 `launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
 defaults (`--model` from `config.json`, else large-v3; `--device auto`), and the popup's model
 setting only takes effect after that default model is loaded.

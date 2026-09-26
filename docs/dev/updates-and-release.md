@@ -95,8 +95,8 @@ viewer and asks the server to update itself.
   `notifications.create` / `clear` (with `onClicked` passed through) and `tabs.create`; the
   endpoint is plain HTTP, so the flow is the same there. The extension itself is another matter:
   an install from the Chrome Web Store (`CHROME_STORE_ID` in `popup.js`,
-  `ecenifonpkaiccmmknpbllbebbfigjnm`, compared with `browser.runtime.id` as
-  `CHROME_STORE_INSTALL`) is updated by Chrome from the store, once the store has reviewed the
+  `ecenifonpkaiccmmknpbllbebbfigjnm`; `CHROME_STORE_INSTALL`: `runtime.getURL("")` is exactly
+  `chrome-extension://<id>/`) is updated by Chrome from the store, once the store has reviewed the
   version, so it can trail the GitHub release by days, and only to a version uploaded to the
   store by hand (see "Release"). For such an install an extension behind gets "the Chrome Web
   Store updates this one once it has reviewed that version, …" with **Not now** and no release

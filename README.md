@@ -82,30 +82,43 @@ ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open 
 restarts itself if it ever crashes.
 
 From then on the toolbar popup can start it for you: while the server is offline, the status
-line in the popup's header shows a **Start server** button. The first click asks Firefox for
-permission to "exchange messages with programs other than Firefox"; allow it, and the button
-launches `server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background
-with its output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
+line in the popup's header shows a **Start server** button. The first click asks the browser for
+permission, Firefox to "exchange messages with programs other than Firefox", Chrome to
+"communicate with cooperating native applications"; allow it, and the button launches
+`server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background with its
+output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
 The button passes no options: the server starts with its defaults (the model chosen at setup,
 else large-v3; the GPU when there is one; no cookies), exactly as a bare `run.cmd` / `run.sh`
 start would. The popup's model field switches the model once that default one is up; anything
 else you usually append to `run.cmd` / `run.sh` (`--device cpu`, `--cookies-from-browser`,
-`--js-runtime`, ...) needs a start by hand, see [Server options](#server-options). Firefox only
-for now: Chrome wants the installed extension's id in the launcher's manifest. Docker and Nix
-users start the server as before.
+`--js-runtime`, ...) needs a start by hand, see [Server options](#server-options). In Chrome the
+button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm)
+install only (see [Install the extension](#2-install-the-extension)): the launcher's manifest
+has to name the extension's id, and an unpacked build (`dist/chrome`, the release zip) gets an
+id of its own from the folder it was loaded from, so there the server is started by hand.
+Docker and Nix users start the server as before.
 
-Setup registers that launcher with Firefox, and so does every `run.cmd` / `run.sh` start. An
-existing install therefore gets the button after one or two starts by hand: the start that
-updates Shisu-ko to a version with the button still runs the old launcher, so it is the start
-after the update that registers; running `setup.cmd` / `setup.sh` once is the sure way, and
-`run.cmd --check` says whether the launcher is registered. To take the registration away again,
-for example before deleting the checkout or if Firefox should not be able to start anything, run
+Setup registers that launcher with Firefox and Chrome (on Linux with Chromium too), and so does
+every `run.cmd` / `run.sh` start. An existing install therefore gets the button after one or two
+starts by hand: the start that updates Shisu-ko to a version with the button still runs the old
+launcher, so it is the start after the update that registers. An install that already has the
+button gets Chrome's registration with the update itself on Linux and macOS, where `run.sh`
+registers after updating (the popup's **Update** included), and with the next `run.cmd` start on
+Windows, where `run.cmd` registers before it updates. Running `setup.cmd` / `setup.sh` once is
+the sure way, and `run.cmd --check` says for which browsers the launcher is registered. To take
+the registration away again, for example before deleting the checkout or if no browser should
+be able to start anything, run
 `~/.shisu-ko/venv/Scripts/python server/native_host.py --unregister` (`venv/bin/python` on
-Linux/macOS; any Python 3 works, the host is standard library only). It removes
-`~/.shisu-ko/native-messaging/shisuko.json` and the `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko`
-registry key on Windows, `~/.mozilla/native-messaging-hosts/shisuko.json` on Linux and
-`~/Library/Application Support/Mozilla/NativeMessagingHosts/shisuko.json` on macOS; delete
-those by hand if the checkout is already gone. `--status` shows the current state.
+Linux/macOS; any Python 3 works, the host is standard library only). On Windows it removes
+`shisuko.json` and `shisuko-chrome.json` from `~/.shisu-ko/native-messaging` and the registry
+keys `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko` and
+`HKCU\Software\Google\Chrome\NativeMessagingHosts\shisuko`; on Linux `shisuko.json` from
+`~/.mozilla/native-messaging-hosts`, `~/.config/google-chrome/NativeMessagingHosts` and
+`~/.config/chromium/NativeMessagingHosts` (`$CHROME_CONFIG_HOME`, else `$XDG_CONFIG_HOME`, in
+place of `~/.config` when it is set, as Chrome itself looks); on macOS `shisuko.json` from
+`~/Library/Application Support/Mozilla/NativeMessagingHosts` and
+`~/Library/Application Support/Google/Chrome/NativeMessagingHosts`. Delete those by hand if the
+checkout is already gone. `--status` shows the current state.
 
 Every start first looks for a newer Shisu-ko: a git clone is fast-forwarded to the branch it
 tracks, a folder downloaded as a zip is replaced with the newest release, changed Python
@@ -427,9 +440,9 @@ The switch in the header is the master switch. Off means nothing happens on YouT
 overlay, no requests to the server, no Anki watching, no word colours and no key handling, until
 it is switched on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
 answers, and with which model and device; while it does not answer, a **Start server** button
-on that line launches it with the server's default options (Firefox, see
-[Start the server](#1-start-the-server)); the model field below takes effect once it is up. The
-same page opens as the add-on's preferences under Add-ons and themes > Shisu-ko.
+on that line launches it with the server's default options (Firefox and the Chrome Web Store
+install, see [Start the server](#1-start-the-server)); the model field below takes effect once
+it is up. The same page opens as the add-on's preferences under Add-ons and themes > Shisu-ko.
 
 A banner under the header appears when a newer release than the running server (or than this
 extension) is out: "Shisu-ko 0.9.0 is available — the server runs 0.8.0." with **Update**, which
@@ -675,8 +688,9 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Badge says "No speech found in this video" | The whole video, from its start, was transcribed and nothing was heard: a silent clip, an instrumental, a song Whisper does not hear as Japanese, or, with `--lyrics off`, any song. |
 | A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before 0.12.0 gets its lines on the next visit: that release changed the shape of the cue cache, so every older result is ignored and the video is transcribed again from the start; nothing needs deleting from `~/.shisu-ko/cache`. A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
-| **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
-| **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
+| **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox and Chrome on every start. `run.cmd --check` prints "Start button launcher: Firefox registered at …; Chrome registered at …" once it is. The launcher is registered only for Firefox, Chrome (on Linux and macOS its stable channel; Beta, Dev and Canary keep folders of their own) and, on Linux, Chromium: in another browser with the store install (Brave, Edge, Chromium outside Linux) start the server by hand. |
+| **Start server** says "Allow Shisu-ko to talk to its launcher …" | The browser's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox" (Firefox; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data) or "Communicate with cooperating native applications" (Chrome). |
+| No **Start server** button in Chrome | The button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm) install only: an unpacked build (`dist/chrome`, the release zip) has an id of its own, which the launcher is not registered for. Start `server\run.cmd` / `server/run.sh` by hand, or install from the store. |
 | **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads the default model unless setup already did (large-v3 is 3 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
 | The banner or **Update** says the server cannot update itself | The server was not started by `run.cmd` / `run.sh` (Docker, Nix, `python server.py` by hand: it has no launcher to run `update.py` after the exit), was started with `--no-update` or `SHISUKO_NO_UPDATE`, or is a 0.8.0 server, which predates the button. The banner names the first of those causes whatever the actual one, because the server only reports that it cannot. Update it the way it was started: `docker compose build`, `nix run` with the new revision, or a plain restart of `run.cmd` / `run.sh`, which updates before every start. A `run.sh` that updated itself from before 0.9.0 keeps running its old loop, so its first server is refused too; restart `run.sh` once by hand (`run.cmd` reads its new loop as soon as it has updated and needs no restart). |
 | "The server restarted but still runs X; look at its window: update.py said why" | The launcher ran `update.py` but it could not update: local changes git would overwrite, a diverged branch, a detached HEAD, no network, or a release zip that could not be downloaded. Its message is in the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS); fix that and click **Update** again, or update by hand (`git pull`, or unpack the release). |
@@ -738,7 +752,8 @@ server/
   update.py           self-update run by run.cmd/.sh, first and after the server exits with code 4
                       (POST /update): git fast-forward or newest release
   native_host.py      native-messaging host behind the popup's Start server button (stdlib only);
-                      native-host.cmd/.sh wrap it for Firefox; --register writes the host manifest
+                      native-host.cmd/.sh wrap it for Firefox and Chrome; --register writes a
+                      host manifest for each browser
   tests/              pytest suite                   tools/        cue statistics, re-transcription
 docker/               Windows wrappers for docker compose and the WSL engine installer
 docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing),
@@ -766,7 +781,8 @@ Checks:
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`,
   `config.json` (the model chosen at setup), the instance lock `server-8790.lock` (one per port,
   held while a server runs), `server.log` (the output of a server the popup started,
-  Linux/macOS) and, on Windows, the launcher's host manifest `native-messaging/shisuko.json`.
+  Linux/macOS) and, on Windows, the launcher's host manifests `native-messaging/shisuko.json`
+  (Firefox) and `native-messaging/shisuko-chrome.json` (Chrome).
 
 Tests cover the pure logic on both sides, need no GPU, network or Firefox, and run in CI on
 every push and pull request via [`.github/workflows/tests.yml`](.github/workflows/tests.yml):
@@ -792,8 +808,8 @@ aliases, the download beside the working model, the swap and session restart, ev
 and cooldown, the per-model cache files and what `/health` and `/sync` report.
 `test_native_host.py` drives the native host behind the Start button: the message framing, the
 two commands and every malformed request, the launch on each platform with a recorded `Popen`,
-the instance lock shared with `server.py`, registration into a temporary home with a fake
-registry, the host over a real pipe, and the wrapper and launcher scripts.
+the instance lock shared with `server.py`, registration for every browser into a temporary home
+with a fake registry, the host over a real pipe, and the wrapper and launcher scripts.
 `test_update_endpoint.py` drives `POST /update` over a real socket: the launcher variable and
 the two no-update switches, the 409s, the answer followed by the exit with code 4 through
 `main()`, the origin rule that admits the extension and no page, and the launchers' `:update`
