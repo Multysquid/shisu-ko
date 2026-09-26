@@ -90,7 +90,10 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `video.currentTime`. Every read or seek of the playhead goes through `playhead()` /
   `seekPlayhead()`.
 - Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`,
-  `config.json` (`write_config()`, `read_config()`, `resolve_default_model()`),
+  `config.json` (`write_config()`, `read_config()`, `resolve_default_model()`,
+  `resolve_default_cookies()`: `model` and `cookies_from_browser`, the browser whose YouTube
+  cookies every download sends; the Docker image never takes the latter, `in_container()` is
+  `SHISUKO_CONTAINER` only, since toolbox and distrobox share the home folder's Firefox),
   `server-<port>.lock`, `server.log` and, on Windows, `native-messaging/shisuko.json` (Firefox's
   host manifest) and `native-messaging/shisuko-chrome.json` (Chrome's). Detail:
   `docs/dev/cue-building.md`, "Runtime data and the cue cache".
@@ -167,6 +170,9 @@ and which model a bare start runs).
 Music videos: `--lyrics auto` (default) or `--lyrics off`; see `docs/dev/cue-building.md`.
 Model download with a progress bar: `server.py --download-model NAME`; see
 `docs/dev/server-runtime.md`.
+YouTube's sign-in: `run.cmd --save-cookies-from-browser firefox` (or `none`; on Nix
+`nix run . -- --save-cookies-from-browser firefox`) remembers the browser whose cookies every
+start sends; setup asks through `server.py --setup-cookies`.
 Start-button launcher, with the venv's Python (`run.cmd` / `setup.cmd` and their `.sh` twins do
 this themselves): `~/.shisu-ko/venv/Scripts/python server/native_host.py --register --verbose`
 (`venv/bin/python` on Linux/macOS), `--status`, `--unregister`.
@@ -225,6 +231,10 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 - Hugging Face's xet backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`, plus
   `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the import.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube.
+- YouTube's "Sign in to confirm you're not a bot" needs a signed-in browser's cookies: the Start
+  button passes no options, so the browser lives in `config.json` (`cookies_from_browser`), never
+  taken in the Docker image (`SHISUKO_CONTAINER`; toolbox and distrobox do take it). Offer
+  Firefox: Chrome and Edge on Windows lock their cookies away.
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
   `add_nvidia_dll_dirs()` must run before `ctranslate2` is imported.
 - GPU memory is often shared. `load_model()` picks `int8_float16` below 4.5 GB free VRAM. Exit codes:

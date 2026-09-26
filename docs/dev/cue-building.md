@@ -266,7 +266,9 @@ full decode replaces it with `Session.audio` and clears the preview.
 The runtime-data invariant in full:
 
 - Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`,
-  `config.json` (`{"model": ...}`, written by `server.py --download-model NAME` at setup through
+  `config.json` (`{"model": ..., "cookies_from_browser": ...}`; the browser is written by
+  `--save-cookies-from-browser` / `--setup-cookies` and read by `resolve_default_cookies()`, see
+  `docs/dev/server-runtime.md`; the model by `server.py --download-model NAME` at setup through
   `write_config()` (a merge; a None value drops its key): before the download for a size from
   faster-whisper's table, so that the choice outlives a failed or interrupted download and the
   first start fetches that model rather than the built-in default, after it for a repo id, which

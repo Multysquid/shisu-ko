@@ -99,6 +99,53 @@ the partial blob stays as `.incomplete` and the next download resumes it. `setup
 line tests `errorlevel 3` before 2: `choice` answers 255 when it cannot read a key (stdin closed
 or empty), and that takes large-v3 like `setup.sh`'s EOF fallback.
 
+### YouTube's sign-in
+
+YouTube answers some addresses with "Sign in to confirm you're not a bot" until a download
+carries a signed-in browser's cookies, and the popup's Start button starts the launcher without
+options, so the browser is a setting in `config.json` (`"cookies_from_browser"`), not only a
+flag. `parse_args()` ends in `resolve_default_cookies()`: `--cookies-from-browser NAME` wins,
+`none` sends no browser's cookies for that start, `--cookies FILE` is never joined by the
+configured browser, and otherwise `configured_cookies_browser()` fills it in (a name from
+`COOKIE_BROWSERS`, yt-dlp's `SUPPORTED_BROWSERS`; anything else is ignored with a warning). The
+Docker image never takes it (`in_container()` is `SHISUKO_CONTAINER`, which the Dockerfile sets,
+and nothing else), since `DATA_DIR` may be the native `~/.shisu-ko` and the image has no browser
+to read. Not any container: toolbox and distrobox carry `/.dockerenv` or `/run/.containerenv`
+too, but share the home folder and its Firefox profile, so their starts must send the browser
+their setup saved; never test those files again. `--save-cookies-from-browser NAME`
+(`run_save_cookies()`, exit 0 or 2 like `--download-model`, before the instance lock) reads the
+store once through yt-dlp (`youtube_cookies()`: youtube.com cookie names only, never a value) and
+refuses a browser that cannot be read or holds no youtube.com cookie (Chrome and Edge on Windows
+encrypt theirs so that no other program can decrypt them); `none` drops the key. A `config.json`
+that cannot be written is exit 2 as well (`write_cookies_config()`), never 1, which the launcher
+would repeat every 5 seconds, reading the store each time. Setup runs `--setup-cookies`
+(`run_setup_cookies()`, always exit 0) after the model question: asked only where yt-dlp finds a
+Firefox cookie store (`firefox_profile_found()`, through yt-dlp's private
+`_firefox_browser_dirs()` / `_firefox_cookie_dbs()`; without them it asks anyway), Y saves
+Firefox, N drops an earlier choice only when that is Firefox (the question named Firefox, so a
+browser saved with `--save-cookies-from-browser` stays), and no answer leaves the file alone:
+an EOF (`setup.sh` gives a stdin that is not a terminal one, since it held the model's answer) or
+`SETUP_COOKIES_TRIES` answers that are neither Y nor N (a stdin that never closes, `yes 1`).
+`friendly_error()` gets `Fetcher.cookies_note()`: without cookies the sign-in wall names
+`run.cmd --save-cookies-from-browser firefox`; with a browser's it asks for a sign-in to YouTube
+there; with a `--cookies` file (`COOKIES_FILE_NOTE`) it asks for a fresh export, since a sign-in
+leaves an exported file as it was. `run_check()` prints the configured browser. Tests:
+`server/tests/test_cookies.py`.
+yt-dlp loads the browser's whole store, every site's cookies with their values (no host filter
+in its SQL), once per `YoutubeDL`, so every `download_once()` and `DashLiveSource.refresh()`
+reads it again. It reads a copy: `_open_database_copy()` writes the database file into a
+`yt_dlp*` folder under the system temp folder and deletes it after the read, so a process that
+dies during the read (`os._exit()`, a kill) leaves it there. Its Firefox query has no
+`originAttributes` filter either (the server passes no container), so the rows of every
+Multi-Account Container and every partitioned cookie (a YouTube embed on another site) go into
+one jar, where the last row of a domain, path and name wins: with YouTube signed in in two
+contexts, a download may carry the other account's session or a mix. The jar sends a request
+only its host's cookies, GitHub's with `--allow-remote-ejs` included. `docs/amo/privacy-policy.md`
+and the README's "YouTube sign-in" say exactly this, so a change here changes them too. A Nix
+install has no setup and no venv, so `run.sh` refuses there; its command is
+`nix run . -- --save-cookies-from-browser firefox` (the flake's loop stops on exit 0 and 2 like
+`run.sh`).
+
 ## How the Start server button works
 
 A WebExtension cannot spawn a process, so the popup's button goes through native messaging:
@@ -186,7 +233,8 @@ code-4 branch start the updated `native_host.py --register` after `update.py`), 
 only from the next `run.cmd` start (its register line runs before the update, and `:update`
 does not register).
 `launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
-defaults (`--model` from `config.json`, else large-v3; `--device auto`), and the popup's model
+defaults (`--model` from `config.json`, else large-v3; `--device auto`; `--cookies-from-browser`
+from `config.json`, see "YouTube's sign-in"), and the popup's model
 setting only takes effect after that default model is loaded.
 `run_check()` in `server.py` loads `native_host.py` by path and prints `status_text()`.
 
