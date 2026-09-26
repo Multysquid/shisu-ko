@@ -103,7 +103,7 @@ jobs:
           test ! -f "$XDG_CONFIG_HOME/google-chrome/NativeMessagingHosts/shisuko.json"
           test ! -f "$XDG_CONFIG_HOME/chromium/NativeMessagingHosts/shisuko.json"
           python server/native_host.py --status | grep -q "^Start button launcher: not registered"
-      - name: Drive the real run.sh through register, update, exit code 4 and restart
+      - name: Drive the real run.sh through register, update, exit code 4 and restart, and setup.sh under yes 1
         run: bash scripts/launcher-smoke.sh
 
   addon:
