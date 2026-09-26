@@ -38,27 +38,24 @@ const START_NOT_UP_HINT = startNotUpHint(null);
 // the two are looking at different addresses.
 const START_ELSEWHERE_HINT = "The launcher finds a server on 127.0.0.1:8790, but the server URL below does not answer; check it under Anki, clips and server";
 const START_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher to start the server from here";
-// The launcher is registered for Firefox alone (native_host.py writes the Mozilla host manifest;
-// Chrome wants its own, under its own key, naming the installed extension's id), so on Chrome the
-// button could only ever answer "launcher not registered" with a hint that cannot help there.
-const START_AVAILABLE = (() => {
+const RUNTIME_URL = (() => {
   try {
-    return /^moz-extension:/.test(browser.runtime.getURL(""));
+    return String(browser.runtime.getURL(""));
   } catch (err) {
-    return false;
+    return "";
   }
 })();
-// The Chrome Web Store's id for Shisu-ko. Chrome updates an install from the store by itself,
-// once the store has reviewed the version; an unpacked build (dist/chrome, the release's Chrome
-// zip) has an id of its own, taken from its folder, and nothing updates it but the viewer.
+const ON_FIREFOX = /^moz-extension:/.test(RUNTIME_URL);
+// The Chrome Web Store install's id (CHROME_EXTENSION_ID in native_host.py, which names it in
+// Chrome's host manifest; server/tests/test_native_host.py keeps the two equal). Chrome lets only
+// the extensions a host manifest names reach the host, by an id that is fixed only for the store
+// install: an unpacked build's comes from its folder's path, and there the button could only ever
+// answer "launcher not registered" with a hint that cannot help. Firefox's id is the manifest's.
+// Chrome also updates a store install by itself, once the store has reviewed the version; an
+// unpacked build (dist/chrome, the release's Chrome zip) is updated by nothing but the viewer.
 const CHROME_STORE_ID = "ecenifonpkaiccmmknpbllbebbfigjnm";
-const CHROME_STORE_INSTALL = (() => {
-  try {
-    return browser.runtime.id === CHROME_STORE_ID;
-  } catch (err) {
-    return false;
-  }
-})();
+const CHROME_STORE_INSTALL = RUNTIME_URL === `chrome-extension://${CHROME_STORE_ID}/`;
+const START_AVAILABLE = ON_FIREFOX || CHROME_STORE_INSTALL;
 
 // The subtitle font, as content.js builds it (FONT_FAMILY_RE, SUB_FONTS, fontStack there): the
 // popup cannot import the content script, so the sample keeps a copy. Keep the two in step.
@@ -849,17 +846,18 @@ function renderUpdate() {
     } else if (decision.extension === "newer" && CHROME_STORE_INSTALL) {
       // The Chrome Web Store updates this install once it has reviewed the version, which can
       // come days after the GitHub release. The release page is not offered: an unpacked build
-      // from it would be a second extension beside this one, under its own id.
+      // from it would be a second extension beside this one, under its own id, and one without
+      // the Start button, which the launcher's host manifest grants the store's id alone.
       message = `A newer extension (${latest}) is out; the Chrome Web Store updates this one once it has reviewed that version, which can take days after the GitHub release`;
       showLater = true;
     } else if (decision.extension === "newer") {
-      // Firefox (START_AVAILABLE is the moz-extension: test) needs the signed .xpi, which the
-      // release gets once AMO has signed it: minutes after the tag, later for a version AMO holds
-      // back. Until the check sees it, the release page has nothing to install, so it is not
-      // offered. Chrome here is an unpacked build (a store install took the branch above): its
-      // zip is there from the start, and no listing ever updates it, so none is named.
-      const signed = !START_AVAILABLE || !!(updateInfo.latest && updateInfo.latest.xpi);
-      if (!START_AVAILABLE) message = `A newer extension (${latest}) is on the release page; an unpacked build does not update itself`;
+      // Firefox needs the signed .xpi, which the release gets once AMO has signed it: minutes
+      // after the tag, later for a version AMO holds back. Until the check sees it, the release
+      // page has nothing to install, so it is not offered. Chrome here is an unpacked build (a
+      // store install took the branch above): its zip is there from the start, and no listing
+      // ever updates it, so none is named.
+      const signed = !ON_FIREFOX || !!(updateInfo.latest && updateInfo.latest.xpi);
+      if (!ON_FIREFOX) message = `A newer extension (${latest}) is on the release page; an unpacked build does not update itself`;
       else if (signed) message = `A newer extension (${latest}) is on the release page (the addons.mozilla.org listing may get it later)`;
       else message = `A newer extension (${latest}) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it`;
       showRelease = signed;
@@ -1002,7 +1000,7 @@ async function init() {
   setupPermissionBanner();
   // Chrome allows four suggested shortcuts and the build drops the fifth, Alt+Shift+H, so the
   // popup does not advertise a key that is not there (chrome://extensions/shortcuts sets one).
-  document.getElementById("statusBadgeKey").classList.toggle("hidden", !START_AVAILABLE);
+  document.getElementById("statusBadgeKey").classList.toggle("hidden", !ON_FIREFOX);
   const settings = await browser.runtime.sendMessage({ type: "getSettings" });
   // The deck select has no option for the stored deck until Anki lists it, and a select given a
   // value it has no option for shows none; the option comes first, the value after.
